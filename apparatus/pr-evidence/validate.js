@@ -39,7 +39,11 @@ const validateSchema = ajv.compile(schema);
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 const BLOCKING_SEVERITIES = new Set(['P0', 'P1']);
-const DISALLOWED_PRODUCERS = new Set(['Builder', 'Fixer']);
+// The one independent code-review role Protocol v2 "Agent organisation"
+// actually names ("Codex Reviewer: independent read-only engineering
+// review"). An allow-list, not a deny-list: any producer that is not
+// this exact role is rejected, not just "Builder"/"Fixer" by name.
+const ALLOWED_REVIEW_PRODUCERS = new Set(['Codex Reviewer']);
 
 function isValidSha(value) {
   return typeof value === 'string' && SHA_RE.test(value);
@@ -81,8 +85,8 @@ function checkOfflinePolicy(pkg) {
     errors.push('REVIEW_NOT_PASS: review.verdict is "' + (pkg.review && pkg.review.verdict) + '".');
   }
   const producer = pkg.review && pkg.review.provenance && pkg.review.provenance.producer;
-  if (isNonEmptyString(producer) && DISALLOWED_PRODUCERS.has(producer)) {
-    errors.push('SELF_ATTESTED_PRODUCER: review.provenance.producer is "' + producer + '".');
+  if (!isNonEmptyString(producer) || !ALLOWED_REVIEW_PRODUCERS.has(producer)) {
+    errors.push('SELF_ATTESTED_OR_UNKNOWN_PRODUCER: review.provenance.producer is "' + producer + '".');
   }
 
   let accessibilityFindings = [];

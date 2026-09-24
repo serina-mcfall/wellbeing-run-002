@@ -1,0 +1,13 @@
+✔ a real task_id resolves to its declared fields (1.923591ms)
+✔ a task with multiple dependencies resolves them all (0.277079ms)
+✔ an unknown task_id fails closed as NO_SUCH_TASK (0.922131ms)
+✔ missing repoRoot on the low-level function fails closed (0.268338ms)
+✔ an empty task_id fails closed (0.146175ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 77.844451

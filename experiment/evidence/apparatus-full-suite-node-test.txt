@@ -1,0 +1,57 @@
+
+> test
+> node --test
+
+Preparing worktree (checking out 'run-002/task-abc')
+fatal: Needed a single revision
+✔ positive: a real run-002/ branch resolves to the SHA git itself reports (9.314677ms)
+✔ positive: a real registered worktree resolves to its own HEAD SHA (12.238337ms)
+✔ a head change makes an earlier resolved SHA stale (19.162888ms)
+✔ reject: "main" is not under the task-branch prefix (0.223199ms)
+✔ reject: an unknown ref under the prefix does not exist (4.066614ms)
+✔ reject: a symlink inside worktree_dir pointing outside it is an escape (0.859108ms)
+✔ reject: an ordinary subdirectory of worktree_dir that git never registered (5.345653ms)
+✔ reject: a real git worktree that belongs to a different repository (35.98863ms)
+✔ a real task_id resolves to its declared fields (2.537681ms)
+✔ a task with multiple dependencies resolves them all (0.290448ms)
+✔ an unknown task_id fails closed as NO_SUCH_TASK (0.163766ms)
+✔ missing repoRoot on the low-level function fails closed (0.143252ms)
+✔ an empty task_id fails closed (0.188479ms)
+✔ positive: a structurally clean package is policyValid with no errors (9.711443ms)
+✔ SCHEMA_INVALID: a required field missing entirely fails schema validation (0.428652ms)
+✔ INTERNAL_SHA_MISMATCH: ci.sha disagreeing with head_sha is rejected (0.329814ms)
+✔ CI_NOT_PASS: a submitted ci.status other than PASS is rejected (0.168511ms)
+✔ REVIEW_NOT_PASS: a submitted review.verdict other than REVIEW_PASS is rejected (0.144472ms)
+✔ SELF_ATTESTED_OR_UNKNOWN_PRODUCER: a review producer named Builder is rejected (0.205601ms)
+✔ SELF_ATTESTED_OR_UNKNOWN_PRODUCER: an unrecognized producer name is rejected, not only Builder/Fixer (0.196465ms)
+✔ INFERRED_APPLICABILITY: accessibility.applicable missing entirely is rejected (0.194237ms)
+✔ INFERRED_APPLICABILITY: applicable=false without not_applicable_reason is rejected (0.421049ms)
+✔ UNRESOLVED_BLOCKING_FINDING: an OPEN P1 review finding blocks (0.579349ms)
+✔ UNRESOLVED_BLOCKING_FINDING: a NON_FAILURE accessibility finding at P1 still blocks (no floor needed) (0.5241ms)
+✔ INVALID_ACCESSIBILITY_EVIDENCE: a FAILURE finding fails closed without a requirement registry (0.185526ms)
+✔ no classification/citation/rationale at all is INVALID and blocks merge (1.516705ms)
+✔ especially: Jev P2 accessibility failure is raised to P1 and blocks merge (0.276174ms)
+✔ a failure already P0 stays P0 (floor raises, never caps) and blocks merge (0.131146ms)
+✔ a valid NON_FAILURE P3 recommendation does not block merge (0.118997ms)
+✔ a valid NON_FAILURE P2 recommendation also does not independently block merge (0.10171ms)
+✔ contradictory: FAILURE with a non_failure_rationale is INVALID (0.147792ms)
+✔ contradictory: NON_FAILURE with an unmet_requirement is INVALID (0.496779ms)
+✔ an arbitrary nonempty citation not in the known registry is INVALID (0.517822ms)
+✔ a citation fails closed when no registry is supplied at all (0.227818ms)
+✔ fails closed on an unknown classification value instead of throwing (0.215152ms)
+✔ fails closed on an unknown severity value instead of throwing (0.124983ms)
+✔ fails closed on a malformed (non-object) finding instead of throwing (0.135529ms)
+✔ the real config/tasks.json graph is valid: 9 tasks, no errors (4.26921ms)
+✔ a dangling dependency is rejected (0.413697ms)
+✔ a self-dependency is rejected (0.180882ms)
+✔ a two-node cycle is rejected (0.196944ms)
+✔ a duplicate task_id is rejected (0.169408ms)
+✔ a valid linear chain passes with no errors (0.191755ms)
+ℹ tests 43
+ℹ suites 0
+ℹ pass 43
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 267.256215

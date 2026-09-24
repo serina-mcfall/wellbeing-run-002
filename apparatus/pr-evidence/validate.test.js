@@ -97,12 +97,20 @@ test('REVIEW_NOT_PASS: a submitted review.verdict other than REVIEW_PASS is reje
   assert.ok(result.errors.some((e) => e.startsWith('REVIEW_NOT_PASS')));
 });
 
-test('SELF_ATTESTED_PRODUCER: a review producer named Builder is rejected', () => {
+test('SELF_ATTESTED_OR_UNKNOWN_PRODUCER: a review producer named Builder is rejected', () => {
   const pkg = basePkg();
   pkg.review.provenance.producer = 'Builder';
   const result = checkOfflinePolicy(pkg);
   assert.equal(result.policyValid, false);
   assert.ok(result.errors.some((e) => e.includes('Builder')));
+});
+
+test('SELF_ATTESTED_OR_UNKNOWN_PRODUCER: an unrecognized producer name is rejected, not only Builder/Fixer', () => {
+  const pkg = basePkg();
+  pkg.review.provenance.producer = 'Some Made Up Reviewer';
+  const result = checkOfflinePolicy(pkg);
+  assert.equal(result.policyValid, false);
+  assert.ok(result.errors.some((e) => e.startsWith('SELF_ATTESTED_OR_UNKNOWN_PRODUCER')));
 });
 
 test('INFERRED_APPLICABILITY: accessibility.applicable missing entirely is rejected', () => {
