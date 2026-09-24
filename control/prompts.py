@@ -82,5 +82,19 @@ def reviewer(task: dict, pr_number: int, branch: str, repo: str, cycle: int,
     )
 
 
+def security(task: dict, pr_number: int, branch: str, repo: str, cycle: int,
+             evidence: str = "") -> str:
+    return render(
+        "security",
+        task_id=task["id"],
+        task_title=task["title"],
+        pr=pr_number,
+        branch=branch,
+        repo=repo,
+        cycle=cycle,
+        evidence=evidence or "- none gathered for this commit",
+    )
+
+
 def observer(evidence_path: str, window_label: str) -> str:
     return render("observer", evidence_path=evidence_path, window=window_label)

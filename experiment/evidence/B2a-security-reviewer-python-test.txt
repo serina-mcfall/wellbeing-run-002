@@ -1,0 +1,14 @@
+test_security_prompt_identifies_itself_as_security_reviewer (tests.test_security_reviewer.TestSecurityPromptRendering.test_security_prompt_identifies_itself_as_security_reviewer) ... ok
+test_security_prompt_renders_with_no_placeholders_left (tests.test_security_reviewer.TestSecurityPromptRendering.test_security_prompt_renders_with_no_placeholders_left) ... ok
+test_security_prompt_states_it_is_not_the_merge_authority (tests.test_security_reviewer.TestSecurityPromptRendering.test_security_prompt_states_it_is_not_the_merge_authority) ... ok
+test_security_prompt_uses_its_own_verdict_vocabulary (tests.test_security_reviewer.TestSecurityPromptRendering.test_security_prompt_uses_its_own_verdict_vocabulary) ... ok
+test_security_is_its_own_configured_role (tests.test_security_reviewer.TestSecurityRoleConfig.test_security_is_its_own_configured_role)
+Security is a separately-keyed role entry, not an alias or a ... ok
+test_security_role_exists_in_real_config (tests.test_security_reviewer.TestSecurityRoleConfig.test_security_role_exists_in_real_config) ... ok
+test_canonical_severity_semantics_are_present (tests.test_security_reviewer.TestSecurityRoleContractDoc.test_canonical_severity_semantics_are_present) ... ok
+test_it_is_not_described_as_an_acceptance_authority (tests.test_security_reviewer.TestSecurityRoleContractDoc.test_it_is_not_described_as_an_acceptance_authority) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.005s
+
+OK
