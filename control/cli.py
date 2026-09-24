@@ -168,8 +168,8 @@ def cmd_start(args) -> int:
                       activity_class="ORCHESTRATION", state_after="RUNNING",
                       metadata_redacted=baseline)
         tele.span("experiment.started",
-                  {"run001.t_zero": started_at, "run001.baseline_sha": head,
-                   "run001.protocol": cfg.protocol_version})
+                  {"run002.t_zero": started_at, "run002.baseline_sha": head,
+                   "run002.protocol": cfg.protocol_version})
 
         for task in doc["tasks"].values():
             if state_mod.dependencies_met(doc, task) and task["state"] == "QUEUED":

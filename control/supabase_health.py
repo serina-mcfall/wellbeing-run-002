@@ -18,7 +18,7 @@ import os
 from . import http
 
 # A table name no migration will ever create.
-PROBE_TABLE = "run001_healthcheck_absent"
+PROBE_TABLE = "run002_healthcheck_absent"
 
 
 def check(timeout: float = 15.0) -> dict:

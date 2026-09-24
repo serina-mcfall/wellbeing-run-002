@@ -1,0 +1,44 @@
+Pre-T+00 reconciliation finding: residual run001/run-001 operational
+identity leaks
+Discovered: 2026-09-25, while reading control/supervisor.py for D1.
+
+The Commit-2 residual identity scan searched for the hyphenated pattern
+"run-001" only, and correctly found and fixed every hit of that exact
+string. It did not search for "run001" (no hyphen), a second, distinct
+identity pattern — so these operational hits were missed at the time.
+
+All operational locations corrected in this commit (real external
+services: OTLP/Langfuse telemetry and a real Supabase project):
+
+  control/cli.py:171-172        "run001.t_zero", "run001.baseline_sha",
+                                 "run001.protocol" -> run002.*
+                                 (T+00 span)
+  control/preflight.py:317      "run001.gate", "run001.phase" -> run002.*
+                                 (preflight gate span)
+  control/supervisor.py:455-458 "run001.task", "run001.role",
+                                 "run001.outcome", "run001.worker"
+                                 -> run002.* (worker-finished span)
+  control/supervisor.py:1034    "run001.phase" -> run002.phase
+                                 (T+24 freeze span)
+  control/supabase_health.py:21 PROBE_TABLE
+                                 "run001_healthcheck_absent" ->
+                                 "run002_healthcheck_absent"
+                                 (REST path segment sent to a real
+                                 Supabase project as a deliberately
+                                 nonexistent table name)
+
+Final residual scan result, full operational surface (control/, bin/,
+agents/, prompts/, config/experiment.json, .github/workflows/,
+scripts/, tests/, PROTOCOL-VERSION.md):
+
+  run001 (no hyphen): 0 operational hits remaining anywhere.
+
+  run-001 (hyphenated): only the four previously classified harmless
+    test-fixture literals remain, unchanged, in
+    tests/test_control_plane.py, test_dispatch_invariant.py,
+    test_fixer_dispatch.py, test_stale_detection.py — arbitrary
+    state.initial_document("run-001", "v1.0") fixture arguments.
+
+Full inherited Python suite after all five fixes: 135/135 pass, no
+regressions. Evidence: experiment/evidence/
+run001-otlp-key-fix-full-suite.txt.

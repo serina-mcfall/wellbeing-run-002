@@ -314,7 +314,7 @@ class Preflight:
     def gate_langfuse(self) -> Gate:
         result = self.telemetry.span(
             "preflight.trace",
-            {"run001.gate": "langfuse_otel", "run001.phase": "PREFLIGHT"},
+            {"run002.gate": "langfuse_otel", "run002.phase": "PREFLIGHT"},
             duration_ms=1.0,
         )
         return Gate("langfuse_otel_trace", True, bool(result.get("ok")),

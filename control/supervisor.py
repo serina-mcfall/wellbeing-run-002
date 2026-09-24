@@ -452,10 +452,10 @@ class Supervisor:
             self.telemetry.span(
                 f"worker.{meta.get('role')}",
                 {
-                    "run001.task": task_id or "",
-                    "run001.role": meta.get("role") or "",
-                    "run001.outcome": status.get("outcome") or "",
-                    "run001.worker": worker,
+                    "run002.task": task_id or "",
+                    "run002.role": meta.get("role") or "",
+                    "run002.outcome": status.get("outcome") or "",
+                    "run002.worker": worker,
                 },
                 duration_ms=status.get("duration_ms") or 0,
                 error=status.get("outcome") != "SUCCESS",
@@ -1031,7 +1031,7 @@ class Supervisor:
         doc["workers"].clear()
         self.log("EXPERIMENT_FROZEN", outcome="FROZEN", activity_class="ORCHESTRATION",
                  metadata_redacted=snapshot)
-        self.telemetry.span("experiment.frozen", {"run001.phase": "FROZEN"})
+        self.telemetry.span("experiment.frozen", {"run002.phase": "FROZEN"})
         self.notify_out(doc, notify.INFO, "EXPERIMENT_FROZEN — T+24 reached",
                         "Dispatch stopped, merges blocked, state snapshotted. "
                         "Unfinished work is left unfinished by design.")
