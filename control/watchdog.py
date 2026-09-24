@@ -18,7 +18,9 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import clock, config, ledger as ledger_mod, notify, proc
+from . import clock, config, ledger as ledger_mod, notify, proc, reconcile
+from . import state as state_mod, reconcile
+from . import state as state_mod
 
 CHECK_SECONDS = 30
 
@@ -104,6 +106,69 @@ def start_supervisor() -> int | None:
     return process.pid if process.poll() is None else None
 
 
+def reconcile_worker_state(cfg, ledger, notifier, *, store=None) -> None:
+    """Deterministic policy acting on control/reconcile.py's facts: one
+    dangerous finding is sufficient to freeze the task it names. Never
+    repairs bookkeeping, never restarts or kills the worker, never
+    unfreezes a task - only a human decision from HUMAN_REQUIRED does
+    that (see control/state.py's FROZEN comment). Independent of whether
+    Supervisor itself is currently healthy: a healthy Supervisor process
+    can still be carrying stale/wrong bookkeeping from earlier.
+
+    This freeze is the Watchdog's own autonomous control-plane action, not
+    a human doing anything - human_intervention is False here, matching
+    the existing convention (supervisor.py: human_intervention is True
+    only when the notification severity is HUMAN_REQUIRED; this uses
+    CRITICAL). A later human decision that resolves FROZEN ->
+    HUMAN_REQUIRED, or whatever a human does after that, is recorded as
+    human intervention separately, when it actually happens.
+
+    `store` is injectable for testing; production callers omit it and get
+    the real experiment state.
+    """
+    store = store or state_mod.Store(tz=cfg.timezone)
+    if not store.exists():
+        return  # no experiment state yet (e.g. pre-T+00) - nothing to reconcile
+
+    try:
+        with store.transaction() as doc:
+            findings = reconcile.reconcile(doc, tz=cfg.timezone)
+            already_handled: set[str] = set()
+            for finding in findings:
+                if not finding.dangerous or finding.task_id is None:
+                    continue
+                if finding.task_id in already_handled:
+                    continue  # an earlier finding this pass already froze this task
+                task = doc["tasks"].get(finding.task_id)
+                if task is None or task.get("state") not in reconcile.RECONCILABLE_STATES:
+                    continue  # state moved on since reconcile() read it; act on current fact
+                state_before = task["state"]
+                try:
+                    state_mod.transition(
+                        doc, finding.task_id, "FROZEN",
+                        f"STATE_INVARIANT_VIOLATION: {finding.check_id}: {finding.evidence}",
+                        cfg.timezone,
+                    )
+                except state_mod.TransitionError:
+                    continue
+                already_handled.add(finding.task_id)
+                ledger.append(
+                    "STATE_INVARIANT_VIOLATION", task_id=finding.task_id,
+                    state_before=state_before, state_after="FROZEN",
+                    human_intervention=False, activity_class="ESCALATION", outcome="FROZEN",
+                    metadata_redacted={"check_id": finding.check_id, "worker": finding.worker,
+                                       "evidence": finding.evidence},
+                )
+                notifier.send(
+                    notify.CRITICAL, f"{finding.task_id} frozen: state invariant violation",
+                    f"{finding.check_id}: {finding.evidence}",
+                )
+    except Exception as exc:  # noqa: BLE001 - a bug here must not take down the watchdog's
+        # primary supervisor-liveness duty; it must also never fail silently.
+        ledger.append("RECONCILE_ERROR", outcome="ERROR", activity_class="ORCHESTRATION",
+                      metadata_redacted={"error": str(exc)})
+
+
 def main() -> int:
     cfg = config.load()
     config.ensure_runtime_dirs()
@@ -118,6 +183,7 @@ def main() -> int:
 
     while True:
         proc.reap_children()
+        reconcile_worker_state(cfg, ledger, notifier)
         pid = supervisor_pid()
         healthy = alive(pid) and heartbeat_fresh(cfg.timezone, cfg.heartbeat_stale_seconds)
 
