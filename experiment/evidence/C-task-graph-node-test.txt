@@ -1,0 +1,17 @@
+✔ the real config/tasks.json graph is valid: 9 tasks, no errors (2.880473ms)
+✔ a dangling dependency is rejected (1.225424ms)
+✔ a self-dependency is rejected (0.280399ms)
+✔ a two-node cycle is rejected (0.13584ms)
+✔ a duplicate task_id is rejected (0.12057ms)
+✔ a valid linear chain passes with no errors (1.409767ms)
+✔ an empty task graph fails closed, not silently ok (0.518431ms)
+✔ a missing depends_on field is rejected, not treated as dependency-free (0.246605ms)
+✔ a non-array depends_on value is rejected, not treated as dependency-free (0.16218ms)
+ℹ tests 9
+ℹ suites 0
+ℹ pass 9
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 72.933948

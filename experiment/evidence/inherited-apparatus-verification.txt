@@ -1,0 +1,47 @@
+Inherited-apparatus verification — pre-T+00 evidence
+Recorded: 2026-09-25, session following Commit 2 (74d7d89)
+
+Context
+-------
+Source SHA (Run 001, read-only reference): 6b742d1823aad02669c4a3f21a1df9c2f64f0eea
+Commit 1 (provenance import, Run 002):      327f33a4b50203ba2bf623678deab38f1c1258b2
+Commit 2 (identity/isolation reconciliation, Run 002): 74d7d89
+Verification run against: HEAD 74d7d89, before any further change.
+
+Python control plane
+---------------------
+Command: python3 -m unittest discover -s tests -v
+Python:  3.12.3
+Result:  Ran 110 tests in 1.657s — OK
+         110/110 PASS, 0 failed, 0 errors, 0 skipped.
+
+Existing Node apparatus
+------------------------
+Command: npm test (in apparatus/)
+Result:  tests 46, pass 46, fail 0, cancelled 0, skipped 0, todo 0.
+         46/46 PASS.
+
+External providers / network / live Run 001 resources
+------------------------------------------------------
+None touched. 5 of 6 Python test files mock every external call
+(unittest.mock). The sixth (tests/test_control_plane.py) invokes
+subprocess exactly once, to spawn a local `python -c "pass"` child
+as a zombie process for TestProcessLiveness — no network, no
+provider credential use, no contact with Run 001 in any form.
+
+Runtime-state side effect
+--------------------------
+Two empty directories were created as an incidental side effect of
+directory-creation calls inside control/workers.py and
+control/supervisor.py that a couple of the dispatch tests exercise
+directly (the tmux/git subprocess calls around them are mocked; the
+plain Path.mkdir() calls are not):
+  .runtime/workers
+  .runtime/observer
+Both are empty. No ledger.jsonl, no state.json, no heartbeat file,
+no experiment data of any kind was written. Both paths are covered
+by .gitignore's existing `.runtime/` pattern and were never staged
+or committed.
+
+No experiment state, ledger, heartbeat, or T+00 was created.
+T+00 remains unrecorded.

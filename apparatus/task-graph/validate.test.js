@@ -59,3 +59,25 @@ test('a valid linear chain passes with no errors', () => {
   assert.deepEqual(result.errors, []);
   assert.equal(result.taskCount, 3);
 });
+
+test('an empty task graph fails closed, not silently ok', () => {
+  const result = validateTaskGraph({ tasks: [] });
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.startsWith('EMPTY_TASK_GRAPH')));
+});
+
+test('a missing depends_on field is rejected, not treated as dependency-free', () => {
+  const result = validateTaskGraph({
+    tasks: [{ id: 'A' }],
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.startsWith('MALFORMED_DEPENDENCIES')));
+});
+
+test('a non-array depends_on value is rejected, not treated as dependency-free', () => {
+  const result = validateTaskGraph({
+    tasks: [{ id: 'A', depends_on: 'TASK-001' }],
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.startsWith('MALFORMED_DEPENDENCIES')));
+});

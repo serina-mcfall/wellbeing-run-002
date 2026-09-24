@@ -37,6 +37,14 @@ function validateTaskGraph(options) {
     }
   }
 
+  if (tasks.length === 0) {
+    return {
+      ok: false,
+      errors: ['EMPTY_TASK_GRAPH: no tasks found — this may indicate a malformed or missing tasks array, not a genuinely empty graph.'],
+      taskCount: 0,
+    };
+  }
+
   const errors = [];
   const byId = new Map();
   for (const t of tasks) {
@@ -51,8 +59,15 @@ function validateTaskGraph(options) {
   }
 
   for (const t of byId.values()) {
-    const deps = Array.isArray(t.depends_on) ? t.depends_on : [];
-    for (const dep of deps) {
+    if (!Array.isArray(t.depends_on)) {
+      errors.push('MALFORMED_DEPENDENCIES: "' + t.id + '".depends_on is missing or not an array.');
+      continue;
+    }
+    for (const dep of t.depends_on) {
+      if (typeof dep !== 'string' || dep.trim().length === 0) {
+        errors.push('MALFORMED_DEPENDENCY_ENTRY: "' + t.id + '" has a non-string or empty dependency entry.');
+        continue;
+      }
       if (dep === t.id) {
         errors.push('SELF_DEPENDENCY: "' + t.id + '" depends on itself.');
       } else if (!byId.has(dep)) {
