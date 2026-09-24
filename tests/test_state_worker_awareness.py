@@ -124,5 +124,75 @@ class TestWorkerAwarenessSignalsStayDistinct(unittest.TestCase):
         self.assertFalse(hasattr(state, "worker_display_phase"))
 
 
+class TestFrozenTransitions(unittest.TestCase):
+    """D2: FROZEN is legal only from the states where supervisor.py's own
+    dispatch code guarantees a live worker record exists for the task's
+    entire time in that state (ASSIGNED, ACTIVE, REVIEW, FIX_REQUIRED),
+    never from a state where "no live worker" is normal (PR_OPEN,
+    WAITING_CI, WAITING_EVIDENCE, MERGE_READY), and it only ever escalates
+    to HUMAN_REQUIRED - never a direct, automatic recovery."""
+
+    def test_assigned_to_frozen_is_legal(self):
+        doc = _doc_with_task("ASSIGNED")
+        old, new = state.transition(doc, "TASK-001", "FROZEN",
+                                    "dead PID claimed alive", "Pacific/Auckland")
+        self.assertEqual((old, new), ("ASSIGNED", "FROZEN"))
+
+    def test_active_to_frozen_is_legal(self):
+        doc = _doc_with_task("ACTIVE")
+        old, new = state.transition(doc, "TASK-001", "FROZEN",
+                                    "worktree not registered", "Pacific/Auckland")
+        self.assertEqual((old, new), ("ACTIVE", "FROZEN"))
+
+    def test_review_to_frozen_is_legal(self):
+        doc = _doc_with_task("REVIEW")
+        old, new = state.transition(doc, "TASK-001", "FROZEN",
+                                    "worker/task backref mismatch", "Pacific/Auckland")
+        self.assertEqual((old, new), ("REVIEW", "FROZEN"))
+
+    def test_fix_required_to_frozen_is_legal(self):
+        doc = _doc_with_task("FIX_REQUIRED")
+        old, new = state.transition(doc, "TASK-001", "FROZEN",
+                                    "dead PID claimed alive", "Pacific/Auckland")
+        self.assertEqual((old, new), ("FIX_REQUIRED", "FROZEN"))
+
+    def test_pr_open_to_frozen_is_not_legal(self):
+        """PR_OPEN routinely has no live worker record - that is normal,
+        not a violation, so it must not be a FROZEN source."""
+        doc = _doc_with_task("PR_OPEN")
+        with self.assertRaises(state.TransitionError):
+            state.transition(doc, "TASK-001", "FROZEN", "spurious", "Pacific/Auckland")
+
+    def test_waiting_evidence_to_frozen_is_not_legal(self):
+        doc = _doc_with_task("WAITING_EVIDENCE")
+        with self.assertRaises(state.TransitionError):
+            state.transition(doc, "TASK-001", "FROZEN", "spurious", "Pacific/Auckland")
+
+    def test_merge_ready_to_frozen_is_not_legal(self):
+        doc = _doc_with_task("MERGE_READY")
+        with self.assertRaises(state.TransitionError):
+            state.transition(doc, "TASK-001", "FROZEN", "spurious", "Pacific/Auckland")
+
+    def test_frozen_escalates_only_to_human_required(self):
+        doc = _doc_with_task("ACTIVE")
+        state.transition(doc, "TASK-001", "FROZEN", "dead PID claimed alive",
+                         "Pacific/Auckland")
+        old, new = state.transition(doc, "TASK-001", "HUMAN_REQUIRED",
+                                    "human resolving the freeze", "Pacific/Auckland")
+        self.assertEqual((old, new), ("FROZEN", "HUMAN_REQUIRED"))
+
+    def test_frozen_cannot_be_automatically_unfrozen(self):
+        """No deterministic path recovers a frozen task directly - PID/
+        heartbeat looking healthy again later does not matter."""
+        doc = _doc_with_task("ACTIVE")
+        state.transition(doc, "TASK-001", "FROZEN", "dead PID claimed alive",
+                         "Pacific/Auckland")
+        for target in ("READY", "ACTIVE", "ASSIGNED", "COMPLETE", "MERGED"):
+            with self.subTest(target=target):
+                with self.assertRaises(state.TransitionError):
+                    state.transition(doc, "TASK-001", target,
+                                     "reality looks healthy again", "Pacific/Auckland")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -45,6 +45,22 @@ TASK_STATES = (
     "WAITING_PROVIDER_RESET",
     "WAITING_DB_LOCK",
     "HUMAN_REQUIRED",
+    # Protocol v2 "State machine" names FROZEN as one of four exception
+    # states (HUMAN_REQUIRED, BLOCKED, FAILED, FROZEN), but nothing built
+    # it until D2 (Watchdog reconciliation): "Dangerous mismatch freezes
+    # the affected task and emits STATE_INVARIANT_VIOLATION." Distinct
+    # from the other three: FAILED means the WORK failed; BLOCKED means
+    # an ordinary, expected condition (a dependency/lock); HUMAN_REQUIRED
+    # is used for many unrelated escalations elsewhere. FROZEN means
+    # Supervisor's own bookkeeping was independently caught contradicting
+    # observable reality - a control-plane integrity break, regardless of
+    # whether the underlying work is good or bad. Terminal for
+    # deterministic automation: only FROZEN -> HUMAN_REQUIRED is legal,
+    # mirroring FAILED -> HUMAN_REQUIRED; nothing in this codebase moves a
+    # task out of FROZEN automatically, even if PID/heartbeat reality
+    # later looks healthy again. A human decides the real next state from
+    # HUMAN_REQUIRED, same as any other exception state.
+    "FROZEN",
 )
 
 # Worker-level phase vocabulary frozen by Protocol v2 ("Worker awareness").
@@ -78,10 +94,10 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
         {"ASSIGNED", "QUEUED", "BLOCKED", "WAITING_PROVIDER_RESET", "WAITING_DB_LOCK",
          "HUMAN_REQUIRED", "FAILED"}
     ),
-    "ASSIGNED": frozenset({"ACTIVE", "READY", "STALE", "FAILED", "HUMAN_REQUIRED"}),
+    "ASSIGNED": frozenset({"ACTIVE", "READY", "STALE", "FAILED", "HUMAN_REQUIRED", "FROZEN"}),
     "ACTIVE": frozenset(
         {"PR_OPEN", "STALE", "FAILED", "BLOCKED", "READY", "WAITING_PROVIDER_RESET",
-         "WAITING_DB_LOCK", "HUMAN_REQUIRED"}
+         "WAITING_DB_LOCK", "HUMAN_REQUIRED", "FROZEN"}
     ),
     "PR_OPEN": frozenset({"REVIEW", "WAITING_CI", "WAITING_EVIDENCE", "STALE", "FAILED",
                           "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET"}),
@@ -91,10 +107,11 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
                                    "WAITING_PROVIDER_RESET"}),
     "REVIEW": frozenset(
         {"FIX_REQUIRED", "MERGE_READY", "MERGED", "PR_OPEN", "STALE", "FAILED",
-         "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET"}
+         "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET", "FROZEN"}
     ),
     "FIX_REQUIRED": frozenset(
-        {"REVIEW", "PR_OPEN", "STALE", "FAILED", "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET"}
+        {"REVIEW", "PR_OPEN", "STALE", "FAILED", "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET",
+         "FROZEN"}
     ),
     "MERGE_READY": frozenset({"MERGED", "REVIEW", "STALE", "FAILED", "HUMAN_REQUIRED"}),
     "MERGED": frozenset({"COMPLETE", "HUMAN_REQUIRED"}),
@@ -106,6 +123,24 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
                                          "HUMAN_REQUIRED", "FAILED"}),
     "WAITING_DB_LOCK": frozenset({"READY", "ACTIVE", "HUMAN_REQUIRED", "FAILED"}),
     "HUMAN_REQUIRED": frozenset(set(TASK_STATES)),
+    # Terminal for deterministic automation: only a human-driven escalation
+    # out, never a direct recovery back to READY/ACTIVE/etc. Inbound edges
+    # are deliberately limited to ASSIGNED/ACTIVE/REVIEW/FIX_REQUIRED - the
+    # only states where supervisor.py's own dispatch code guarantees a live
+    # doc["workers"] record exists for the task's entire time in that state
+    # (verified directly: task["worker"] is set and the worker record is
+    # created in the same operation that enters ASSIGNED/REVIEW/FIX_REQUIRED,
+    # and is never cleared afterward). Every other in-flight state (PR_OPEN,
+    # WAITING_CI, WAITING_EVIDENCE, MERGE_READY) routinely has no live worker
+    # record as NORMAL behaviour - the prior worker has already been reaped
+    # and a new one not yet dispatched - so "no live worker" there is not a
+    # violation and must not freeze the task. STALE already has its own
+    # correct, separate mechanism (DEV-002) that removes the worker as part
+    # of the same recycling action, leaving nothing for D2 to independently
+    # catch. COMPLETE/MERGED are excluded outright: Protocol v2 does not
+    # require post-completion reconciliation, so a completed task is never
+    # mutated over stale historical worker/process evidence.
+    "FROZEN": frozenset({"HUMAN_REQUIRED"}),
 }
 
 
