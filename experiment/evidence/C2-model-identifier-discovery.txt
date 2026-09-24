@@ -1,0 +1,50 @@
+C2 — model identifier discovery (read-only, before any config write)
+Recorded: 2026-09-25
+
+Claude: identifiers stated directly and authoritatively by this session's
+own harness/environment (not guessed, not inferred from a version
+string):
+  Sonnet 5  -> claude-sonnet-5
+  Opus 5    -> claude-opus-5
+  Fable 5   -> claude-fable-5
+  Haiku 4.5 -> claude-haiku-4-5-20251001
+
+Codex: `codex --version` -> codex-cli 0.155.1. Read the allow-listed,
+non-credential config file ~/.codex/config.toml (per this session's
+credential-handling rule, which explicitly names that exact path as
+safe to read). It sets no explicit default model override. Its
+[tui.model_availability_nux] table lists two models this installation
+has surfaced: "gpt-5.6-sol" and "gpt-6-astra". This is evidence of
+what Codex has seen, not a confirmed forced default, so neither is
+written into config as "the" model — reviewer.model stays null,
+matching Run 001's own precedent of using the tool's own default
+rather than an assumed override.
+
+Grok: out of scope for this correction (only Claude and Codex model
+identifiers were requested). observer.model stays null, unchanged.
+
+Config changes applied (config/experiment.json):
+  roles.builder.model            "sonnet" -> "claude-sonnet-5"
+  roles.builder.escalation_model "opus"   -> "claude-opus-5"
+  roles.fixer.model              "sonnet" -> "claude-sonnet-5"
+
+Not changed: roles.reviewer.model (null, unchanged), roles.observer.model
+(null, unchanged), roles.jev.model and roles.companion.{model,
+escalation_model} (already concrete OpenRouter model slugs, not CLI
+aliases — a different identifier namespace, not in scope for this
+correction).
+
+Not written anywhere: a config field for the exceptional "Fable" tier
+(claude-fable-5). Protocol v2 describes it as an exceptional escalation
+case, not a per-role default; no existing config field represents it,
+and none is invented here. Recorded here so the identifier is
+discovered and available whenever that field is actually needed.
+
+Sonnet-class remains the default Claude engineering tier for
+builder/fixer; escalation policy (one tier only, evidence-backed) is
+unchanged — only the literal identifier strings were resolved, not the
+policy.
+
+config/experiment.json validated as parseable JSON after the edit.
+No Python or Node code changed by this commit; the full inherited
+Python suite is unaffected (160/160, same as before this change).

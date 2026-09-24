@@ -31,13 +31,13 @@
   "roles": {
     "builder": {
       "provider": "claude",
-      "model": "sonnet",
-      "escalation_model": "opus",
+      "model": "claude-sonnet-5",
+      "escalation_model": "claude-opus-5",
       "effort": "medium"
     },
     "fixer": {
       "provider": "claude",
-      "model": "sonnet",
+      "model": "claude-sonnet-5",
       "effort": "medium"
     },
     "reviewer": {
