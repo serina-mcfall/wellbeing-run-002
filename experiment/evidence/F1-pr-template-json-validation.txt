@@ -1,0 +1,29 @@
+F1 — immutable PR template, formatting/syntax validation
+Recorded: 2026-09-25
+
+File: .github/PULL_REQUEST_TEMPLATE.md
+
+HTML comment balance:
+  open <!--  : 1
+  close -->  : 1
+
+Code fence balance: 2 markers (1 open, 1 close)
+
+Embedded machine-readable JSON block (protocol/PR-EVIDENCE-V2.schema.json
+shape) extracted directly from the file on disk and parsed:
+
+  python3 -c "
+  import re, json
+  text = open('.github/PULL_REQUEST_TEMPLATE.md').read()
+  m = re.search(r'```json\n(.*?)\n```', text, re.DOTALL)
+  assert m, 'no json fence found'
+  json.loads(m.group(1))
+  print('EMBEDDED JSON VALID')
+  "
+
+Result: EMBEDDED JSON VALID
+
+This is a documentation/template artefact — no Python or Node code
+changed, so the inherited control-plane suite is unaffected by this
+commit. Full suite is not re-run for this commit; the file is
+formatting/syntax evidence only.
