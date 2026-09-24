@@ -1,0 +1,51 @@
+Pre-T+00 finding: Accessibility Worker's automated evidence pipeline
+requires a new runtime dependency (AMBER approval, not yet given)
+Recorded: 2026-09-25
+
+B1 (Accessibility Worker/Reviewer) requires, per Protocol v2's
+"Accessibility gate": Playwright + axe, exact-SHA evidence, 375px
+responsive check, keyboard/focus order, overflow/clipping, reduced-
+motion/no-autoplay, and screenshot artifacts, in addition to the
+independent qualitative cognitive/sensory review.
+
+Checked this environment (read-only):
+  python3 -c "import playwright"  -> ModuleNotFoundError: no module
+    named 'playwright'
+  pip3 -> not on PATH in this environment
+
+guardrails/GUARDRAILS.md, "Anti-overengineering": "AMBER approval:
+new runtime dependency." Adding Playwright (a real pip package, plus
+downloading real browser binaries — a nontrivial, semi-irreversible
+environment change requiring network access) is exactly this
+category. It has not been added.
+
+What was built in this commit, without that dependency:
+  agents/ACCESSIBILITY.md  - role contract, canonical severity
+    semantics, explicit "not an acceptance authority" framing,
+    distinct identity from Codex Reviewer and Security Reviewer.
+  prompts/accessibility.md - the qualitative cognitive/sensory review
+    prompt only. It explicitly discloses, in its own text, that the
+    automated Playwright+axe evidence this role also requires is not
+    yet implemented, so a dispatched reviewer cannot claim automated
+    coverage it was not given.
+  config/experiment.json   - roles.accessibility entry (provider
+    "codex", model null — copies the reviewer/security precedent,
+    not a distinct vendor chosen to manufacture independence, per the
+    correction already applied to B2a).
+  tests/test_accessibility_reviewer.py - 9 tests, including one that
+    specifically guards against the prompt silently claiming
+    automated coverage it cannot perform.
+
+Not built, and why: control/accessibility.py (the actual browser
+driver) does not exist. Writing it without Playwright installed would
+either be non-functional stub code or would require making the
+dependency decision unilaterally. Building a dispatch/completion
+pipeline around a non-functional automated-evidence module would
+create exactly the kind of silently-incomplete capability already
+avoided in B2a (a worker that appears wired but cannot do its
+defining job). This is left for an explicit decision: approve adding
+Playwright (and, separately, downloading its browser binaries) as a
+new runtime dependency, or decide otherwise.
+
+Full inherited Python suite: 177/177 pass. No dependency was added;
+no browser was installed; nothing was downloaded.

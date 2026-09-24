@@ -1,0 +1,15 @@
+test_accessibility_prompt_discloses_the_automation_gap (tests.test_accessibility_reviewer.TestAccessibilityPromptRendering.test_accessibility_prompt_discloses_the_automation_gap)
+Must not silently claim automated coverage it cannot yet perform. ... ok
+test_accessibility_prompt_identifies_itself (tests.test_accessibility_reviewer.TestAccessibilityPromptRendering.test_accessibility_prompt_identifies_itself) ... ok
+test_accessibility_prompt_renders_with_no_placeholders_left (tests.test_accessibility_reviewer.TestAccessibilityPromptRendering.test_accessibility_prompt_renders_with_no_placeholders_left) ... ok
+test_accessibility_prompt_states_it_is_not_the_merge_authority (tests.test_accessibility_reviewer.TestAccessibilityPromptRendering.test_accessibility_prompt_states_it_is_not_the_merge_authority) ... ok
+test_accessibility_prompt_uses_its_own_verdict_vocabulary (tests.test_accessibility_reviewer.TestAccessibilityPromptRendering.test_accessibility_prompt_uses_its_own_verdict_vocabulary) ... ok
+test_accessibility_is_its_own_configured_role (tests.test_accessibility_reviewer.TestAccessibilityRoleConfig.test_accessibility_is_its_own_configured_role) ... ok
+test_accessibility_role_exists_in_real_config (tests.test_accessibility_reviewer.TestAccessibilityRoleConfig.test_accessibility_role_exists_in_real_config) ... ok
+test_canonical_severity_semantics_are_present (tests.test_accessibility_reviewer.TestAccessibilityRoleContractDoc.test_canonical_severity_semantics_are_present) ... ok
+test_it_is_not_described_as_an_acceptance_authority (tests.test_accessibility_reviewer.TestAccessibilityRoleContractDoc.test_it_is_not_described_as_an_acceptance_authority) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.004s
+
+OK

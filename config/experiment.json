@@ -50,6 +50,11 @@
       "model": null,
       "effort": "medium"
     },
+    "accessibility": {
+      "provider": "codex",
+      "model": null,
+      "effort": "medium"
+    },
     "observer": {
       "provider": "grok",
       "model": null,
