@@ -63,7 +63,7 @@ FIELDS = (
 
 class Ledger:
     def __init__(self, path: Path | None = None, tz: str = "Pacific/Auckland",
-                 experiment_id: str = "run-001") -> None:
+                 experiment_id: str = "run-002") -> None:
         self.path = path or config.LEDGER_PATH
         self.tz = tz
         self.experiment_id = experiment_id

@@ -1,6 +1,6 @@
 # Claude Builder — {{task_id}}
 
-You are a Builder in Experiment Run 001. Fresh context, one task, then stop.
+You are a Builder in Experiment Run 002. Fresh context, one task, then stop.
 
 ## Read first, in this order
 `AGENTS.md` → `experiment/EXPERIMENT.md` → `product/MVP.md` → `product/ARCHITECTURE.md`

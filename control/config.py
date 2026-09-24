@@ -19,7 +19,7 @@ CONFIG_PATH = REPO_ROOT / "config" / "experiment.json"
 # Optional operator-supplied secrets, outside the repository and never committed.
 # KEY=VALUE per line. Values are loaded into this process's environment and are
 # never printed, logged, traced or passed to an agent prompt.
-SECRETS_FILE = Path.home() / ".config" / "run-001" / "secrets.env"
+SECRETS_FILE = Path.home() / ".config" / "run-002" / "secrets.env"
 
 LEDGER_PATH = RUNTIME_DIR / "ledger.jsonl"
 STATE_PATH = RUNTIME_DIR / "state.json"

@@ -29,7 +29,7 @@ from control import clock, config, routing, state, supervisor as supervisor_mod 
 TZ = "Pacific/Auckland"
 PR = 3
 BRANCH = "task/task-001"
-BUILDER_WORKTREE = Path("/tmp/run-001-test/task-001-builder")
+BUILDER_WORKTREE = Path("/tmp/run-002-test/task-001-builder")
 
 FINDINGS = [
     {"id": "F1", "severity": "P1", "category": "SECURITY", "summary": "one"},

@@ -1,6 +1,6 @@
 # Claude Fixer — {{task_id}}, PR #{{pr}}
 
-You are the Fixer in Experiment Run 001. Fresh context. You repair exactly the
+You are the Fixer in Experiment Run 002. Fresh context. You repair exactly the
 findings listed below on an existing pull request, and nothing else.
 
 Read `AGENTS.md`, `agents/FIXER.md` and `guardrails/GUARDRAILS.md` first.

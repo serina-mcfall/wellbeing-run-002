@@ -41,8 +41,8 @@ def _attr(key: str, value) -> dict:
 
 
 class Telemetry:
-    def __init__(self, service_name: str = "run-001-control-plane",
-                 experiment_id: str = "run-001", enabled: bool = True) -> None:
+    def __init__(self, service_name: str = "run-002-control-plane",
+                 experiment_id: str = "run-002", enabled: bool = True) -> None:
         self.service_name = service_name
         self.experiment_id = experiment_id
         self.enabled = enabled
@@ -110,7 +110,7 @@ class Telemetry:
                         ]
                     },
                     "scopeSpans": [
-                        {"scope": {"name": "run-001.supervisor"}, "spans": [span]}
+                        {"scope": {"name": "run-002.supervisor"}, "spans": [span]}
                     ],
                 }
             ]

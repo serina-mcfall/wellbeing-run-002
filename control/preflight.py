@@ -77,9 +77,9 @@ class Preflight:
         version = (config.REPO_ROOT / "PROTOCOL-VERSION.md").read_text(encoding="utf-8")
         missing = [name for name in SPEC_FILES
                    if not (config.REPO_ROOT / name).exists()]
-        ok = "v1.0" in version and not missing
+        ok = "v2.0" in version and not missing
         return Gate("protocol_present", True, ok,
-                    "Protocol v1.0 and all specification files present" if ok
+                    "Protocol v2.0 and all specification files present" if ok
                     else f"missing: {', '.join(missing) or 'version marker'}",
                     {"missing": missing})
 
@@ -173,7 +173,7 @@ class Preflight:
         name = "preflight-claude"
         branch = "preflight/claude"
         text = (
-            "You are a preflight probe for Experiment Run 001. Do not change any file. "
+            "You are a preflight probe for Experiment Run 002. Do not change any file. "
             "Reply with exactly one line: PREFLIGHT_CLAUDE_OK"
         )
         prompt = config.WORKER_LOG_DIR / f"{name}.prompt.md"
@@ -229,14 +229,14 @@ class Preflight:
     def gate_codex_review(self) -> Gate:
         """Codex must review read-only and return a parseable verdict block."""
         prompt = (
-            "You are the independent Reviewer for Experiment Run 001, read-only.\n"
+            "You are the independent Reviewer for Experiment Run 002, read-only.\n"
             "This is a preflight self-check. Do not modify anything.\n"
             "Read PROTOCOL-VERSION.md in this repository and confirm it states "
-            "Protocol v1.0.\n"
+            "Protocol v2.0.\n"
             "Emit exactly one fenced json block as your final output, of this shape:\n"
             '```json\n{"verdict": "REVIEW_PASS", "gates": {"SCOPE": "PASS"}, '
             '"findings": [], "summary": "preflight read-only check"}\n```\n'
-            "Use REVIEW_FAIL with a finding if the protocol version is not v1.0."
+            "Use REVIEW_FAIL with a finding if the protocol version is not v2.0."
         )
         last = config.WORKER_LOG_DIR / "preflight-codex.last.txt"
         config.WORKER_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -260,7 +260,7 @@ class Preflight:
         prompt_path = config.OBSERVER_DIR / "preflight-prompt.md"
         config.OBSERVER_DIR.mkdir(parents=True, exist_ok=True)
         prompt_path.write_text(
-            "Read-only bounded observation probe for Experiment Run 001.\n"
+            "Read-only bounded observation probe for Experiment Run 002.\n"
             "Do not modify anything and do not use the web.\n"
             "State one FACT about this repository from `git log -1 --oneline`, "
             "then stop. Label it FACT.\n",
@@ -327,7 +327,7 @@ class Preflight:
                         "DISCORD_WEBHOOK_URL is not set in the environment")
         result = self.notifier.send(
             notify.INFO, "Preflight delivery check",
-            "Run 001 bootstrap is verifying phone delivery before T+00. "
+            "Run 002 bootstrap is verifying phone delivery before T+00. "
             "No action needed.", clock_label="T-pre",
         )
         return Gate("discord_delivery", True, bool(result.get("ok")),

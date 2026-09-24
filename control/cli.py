@@ -180,7 +180,7 @@ def cmd_start(args) -> int:
 
     notifier.send(
         notify.INFO, "EXPERIMENT_STARTED — T+00 recorded",
-        f"Run 001, Protocol {cfg.protocol_version}. Baseline {head[:12]}. "
+        f"Run 002, Protocol {cfg.protocol_version}. Baseline {head[:12]}. "
         f"24-hour clock started {started_at}. "
         f"Dependency-ready now: {', '.join(ready) or 'none'}. "
         f"Budget ceiling ${cfg.budget_usd:.2f} metered.",
@@ -267,7 +267,7 @@ def cmd_supervisor(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="ctl", description="Run 001 control plane")
+    parser = argparse.ArgumentParser(prog="ctl", description="Run 002 control plane")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_init = sub.add_parser("init", help="initialise runtime state and task graph")

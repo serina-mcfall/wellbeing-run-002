@@ -44,8 +44,8 @@ TZ = "Pacific/Auckland"
 PR = 3
 BRANCH = "task/task-001"
 HEAD_AFTER_FIX = "54ab0f3e680f1111222233334444555566667777"
-BUILDER_WORKTREE = Path("/tmp/run-001-test/task-001-builder")
-REVIEW_WORKTREE = Path("/tmp/run-001-test/task-001-review-2")
+BUILDER_WORKTREE = Path("/tmp/run-002-test/task-001-builder")
+REVIEW_WORKTREE = Path("/tmp/run-002-test/task-001-review-2")
 
 FINDINGS = [{"id": "F1", "severity": "P1", "category": "SECURITY", "summary": "one"}]
 

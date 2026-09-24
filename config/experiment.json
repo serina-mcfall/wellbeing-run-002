@@ -1,6 +1,6 @@
 {
-  "experiment_id": "run-001",
-  "protocol_version": "v1.0",
+  "experiment_id": "run-002",
+  "protocol_version": "v2.0",
   "timezone": "Pacific/Auckland",
   "duration_hours": 24,
 
@@ -20,10 +20,10 @@
     "max_repair_cycles": 3
   },
 
-  "tmux_session": "run-001",
+  "tmux_session": "run-002",
 
   "github": {
-    "repo": "serina-mcfall/wellbeing-run-001",
+    "repo": "UNASSIGNED",
     "main_branch": "main",
     "required_checks": ["ci"]
   },

@@ -1,10 +1,11 @@
 """Discord escalation channel.
 
-Three severities, as defined in experiment/TIMELINE.md:
+Four severities, per Protocol v2 ("Discord"):
   INFO           checkpoints and completions
   ATTENTION      cooldown, recovery, queue pressure - labelled when no human action is needed
   HUMAN_REQUIRED credentials, repeated repair failure, privacy or security concern,
                  apparatus failure, protocol decision
+  CRITICAL       privacy/security/experiment-integrity emergency
 
 The webhook URL is read from the environment at call time and never logged.
 """
@@ -18,18 +19,20 @@ from . import http, redact
 INFO = "INFO"
 ATTENTION = "ATTENTION"
 HUMAN_REQUIRED = "HUMAN_REQUIRED"
+CRITICAL = "CRITICAL"
 
 _PREFIX = {
     INFO: "INFO",
     ATTENTION: "ATTENTION",
     HUMAN_REQUIRED: "HUMAN REQUIRED",
+    CRITICAL: "CRITICAL",
 }
 
 MAX_CONTENT = 1800
 
 
 class Notifier:
-    def __init__(self, experiment_id: str = "run-001", dry_run: bool = False) -> None:
+    def __init__(self, experiment_id: str = "run-002", dry_run: bool = False) -> None:
         self.experiment_id = experiment_id
         self.dry_run = dry_run
 
@@ -59,7 +62,7 @@ class Notifier:
         if not url:
             return {"ok": False, "reason": "DISCORD_WEBHOOK_URL_NOT_SET"}
 
-        response = http.post_json(url, {"content": content, "username": "Run 001 Supervisor"})
+        response = http.post_json(url, {"content": content, "username": "Run 002 Supervisor"})
         # Discord returns 204 No Content on success.
         ok = response.ok or response.status in (200, 204)
         return {"ok": ok, "status": response.status, "error": response.error}

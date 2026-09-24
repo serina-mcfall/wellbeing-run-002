@@ -123,7 +123,7 @@ class DecisionService:
             payload,
             headers={
                 "Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}",
-                "X-Title": "Run 001 Supervisor",
+                "X-Title": "Run 002 Supervisor",
             },
             timeout=timeout,
         )

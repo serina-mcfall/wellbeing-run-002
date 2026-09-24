@@ -4,7 +4,7 @@ Watchdog checks liveness and restarts supervisor; failed restart → HUMAN_REQUI
 Task states: QUEUED, READY, ASSIGNED, ACTIVE, PR_OPEN, REVIEW, FIX_REQUIRED, MERGED, COMPLETE, BLOCKED, STALE, FAILED, WAITING_PROVIDER_RESET, HUMAN_REQUIRED.
 Alive process != progress. Track heartbeat plus meaningful progress.
 
-## Protocol v1.0 deterministic policies
+## Protocol v2.0 deterministic policies
 
 ### Review backpressure
 0–1 queued review → builder_limit=3  

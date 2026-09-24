@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from . import redact
 
-USER_AGENT = "run-001-control-plane/1.0"
+USER_AGENT = "run-002-control-plane/1.0"
 
 
 @dataclass(frozen=True)
