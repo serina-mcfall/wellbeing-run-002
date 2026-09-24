@@ -1,0 +1,26 @@
+✔ every check result matches the schema shape (check_id, result, sha, artifact_reference) (988.719473ms)
+✔ the clean fixture passes every check (923.466556ms)
+✔ RESPONSIVE_375PX: the violations fixture still loads cleanly at 375px (this fixture has no viewport-load defect) (948.083745ms)
+✔ NO_OVERFLOW_CLIPPING_OVERLAP: a 2000px-wide box at 375px viewport fails, real scrollWidth measured (970.549238ms)
+✔ TOUCH_TARGETS: a 10x10px button fails the 24px minimum, real bounding rect measured (985.009536ms)
+✔ KEYBOARD_OPERATION: a div[role=button] with no keydown handler does not activate on Enter/Space (942.112074ms)
+✔ FOCUS_ORDER_VISIBLE_NO_TRAPS: a real keydown-preventDefault trap is caught by real Tab presses, not by count (955.93217ms)
+✔ FOCUS_ORDER_VISIBLE_NO_TRAPS: the clean fixture reaches every element forward and backward with a visible indicator (861.596869ms)
+✔ LABELS_AND_TEXT_ERRORS: an unlabeled input and an invalid-without-error-text input both fail (919.083694ms)
+✔ REDUCED_MOTION_NO_FLASHING_AUTOPLAY: three distinct real signals are each independently caught (940.799179ms)
+✔ REDUCED_MOTION_NO_FLASHING_AUTOPLAY: the clean fixture disables its animation under reduced motion and has no autoplay (846.446638ms)
+✔ AXE_SCAN: an image with no alt attribute is a real axe-core violation (901.520518ms)
+✔ AXE_SCAN: the clean fixture has no axe-core violations (854.143306ms)
+✔ SCREENSHOTS_ARTIFACTS: real, non-empty PNG files are written to outDir (832.832707ms)
+✔ SCREENSHOTS_ARTIFACTS: an unwritable outDir fails closed, not silently ok (792.097681ms)
+✔ rejects a non-40-hex sha rather than silently accepting it (0.837617ms)
+✔ walkTabOrder: reaching every expected distinct target stops immediately — real wraparound is never pressed into, so it is never misread as a trap (243.939831ms)
+✔ walkTabOrder: A->B->A before the expected count is reached is still a genuine trap (249.740001ms)
+ℹ tests 18
+ℹ suites 0
+ℹ pass 18
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 14570.269976

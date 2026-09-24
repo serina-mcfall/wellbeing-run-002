@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<!--
+  Fixture: deliberately violates every automated check in
+  apparatus/accessibility/run.js, one real, distinct defect per check —
+  not a synthetic flag the runner is told to fail on. Used by run.test.js
+  to prove each check can genuinely detect what it claims to detect.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Violations fixture</title>
+<style>
+  body { margin: 0; padding: 0; font-family: sans-serif; }
+  .overflow-box { width: 2000px; height: 40px; background: #eee; }
+  .tiny-target { width: 10px; height: 10px; padding: 0; }
+  .no-focus-outline:focus { outline: none; box-shadow: none; }
+  .decor { animation: spin 3s linear infinite; } /* no reduced-motion override, on purpose */
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .flash-badge { animation: flash 0.3s steps(1, end) infinite; } /* rapid-cycling proxy: well under 1s, effectively infinite */
+  @keyframes flash { 50% { background: yellow; } }
+</style>
+</head>
+<body>
+  <!-- NO_OVERFLOW_CLIPPING_OVERLAP: forces horizontal scroll past a 375px viewport -->
+  <div class="overflow-box"></div>
+
+  <!-- TOUCH_TARGETS: below the 24x24px minimum -->
+  <button class="tiny-target">x</button>
+
+  <!-- FOCUS_ORDER_VISIBLE_NO_TRAPS: a real keyboard trap. Tab reaches this
+       input, then its own keydown handler swallows every further Tab
+       press with preventDefault, so focus can never leave it. -->
+  <a href="#nowhere" class="no-focus-outline">Link before trap</a>
+  <input id="trap" type="text" class="no-focus-outline"
+    onkeydown="if (event.key === 'Tab') event.preventDefault();">
+  <button class="no-focus-outline">Unreachable button after trap</button>
+
+  <!-- KEYBOARD_OPERATION: a div styled as a button with no keydown
+       handler at all — ARIA role does not grant native Enter/Space
+       activation, so this never fires a click from the keyboard. -->
+  <div role="button" tabindex="0" onclick="void 0;">Fake button</div>
+
+  <!-- LABELS_AND_TEXT_ERRORS: no accessible name, and an invalid field
+       with no linked error text. -->
+  <input type="text" placeholder="no real label">
+  <input type="text" aria-invalid="true">
+
+  <!-- REDUCED_MOTION_NO_FLASHING_AUTOPLAY: animation ignores
+       prefers-reduced-motion, plus an autoplaying media element. -->
+  <span class="decor" style="display:inline-block;width:20px;height:20px;">*</span>
+  <span class="flash-badge" style="display:inline-block;width:16px;height:16px;background:red;">!</span>
+  <video autoplay muted loop width="80" height="45">
+    <source src="data:video/mp4;base64,AAAA" type="video/mp4">
+  </video>
+
+  <!-- AXE_SCAN: image with no alt attribute at all. -->
+  <img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBTAA7">
+</body>
+</html>

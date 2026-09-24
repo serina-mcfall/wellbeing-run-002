@@ -6,6 +6,7 @@ node_modules/
 coverage/
 .runtime/
 .worktrees/
+apparatus/accessibility/artifacts/
 .tmp/
 *.log
 run-002-protocol-v2.0-draft.zip
