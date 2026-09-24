@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Control-plane tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Guardrail — no committed secrets
+        run: python scripts/check_no_secrets.py
+
+      - name: Detect product app
+        id: app
+        run: |
+          if [ -f package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "No package.json yet — product application has not been scaffolded."
+          fi
+
+      - name: Set up Node
+        if: steps.app.outputs.present == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.app.outputs.present == 'true'
+        run: npm ci
+
+      - name: Lint
+        if: steps.app.outputs.present == 'true'
+        run: npm run --if-present lint
+
+      - name: Typecheck
+        if: steps.app.outputs.present == 'true'
+        run: npm run --if-present typecheck
+
+      - name: Unit tests
+        if: steps.app.outputs.present == 'true'
+        run: npm run --if-present test
+
+      - name: Build
+        if: steps.app.outputs.present == 'true'
+        run: npm run --if-present build

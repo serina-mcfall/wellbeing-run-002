@@ -1,0 +1,95 @@
+{
+  "experiment_id": "run-001",
+  "protocol_version": "v1.0",
+  "timezone": "Pacific/Auckland",
+  "duration_hours": 24,
+
+  "budget": {
+    "total_usd": 25.0,
+    "currency": "USD",
+    "configured_by": "human (experiment/BUDGET.md, committed before bootstrap)",
+    "scope": "incremental metered OpenRouter spend only (Jev + product companion)",
+    "excluded": ["claude subscription", "codex subscription", "grok subscription"]
+  },
+
+  "concurrency": {
+    "max_builders": 3,
+    "max_fixers": 1,
+    "max_reviewers": 1,
+    "max_observers": 1,
+    "max_repair_cycles": 3
+  },
+
+  "tmux_session": "run-001",
+
+  "github": {
+    "repo": "serina-mcfall/wellbeing-run-001",
+    "main_branch": "main",
+    "required_checks": ["ci"]
+  },
+
+  "roles": {
+    "builder": {
+      "provider": "claude",
+      "model": "sonnet",
+      "escalation_model": "opus",
+      "effort": "medium"
+    },
+    "fixer": {
+      "provider": "claude",
+      "model": "sonnet",
+      "effort": "medium"
+    },
+    "reviewer": {
+      "provider": "codex",
+      "model": null,
+      "effort": "medium"
+    },
+    "observer": {
+      "provider": "grok",
+      "model": null,
+      "effort": "low"
+    },
+    "jev": {
+      "provider": "openrouter",
+      "model": "google/gemini-2.5-flash-lite",
+      "effort": "low"
+    },
+    "companion": {
+      "provider": "openrouter",
+      "model": "google/gemini-2.5-flash",
+      "escalation_model": "anthropic/claude-haiku-4.5",
+      "effort": "low"
+    }
+  },
+
+  "observer": {
+    "model": null,
+    "max_turns": 5,
+    "soft_timeout_seconds": 120,
+    "hard_timeout_seconds": 180,
+    "web_enabled": false,
+    "retry_once_fresh": true
+  },
+
+  "timeouts": {
+    "builder": 3600,
+    "fixer": 2400,
+    "reviewer": 1800
+  },
+
+  "supervisor": {
+    "poll_seconds": 30,
+    "stale_task_minutes": 25,
+    "heartbeat_stale_seconds": 120
+  },
+
+  "providers": {
+    "cooldown_seconds": {
+      "claude": 1800,
+      "codex": 1800,
+      "grok": 900,
+      "openrouter": 600
+    }
+  }
+}
