@@ -1,0 +1,14 @@
+{
+  "experiment_id": "run-002",
+  "protocol": "v2.0",
+  "status": "DRAFT",
+  "duration_hours": 24,
+  "metered_budget_usd": 25,
+  "baseline_sha": "TO_BE_FILLED_AT_FREEZE",
+  "product_spec_sha": "TO_BE_FILLED",
+  "task_graph_hash": "TO_BE_FILLED",
+  "prompt_hashes": "TO_BE_FILLED",
+  "pr_template_hash": "TO_BE_FILLED",
+  "severity_policy_hash": "TO_BE_FILLED",
+  "model_assignments": "TO_BE_RESOLVED_BEFORE_FREEZE"
+}

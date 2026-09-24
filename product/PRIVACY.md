@@ -1,0 +1,2 @@
+# Privacy
+Mood, journal, companion, and wellbeing data are sensitive. Collect only MVP-required data. No journal/mood/conversation content in ordinary product analytics. Secret/server credentials never enter client code. Redact secrets before JSONL/Langfuse/Observer evidence. AI receives only necessary context; no whole-journal retrieval by default. Synthetic data must be labelled/separable. Database access defaults closed; use RLS and justified policies.

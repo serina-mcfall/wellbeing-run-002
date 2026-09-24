@@ -1,0 +1,77 @@
+{
+  "source": "tasks/TASKS.md — the task graph is locked at T+00",
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "title": "Foundation",
+      "kind": "feature",
+      "depends_on": [],
+      "schema_changing": false,
+      "body": "Next.js TypeScript app; Tailwind; Supabase wiring; minimal auth; PWA shell (manifest, icons, standalone presentation); navigation; CI/test scripts; Vercel-ready. No product features beyond the shell. PWA does NOT mean offline-first, background sync, service-worker caching architecture, or local-first replication."
+    },
+    {
+      "id": "TASK-002",
+      "title": "Check-in",
+      "kind": "feature",
+      "depends_on": ["TASK-001"],
+      "schema_changing": true,
+      "body": "Mood, energy, sensory load, social battery, optional note; persistence and history. Minimal migration and RLS required."
+    },
+    {
+      "id": "TASK-003",
+      "title": "Journal",
+      "kind": "feature",
+      "depends_on": ["TASK-001"],
+      "schema_changing": true,
+      "body": "Plain-text create/edit/delete/list; timestamps; delete confirmation; persistence and RLS. No AI, tags, search, rich text or photos."
+    },
+    {
+      "id": "TASK-004",
+      "title": "Support",
+      "kind": "feature",
+      "depends_on": ["TASK-001"],
+      "schema_changing": true,
+      "body": "Static 2/5/10 minute meditation and movement options; user-started rain, ocean, fireplace and brown-noise soundscapes; simple timers. No mixer, streaming or CMS. Soundscape assets must be owned, public-domain or appropriately licensed, with attribution and licence recorded."
+    },
+    {
+      "id": "TASK-005",
+      "title": "Companion",
+      "kind": "feature",
+      "depends_on": ["TASK-001"],
+      "schema_changing": true,
+      "body": "CompanionService over OpenRouter, text UI, persistence if required, safe prompt and wellbeing boundaries, graceful provider outage. No RAG, voice or diagnosis."
+    },
+    {
+      "id": "TASK-006",
+      "title": "Jev Product Integration",
+      "kind": "feature",
+      "depends_on": ["TASK-002", "TASK-004"],
+      "schema_changing": false,
+      "body": "DecisionService using the OpenRouter Decisions pattern; the approved six choices only (TALK, JOURNAL, MEDITATE, MOVE, SOUNDSCAPE, NOTHING); schema validation; deterministic fallback. No diagnosis or high-stakes decisions."
+    },
+    {
+      "id": "TASK-007",
+      "title": "Insights",
+      "kind": "feature",
+      "depends_on": ["TASK-002", "TASK-003", "TASK-004"],
+      "schema_changing": false,
+      "body": "Deterministic SQL/TypeScript counts, mood history and distribution, activity and support usage, simple Recharts visualisation with accessible text summaries. No AI-calculated facts and no correlation engine."
+    },
+    {
+      "id": "TASK-008",
+      "title": "Integration and Demo Journey",
+      "kind": "feature",
+      "depends_on": ["TASK-002", "TASK-003", "TASK-004", "TASK-005", "TASK-006", "TASK-007"],
+      "schema_changing": false,
+      "body": "Connect Home, check-in, support, companion, journal and insights into one coherent low-stimulation flow. Clearly labelled synthetic demo data only if needed."
+    },
+    {
+      "id": "TASK-009",
+      "title": "Release Stabilisation",
+      "kind": "stabilisation",
+      "depends_on": ["TASK-008"],
+      "schema_changing": false,
+      "body": "E2E core journey; accessibility; mobile at 375px; desktop; failure modes; deployment; documentation. No new features."
+    }
+  ]
+}

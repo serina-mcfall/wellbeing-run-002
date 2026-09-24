@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+coverage/
+.runtime/
+.worktrees/
+.tmp/
+*.log
+run-002-protocol-v2.0-draft.zip

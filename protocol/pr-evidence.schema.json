@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Run002PrEvidence",
+  "type": "object",
+  "required": [
+    "task_id",
+    "head_sha",
+    "ci",
+    "review",
+    "merge_gate"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string"
+    },
+    "head_sha": {
+      "type": "string",
+      "minLength": 7
+    },
+    "ci": {
+      "type": "object",
+      "required": [
+        "sha",
+        "status",
+        "source"
+      ],
+      "properties": {
+        "sha": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "PENDING"
+          ]
+        },
+        "source": {
+          "type": "string"
+        }
+      }
+    },
+    "accessibility": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "security": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "review": {
+      "type": "object",
+      "required": [
+        "sha",
+        "verdict",
+        "p0",
+        "p1",
+        "p2",
+        "p3"
+      ],
+      "properties": {
+        "sha": {
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "REVIEW_PASS",
+            "REVIEW_FAIL",
+            "PENDING"
+          ]
+        },
+        "p0": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p1": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p2": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p3": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "merge_gate": {
+      "type": "object",
+      "required": [
+        "eligible"
+      ],
+      "properties": {
+        "eligible": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

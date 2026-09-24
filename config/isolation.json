@@ -1,0 +1,13 @@
+{
+  "experiment_id": "run-002",
+  "workspace": "/home/serina/wellbeing-agent-experiment/agent-run-002",
+  "tmux_socket_name": "run-002",
+  "tmux_session_prefix": "run-002-",
+  "candidate_tcp_port_range": [3200, 3299],
+  "runtime_dir": ".runtime",
+  "worktree_dir": ".worktrees",
+  "browser_profile_dir": ".runtime/browser-profiles",
+  "temporary_dir": ".tmp",
+  "external_project_ids": "UNASSIGNED",
+  "external_budget_identity": "UNASSIGNED"
+}
