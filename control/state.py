@@ -21,14 +21,22 @@ from zoneinfo import ZoneInfo
 from . import config
 
 # Task states from agents/SUPERVISOR.md plus the v1.0 migration-lock state.
+# Extended per Protocol v2's fuller state machine: PR_OPEN -> WAITING_CI/
+# WAITING_EVIDENCE -> REVIEW -> FIX_REQUIRED -> REVIEW -> MERGE_READY ->
+# MERGED -> COMPLETE. WAITING_CI closes the Run 001 CI-dispatch race named
+# in Protocol v2's audit mapping; WAITING_EVIDENCE is its accessibility/
+# security-evidence counterpart. Both are additive only.
 TASK_STATES = (
     "QUEUED",
     "READY",
     "ASSIGNED",
     "ACTIVE",
     "PR_OPEN",
+    "WAITING_CI",
+    "WAITING_EVIDENCE",
     "REVIEW",
     "FIX_REQUIRED",
+    "MERGE_READY",
     "MERGED",
     "COMPLETE",
     "BLOCKED",
@@ -37,6 +45,29 @@ TASK_STATES = (
     "WAITING_PROVIDER_RESET",
     "WAITING_DB_LOCK",
     "HUMAN_REQUIRED",
+)
+
+# Worker-level phase vocabulary frozen by Protocol v2 ("Worker awareness").
+# This is the TARGET vocabulary for explicit self-reported phase. No current
+# worker (worker_entry.py) reports any of these values — it only knows
+# STARTING/RUNNING/PROMPT_ACCEPTED/DONE/FAILED/TIMEOUT, which is process
+# activity, not phase. Do not derive a WORKER_PHASES value from role +
+# raw phase: that would assert knowledge the Supervisor does not have.
+WORKER_PHASES = (
+    "STARTING",
+    "READING",
+    "PLANNING",
+    "IMPLEMENTING",
+    "TESTING",
+    "COMMITTING",
+    "PUSHING",
+    "WAITING_CI",
+    "REVIEWING",
+    "FIXING",
+    "ACCESSIBILITY_TESTING",
+    "SECURITY_REVIEWING",
+    "COMPLETED",
+    "FAILED",
 )
 
 TERMINAL_STATES = frozenset({"COMPLETE", "FAILED"})
@@ -52,14 +83,20 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
         {"PR_OPEN", "STALE", "FAILED", "BLOCKED", "READY", "WAITING_PROVIDER_RESET",
          "WAITING_DB_LOCK", "HUMAN_REQUIRED"}
     ),
-    "PR_OPEN": frozenset({"REVIEW", "STALE", "FAILED", "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET"}),
+    "PR_OPEN": frozenset({"REVIEW", "WAITING_CI", "WAITING_EVIDENCE", "STALE", "FAILED",
+                          "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET"}),
+    "WAITING_CI": frozenset({"REVIEW", "WAITING_EVIDENCE", "STALE", "FAILED",
+                             "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET"}),
+    "WAITING_EVIDENCE": frozenset({"REVIEW", "STALE", "FAILED", "HUMAN_REQUIRED",
+                                   "WAITING_PROVIDER_RESET"}),
     "REVIEW": frozenset(
-        {"FIX_REQUIRED", "MERGED", "PR_OPEN", "STALE", "FAILED", "HUMAN_REQUIRED",
-         "WAITING_PROVIDER_RESET"}
+        {"FIX_REQUIRED", "MERGE_READY", "MERGED", "PR_OPEN", "STALE", "FAILED",
+         "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET"}
     ),
     "FIX_REQUIRED": frozenset(
         {"REVIEW", "PR_OPEN", "STALE", "FAILED", "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET"}
     ),
+    "MERGE_READY": frozenset({"MERGED", "REVIEW", "STALE", "FAILED", "HUMAN_REQUIRED"}),
     "MERGED": frozenset({"COMPLETE", "HUMAN_REQUIRED"}),
     "COMPLETE": frozenset(),
     "BLOCKED": frozenset({"READY", "QUEUED", "HUMAN_REQUIRED", "FAILED"}),
@@ -171,6 +208,44 @@ def add_task(doc: dict, task_id: str, title: str, depends_on: list[str], kind: s
     }
     doc["tasks"][task_id] = record
     return record
+
+
+def new_worker_record(role: str, task_id: str, branch: str, started_at: str, *,
+                       pr: int | None = None, worktree: str | None = None,
+                       browser_profile: str | None = None, port: int | None = None,
+                       lease_expires_at: str | None = None) -> dict:
+    """The three Protocol v2 worker-awareness signals, kept distinct:
+
+    - process activity/liveness: last_process_activity_at + process_phase —
+      the coarse STARTING/RUNNING/PROMPT_ACCEPTED/DONE/FAILED/TIMEOUT signal
+      worker_entry.py's heartbeat/PID detection actually reports. Never
+      upgraded into a WORKER_PHASES value.
+    - meaningful progress: last_meaningful_progress_at — set only when the
+      task's own progress_marker changes (reap_workers()'s existing signal).
+    - explicitly reported worker phase: reported_phase — left None here.
+      No current worker writes a WORKER_PHASES value; None is the honest
+      state, not a guess derived from role.
+
+    browser_profile/port/lease_expires_at exist as fields because Protocol
+    v2 requires tracking them; no population logic for them is implemented
+    in D1 — they are None until whatever dispatches that resource sets them.
+    """
+    return {
+        "role": role,
+        "task_id": task_id,
+        "branch": branch,
+        "pr": pr,
+        "started_at": started_at,
+        "last_process_activity_at": started_at,
+        "process_phase": "STARTING",
+        "last_meaningful_progress_at": None,
+        "reported_phase": None,
+        "lease_expires_at": lease_expires_at,
+        "wait_reason": None,
+        "worktree": worktree,
+        "browser_profile": browser_profile,
+        "port": port,
+    }
 
 
 def transition(doc: dict, task_id: str, new_state: str, reason: str, tz: str) -> tuple[str, str]:

@@ -1,0 +1,24 @@
+test_merge_ready_falls_back_to_review_on_material_change (tests.test_state_worker_awareness.TestMergeReadyTransitions.test_merge_ready_falls_back_to_review_on_material_change) ... ok
+test_merge_ready_to_merged_is_legal (tests.test_state_worker_awareness.TestMergeReadyTransitions.test_merge_ready_to_merged_is_legal) ... ok
+test_review_to_merge_ready_is_legal (tests.test_state_worker_awareness.TestMergeReadyTransitions.test_review_to_merge_ready_is_legal) ... ok
+test_review_to_merged_directly_is_still_legal (tests.test_state_worker_awareness.TestMergeReadyTransitions.test_review_to_merged_directly_is_still_legal)
+Existing REVIEW -> MERGED edge is preserved (additive change only). ... ok
+test_pr_open_to_waiting_ci_is_legal (tests.test_state_worker_awareness.TestWaitingCiTransitions.test_pr_open_to_waiting_ci_is_legal) ... ok
+test_waiting_ci_to_merged_is_not_legal (tests.test_state_worker_awareness.TestWaitingCiTransitions.test_waiting_ci_to_merged_is_not_legal) ... ok
+test_waiting_ci_to_review_is_legal (tests.test_state_worker_awareness.TestWaitingCiTransitions.test_waiting_ci_to_review_is_legal) ... ok
+test_waiting_ci_to_waiting_evidence_is_legal (tests.test_state_worker_awareness.TestWaitingCiTransitions.test_waiting_ci_to_waiting_evidence_is_legal) ... ok
+test_pr_open_to_waiting_evidence_is_legal (tests.test_state_worker_awareness.TestWaitingEvidenceTransitions.test_pr_open_to_waiting_evidence_is_legal) ... ok
+test_waiting_evidence_to_merge_ready_is_not_legal (tests.test_state_worker_awareness.TestWaitingEvidenceTransitions.test_waiting_evidence_to_merge_ready_is_not_legal) ... ok
+test_waiting_evidence_to_review_is_legal (tests.test_state_worker_awareness.TestWaitingEvidenceTransitions.test_waiting_evidence_to_review_is_legal) ... ok
+test_no_phase_inference_helper_exists (tests.test_state_worker_awareness.TestWorkerAwarenessSignalsStayDistinct.test_no_phase_inference_helper_exists)
+Regression guard: a role+RUNNING -> detailed-phase inference ... ok
+test_process_activity_and_meaningful_progress_are_separate_fields (tests.test_state_worker_awareness.TestWorkerAwarenessSignalsStayDistinct.test_process_activity_and_meaningful_progress_are_separate_fields) ... ok
+test_process_phase_is_the_same_generic_value_for_every_role (tests.test_state_worker_awareness.TestWorkerAwarenessSignalsStayDistinct.test_process_phase_is_the_same_generic_value_for_every_role)
+No role-based inference: process_phase at dispatch is always the ... ok
+test_reported_phase_defaults_to_none (tests.test_state_worker_awareness.TestWorkerAwarenessSignalsStayDistinct.test_reported_phase_defaults_to_none) ... ok
+test_unpopulated_resource_fields_are_none_not_invented (tests.test_state_worker_awareness.TestWorkerAwarenessSignalsStayDistinct.test_unpopulated_resource_fields_are_none_not_invented) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 0.002s
+
+OK

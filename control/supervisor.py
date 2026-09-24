@@ -243,8 +243,8 @@ class Supervisor:
         task["last_progress_at"] = task["assigned_at"]
         task["progress_marker"] = 0
         self.transition(doc, task["id"], "ASSIGNED", "builder dispatched")
-        doc["workers"][worker] = {"role": "builder", "task_id": task["id"],
-                                  "branch": branch, "started_at": task["assigned_at"]}
+        doc["workers"][worker] = state_mod.new_worker_record(
+            "builder", task["id"], branch, task["assigned_at"])
         self.log("TASK_DISPATCHED", task_id=task["id"], role="builder",
                  provider=role_cfg.provider, model=role_cfg.model, branch=branch,
                  agent_id=worker, activity_class="BUILD", outcome="DISPATCHED")
@@ -314,8 +314,8 @@ class Supervisor:
         record["approval_current"] = False
         record["review_verdict"] = None
         task["worker"] = worker
-        doc["workers"][worker] = {"role": "reviewer", "task_id": task["id"],
-                                  "pr": pr_number, "started_at": clock.iso(self.now())}
+        doc["workers"][worker] = state_mod.new_worker_record(
+            "reviewer", task["id"], branch, clock.iso(self.now()), pr=pr_number)
         self.transition(doc, task["id"], "REVIEW", f"dispatched review cycle "
                                                    f"{record['review_cycles']}")
         self.log("REVIEW_DISPATCHED", task_id=task["id"], pr_id=pr_number, role="reviewer",
@@ -368,8 +368,8 @@ class Supervisor:
         record["repair_cycles"] += 1
         record["open_finding_ids"] = [f.get("id") for f in findings]
         task["worker"] = worker
-        doc["workers"][worker] = {"role": "fixer", "task_id": task["id"], "pr": pr_number,
-                                  "started_at": clock.iso(self.now())}
+        doc["workers"][worker] = state_mod.new_worker_record(
+            "fixer", task["id"], task["branch"], clock.iso(self.now()), pr=pr_number)
         self.transition(doc, task["id"], "FIX_REQUIRED",
                         f"fix cycle {record['repair_cycles']}")
         self.log("FIX_DISPATCHED", task_id=task["id"], pr_id=pr_number, role="fixer",

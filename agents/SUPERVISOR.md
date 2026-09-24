@@ -1,8 +1,8 @@
 # Deterministic Supervisor
 Python, not an LLM. Own task state/dependencies, provider state, budgets, concurrency, hard guardrails, PR routing, deadline phases, notifications, and ledger. LLMs/Jev advise; supervisor validates/acts.
 Watchdog checks liveness and restarts supervisor; failed restart → HUMAN_REQUIRED.
-Task states: QUEUED, READY, ASSIGNED, ACTIVE, PR_OPEN, REVIEW, FIX_REQUIRED, MERGED, COMPLETE, BLOCKED, STALE, FAILED, WAITING_PROVIDER_RESET, HUMAN_REQUIRED.
-Alive process != progress. Track heartbeat plus meaningful progress.
+Task states: QUEUED, READY, ASSIGNED, ACTIVE, PR_OPEN, WAITING_CI, WAITING_EVIDENCE, REVIEW, FIX_REQUIRED, MERGE_READY, MERGED, COMPLETE, BLOCKED, STALE, FAILED, WAITING_PROVIDER_RESET, WAITING_DB_LOCK, HUMAN_REQUIRED.
+Alive process != progress. Track heartbeat plus meaningful progress. Worker-level phase (Protocol v2 "Worker awareness") is a third, distinct signal: it is only ever what a worker explicitly self-reports, never inferred from role plus a generic running/alive signal.
 
 ## Protocol v2.0 deterministic policies
 
@@ -12,7 +12,8 @@ Alive process != progress. Track heartbeat plus meaningful progress.
 3+ queued reviews → builder_limit=0 for new dispatch
 
 ### Merge state machine
-`REVIEW_PASS` → reconcile with current main → run required CI → compare reviewed/material diff → if unchanged and clean, Supervisor merges. Otherwise return to REVIEW.
+PR_OPEN → WAITING_CI (closes the Run 001 CI-dispatch race) and/or WAITING_EVIDENCE (accessibility/security evidence not yet current) → REVIEW → FIX_REQUIRED → REVIEW → MERGE_READY → MERGED → COMPLETE.
+`REVIEW_PASS` → reconcile with current main → run required CI → compare reviewed/material diff → if unchanged and clean, move to MERGE_READY, then Supervisor merges. Otherwise return to REVIEW.
 
 ### DB migration lock
 Track owner task/PR and acquisition/release events. A task blocked only on schema ownership uses `WAITING_DB_LOCK`, while independent work may continue.
