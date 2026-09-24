@@ -1,0 +1,766 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Run002PrEvidenceV2",
+  "description": "C-04 proposal, structural half only. protocol/pr-evidence.schema.json is retained unedited as source evidence, not as an enforcement source. This schema plus apparatus/pr-evidence/validate.js together form the machine-readable enforcement contract. Neither can make the live merge gate GREEN alone: exact-SHA equality against a trusted Git source, the accessibility severity floor, lifecycle resolution (FIXED still blocks until VERIFIED; SUPERSEDED needs a linked, verified successor), duplicate-ID rejection, linked-finding requirements for failed checks, and a computed (never-trusted) merge_gate are enforced by the validator, not by this schema. SHAs are full, unabbreviated 40-character lowercase hex (git SHA-1); abbreviated or malformed SHAs are rejected by pattern.",
+  "type": "object",
+  "required": [
+    "task_id",
+    "head_sha",
+    "ci",
+    "review",
+    "accessibility",
+    "security"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "ci": {
+      "type": "object",
+      "required": [
+        "sha",
+        "status",
+        "source",
+        "provenance"
+      ],
+      "properties": {
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "status": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "PENDING"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": [
+        "sha",
+        "verdict",
+        "findings",
+        "provenance"
+      ],
+      "properties": {
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "verdict": {
+          "enum": [
+            "REVIEW_PASS",
+            "REVIEW_FAIL",
+            "PENDING"
+          ]
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/codeFinding"
+          }
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        }
+      }
+    },
+    "accessibility": {
+      "description": "applicable is required and explicit, never inferred from an absent field. provenance is required in BOTH branches.",
+      "type": "object",
+      "required": [
+        "applicable",
+        "provenance"
+      ],
+      "properties": {
+        "applicable": {
+          "type": "boolean"
+        },
+        "not_applicable_reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/accessibilityCheck"
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/accessibilityFinding"
+          }
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "applicable": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "applicable",
+              "not_applicable_reason",
+              "provenance"
+            ],
+            "properties": {
+              "not_applicable_reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "provenance": {
+                "$ref": "#/$defs/provenance"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "applicable": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "applicable",
+              "sha",
+              "checks",
+              "findings",
+              "provenance"
+            ],
+            "properties": {
+              "sha": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              },
+              "checks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/accessibilityCheck"
+                }
+              },
+              "findings": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/accessibilityFinding"
+                }
+              },
+              "provenance": {
+                "$ref": "#/$defs/provenance"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "security": {
+      "description": "Same explicit-applicability rule as accessibility.",
+      "type": "object",
+      "required": [
+        "applicable",
+        "provenance"
+      ],
+      "properties": {
+        "applicable": {
+          "type": "boolean"
+        },
+        "not_applicable_reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/securityCheck"
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/securityFinding"
+          }
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "applicable": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "applicable",
+              "not_applicable_reason",
+              "provenance"
+            ],
+            "properties": {
+              "not_applicable_reason": {
+                "type": "string",
+                "minLength": 1
+              },
+              "provenance": {
+                "$ref": "#/$defs/provenance"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "applicable": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "applicable",
+              "sha",
+              "checks",
+              "findings",
+              "provenance"
+            ],
+            "properties": {
+              "sha": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              },
+              "checks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/securityCheck"
+                }
+              },
+              "findings": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/securityFinding"
+                }
+              },
+              "provenance": {
+                "$ref": "#/$defs/provenance"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "merge_gate": {
+      "description": "If present, a CLAIM checked against the validator's own computed decision in both directions (claiming true when computed false, and claiming false when computed true are both recorded) — never the decision itself. The computed value always wins.",
+      "type": "object",
+      "properties": {
+        "eligible": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "provenance": {
+      "type": "object",
+      "description": "Protocol v2 'Evidence provenance': source, SHA, created_at, kind, producer, scope, result, artifact reference. producer may not be a self-attesting role (Builder/Fixer) by name — this rules out the two roles Protocol v2 explicitly forbids as independent evidence sources at the string level only; it does NOT verify actual worker identity against a trusted registry, which belongs to Supervisor/Watchdog worker-awareness (deliverable 2, not yet built) — see the validator's INTEGRATION_MISSING reasons. result is a meaningful bounded type, not an open object.",
+      "required": [
+        "source",
+        "sha",
+        "created_at",
+        "kind",
+        "producer",
+        "scope",
+        "result",
+        "artifact_reference"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "created_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "producer": {
+          "type": "string",
+          "minLength": 1,
+          "not": {
+            "enum": [
+              "Builder",
+              "Fixer"
+            ]
+          }
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "result": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "PARTIAL"
+          ]
+        },
+        "artifact_reference": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "codeFinding": {
+      "type": "object",
+      "required": [
+        "id",
+        "severity",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^TASK[0-9]{3}-R[0-9]+-CODE-[0-9]{3}$"
+        },
+        "severity": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ]
+        },
+        "status": {
+          "enum": [
+            "OPEN",
+            "FIXED",
+            "VERIFIED",
+            "SUPERSEDED",
+            "ACCEPTED_NONBLOCKING"
+          ]
+        },
+        "superseded_by": {
+          "type": "string",
+          "pattern": "^TASK[0-9]{3}-R[0-9]+-CODE-[0-9]{3}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ACCEPTED_NONBLOCKING"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "severity": {
+                "enum": [
+                  "P2",
+                  "P3"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "SUPERSEDED"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "superseded_by"
+            ],
+            "properties": {
+              "superseded_by": {
+                "type": "string",
+                "pattern": "^TASK[0-9]{3}-R[0-9]+-CODE-[0-9]{3}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "securityFinding": {
+      "type": "object",
+      "required": [
+        "id",
+        "severity",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^TASK[0-9]{3}-R[0-9]+-SEC-[0-9]{3}$"
+        },
+        "severity": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ]
+        },
+        "status": {
+          "enum": [
+            "OPEN",
+            "FIXED",
+            "VERIFIED",
+            "SUPERSEDED",
+            "ACCEPTED_NONBLOCKING"
+          ]
+        },
+        "superseded_by": {
+          "type": "string",
+          "pattern": "^TASK[0-9]{3}-R[0-9]+-SEC-[0-9]{3}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ACCEPTED_NONBLOCKING"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "severity": {
+                "enum": [
+                  "P2",
+                  "P3"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "SUPERSEDED"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "superseded_by"
+            ],
+            "properties": {
+              "superseded_by": {
+                "type": "string",
+                "pattern": "^TASK[0-9]{3}-R[0-9]+-SEC-[0-9]{3}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "accessibilityFinding": {
+      "description": "jev_severity is the PRE-floor input. POST-floor severity (protocol/SEVERITY-POLICY.md) is computed by the validator, so the ACCEPTED_NONBLOCKING/P0-P1 exclusion for these findings is a validator rule, not a schema rule.",
+      "type": "object",
+      "required": [
+        "id",
+        "jev_severity",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^TASK[0-9]{3}-R[0-9]+-A11Y-[0-9]{3}$"
+        },
+        "jev_severity": {
+          "enum": [
+            "P0",
+            "P1",
+            "P2",
+            "P3"
+          ]
+        },
+        "classification": {
+          "enum": [
+            "FAILURE",
+            "NON_FAILURE"
+          ]
+        },
+        "unmet_requirement": {
+          "type": "string"
+        },
+        "non_failure_rationale": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "OPEN",
+            "FIXED",
+            "VERIFIED",
+            "SUPERSEDED",
+            "ACCEPTED_NONBLOCKING"
+          ]
+        },
+        "superseded_by": {
+          "type": "string",
+          "pattern": "^TASK[0-9]{3}-R[0-9]+-A11Y-[0-9]{3}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "SUPERSEDED"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "superseded_by"
+            ],
+            "properties": {
+              "superseded_by": {
+                "type": "string",
+                "pattern": "^TASK[0-9]{3}-R[0-9]+-A11Y-[0-9]{3}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "accessibilityCheck": {
+      "description": "Protocol v2 'Accessibility gate' — all ten required for every relevant exact PR SHA. A FAIL result must link to a finding; it cannot stand as unexplained/incomplete evidence.",
+      "type": "object",
+      "required": [
+        "check_id",
+        "result",
+        "artifact_reference",
+        "sha"
+      ],
+      "properties": {
+        "check_id": {
+          "enum": [
+            "RESPONSIVE_375PX",
+            "NO_OVERFLOW_CLIPPING_OVERLAP",
+            "TOUCH_TARGETS",
+            "KEYBOARD_OPERATION",
+            "FOCUS_ORDER_VISIBLE_NO_TRAPS",
+            "LABELS_AND_TEXT_ERRORS",
+            "REDUCED_MOTION_NO_FLASHING_AUTOPLAY",
+            "AXE_SCAN",
+            "SCREENSHOTS_ARTIFACTS",
+            "COGNITIVE_SENSORY_REVIEW"
+          ]
+        },
+        "result": {
+          "enum": [
+            "PASS",
+            "FAIL"
+          ]
+        },
+        "artifact_reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "finding_id": {
+          "type": "string",
+          "pattern": "^TASK[0-9]{3}-R[0-9]+-A11Y-[0-9]{3}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "result": {
+                "const": "FAIL"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "finding_id"
+            ],
+            "properties": {
+              "finding_id": {
+                "type": "string",
+                "pattern": "^TASK[0-9]{3}-R[0-9]+-A11Y-[0-9]{3}$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "securityCheck": {
+      "description": "Protocol v2 'Security protocol' surfaces. relevant is explicit per surface. A FAIL result must link to a finding.",
+      "type": "object",
+      "required": [
+        "check_id",
+        "relevant"
+      ],
+      "properties": {
+        "check_id": {
+          "enum": [
+            "SECRETS",
+            "AUTH_SESSION",
+            "AUTHORIZATION",
+            "SIGN_OUT",
+            "REDIRECTS_URLS",
+            "XSS_UNSAFE_HTML",
+            "INJECTION_PATH_COMMAND",
+            "ERROR_LEAKAGE",
+            "RLS_LEAST_PRIVILEGE",
+            "SERVER_CLIENT_BOUNDARIES",
+            "DEPENDENCY_RISK",
+            "AI_INPUT_OUTPUT_HANDLING"
+          ]
+        },
+        "relevant": {
+          "type": "boolean"
+        },
+        "result": {
+          "enum": [
+            "PASS",
+            "FAIL"
+          ]
+        },
+        "artifact_reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "finding_id": {
+          "type": "string",
+          "pattern": "^TASK[0-9]{3}-R[0-9]+-SEC-[0-9]{3}$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "relevant": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "check_id",
+              "relevant",
+              "result",
+              "artifact_reference",
+              "sha"
+            ],
+            "properties": {
+              "check_id": {
+                "enum": [
+                  "SECRETS",
+                  "AUTH_SESSION",
+                  "AUTHORIZATION",
+                  "SIGN_OUT",
+                  "REDIRECTS_URLS",
+                  "XSS_UNSAFE_HTML",
+                  "INJECTION_PATH_COMMAND",
+                  "ERROR_LEAKAGE",
+                  "RLS_LEAST_PRIVILEGE",
+                  "SERVER_CLIENT_BOUNDARIES",
+                  "DEPENDENCY_RISK",
+                  "AI_INPUT_OUTPUT_HANDLING"
+                ]
+              },
+              "result": {
+                "enum": [
+                  "PASS",
+                  "FAIL"
+                ]
+              },
+              "artifact_reference": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "relevant": {
+                "const": true
+              },
+              "result": {
+                "const": "FAIL"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "finding_id"
+            ],
+            "properties": {
+              "finding_id": {
+                "type": "string",
+                "pattern": "^TASK[0-9]{3}-R[0-9]+-SEC-[0-9]{3}$"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,48 @@
+=== C-04 git-head adapter smoke test against the REAL Run 002 repository ===
+SMOKE TEST of the adapter mechanism only. Not a real product PR, not CI,
+not an independent review, and does not resolve C-04.
+token: 3a9b6874
+branch: run-002/preflight-git-adapter-smoke-test-3a9b6874
+worktree: .worktrees/preflight-git-adapter-smoke-test-3a9b6874
+
+.worktrees pre-existed: false
+
+--- pre-creation collision checks ---
+no pre-existing branch or path collision — safe to proceed.
+
+--- create isolated preflight branch + worktree ---
+$ git branch run-002/preflight-git-adapter-smoke-test-3a9b6874
+$ git worktree add /home/serina/wellbeing-agent-experiment/agent-run-002/.worktrees/preflight-git-adapter-smoke-test-3a9b6874 run-002/preflight-git-adapter-smoke-test-3a9b6874
+Preparing worktree (checking out 'run-002/preflight-git-adapter-smoke-test-3a9b6874')
+HEAD is now at 450978b Record Run 002 preflight baseline
+
+--- resolve via the real Run 002 adapter entrypoint (initial head) ---
+{"ok":true,"sha":"450978b0e0395f9748b60dd1aee6832e5187278e","resolvedFrom":"worktree:/home/serina/wellbeing-agent-experiment/agent-run-002/.worktrees/preflight-git-adapter-smoke-test-3a9b6874"}
+
+--- advance the head with a real commit inside the worktree ---
+$ git -C /home/serina/wellbeing-agent-experiment/agent-run-002/.worktrees/preflight-git-adapter-smoke-test-3a9b6874 add PREFLIGHT-SMOKE-TEST.md
+$ git -C /home/serina/wellbeing-agent-experiment/agent-run-002/.worktrees/preflight-git-adapter-smoke-test-3a9b6874 -c user.email=preflight@run-002.invalid -c user.name=Run002Preflight commit --quiet -m preflight smoke test: advance head
+
+--- resolve via the adapter again (advanced head) ---
+{"ok":true,"sha":"4818645b7c0308f809829814b152f53074aa9747","resolvedFrom":"worktree:/home/serina/wellbeing-agent-experiment/agent-run-002/.worktrees/preflight-git-adapter-smoke-test-3a9b6874"}
+STALENESS DETECTION CONFIRMED: before.sha (450978b0e0395f9748b60dd1aee6832e5187278e) !== after.sha (4818645b7c0308f809829814b152f53074aa9747)
+
+--- cleanup (finally: runs even on failure) ---
+exact worktree path still registered: true
+$ git worktree remove /home/serina/wellbeing-agent-experiment/agent-run-002/.worktrees/preflight-git-adapter-smoke-test-3a9b6874
+removed worktree this invocation created: /home/serina/wellbeing-agent-experiment/agent-run-002/.worktrees/preflight-git-adapter-smoke-test-3a9b6874
+exact branch still exists: true
+$ git branch -D run-002/preflight-git-adapter-smoke-test-3a9b6874
+Deleted branch run-002/preflight-git-adapter-smoke-test-3a9b6874 (was 4818645).
+deleted branch this invocation created: run-002/preflight-git-adapter-smoke-test-3a9b6874
+removed .worktrees: this invocation created it and it is now empty.
+
+--- post-state ---
+$ git branch -a
+* main
+$ git worktree list
+/home/serina/wellbeing-agent-experiment/agent-run-002  450978b [main]
+
+=== smoke test complete: adapter resolves and detects staleness against the REAL Run 002 repository.
+No real product PR, CI, reviewer, or task-record was tested. CI/reviewer-identity/task-record adapters remain unbuilt. ===
+EXIT_STATUS:0

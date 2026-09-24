@@ -1,0 +1,12 @@
+{
+  "name": "run-002-apparatus",
+  "private": true,
+  "description": "Run 002 control-plane apparatus (protocol enforcement, not the product app). See BOOTSTRAP.md and AGENTS.md. Kept under apparatus/, with its own node_modules and package-lock.json here, so the repository root stays available for TASK-001's Next.js app.",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "ajv": "^8.17.1"
+  }
+}

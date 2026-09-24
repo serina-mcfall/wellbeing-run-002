@@ -1,0 +1,19 @@
+✔ positive: a structurally clean package is policyValid with no errors (7.332083ms)
+✔ SCHEMA_INVALID: a required field missing entirely fails schema validation (0.251288ms)
+✔ INTERNAL_SHA_MISMATCH: ci.sha disagreeing with head_sha is rejected (0.225945ms)
+✔ CI_NOT_PASS: a submitted ci.status other than PASS is rejected (0.140557ms)
+✔ REVIEW_NOT_PASS: a submitted review.verdict other than REVIEW_PASS is rejected (0.167409ms)
+✔ SELF_ATTESTED_PRODUCER: a review producer named Builder is rejected (0.192713ms)
+✔ INFERRED_APPLICABILITY: accessibility.applicable missing entirely is rejected (0.257343ms)
+✔ INFERRED_APPLICABILITY: applicable=false without not_applicable_reason is rejected (0.193618ms)
+✔ UNRESOLVED_BLOCKING_FINDING: an OPEN P1 review finding blocks (0.368032ms)
+✔ UNRESOLVED_BLOCKING_FINDING: a NON_FAILURE accessibility finding at P1 still blocks (no floor needed) (0.695348ms)
+✔ INVALID_ACCESSIBILITY_EVIDENCE: a FAILURE finding fails closed without a requirement registry (0.212937ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 248.342944

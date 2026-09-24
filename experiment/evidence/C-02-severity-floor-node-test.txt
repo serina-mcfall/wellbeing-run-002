@@ -1,0 +1,20 @@
+✔ no classification/citation/rationale at all is INVALID and blocks merge (1.367651ms)
+✔ especially: Jev P2 accessibility failure is raised to P1 and blocks merge (0.21726ms)
+✔ a failure already P0 stays P0 (floor raises, never caps) and blocks merge (0.127886ms)
+✔ a valid NON_FAILURE P3 recommendation does not block merge (0.129801ms)
+✔ a valid NON_FAILURE P2 recommendation also does not independently block merge (0.106522ms)
+✔ contradictory: FAILURE with a non_failure_rationale is INVALID (0.155497ms)
+✔ contradictory: NON_FAILURE with an unmet_requirement is INVALID (0.62612ms)
+✔ an arbitrary nonempty citation not in the known registry is INVALID (0.485686ms)
+✔ a citation fails closed when no registry is supplied at all (0.340821ms)
+✔ fails closed on an unknown classification value instead of throwing (0.252959ms)
+✔ fails closed on an unknown severity value instead of throwing (0.128464ms)
+✔ fails closed on a malformed (non-object) finding instead of throwing (0.105333ms)
+ℹ tests 12
+ℹ suites 0
+ℹ pass 12
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 96.202584
