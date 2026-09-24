@@ -4,6 +4,11 @@ Status: PROPOSED. This becomes RESOLVED only when the contradiction audit
 checks this rule against its tested implementation (the PR evidence
 schema/validator work, C-04) — a document alone does not close C-02.
 
+Implementation: control/severity.py (canonical, Python control plane),
+ported 1:1 from the original apparatus/severity/severity-floor.js.
+Tests: tests/test_severity.py (15/15 pass, including three explicit
+RUN001-F1 regression properties — see that module's docstring).
+
 ## Source of the floor
 
 product/ACCESSIBILITY.md (imported, byte-for-byte frozen, not edited by

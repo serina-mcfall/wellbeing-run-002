@@ -1,0 +1,36 @@
+Pre-T+00 reconciliation finding: routing.review_is_consistent's
+gate-level aggregation can still reproduce RUN001-F1's effect
+Discovered: 2026-09-25, while reading control/routing.py to decide
+whether/how to wire A1's control/severity.py into it.
+Not fixed. Flagged only. No code changed for this finding.
+
+RUN001-F1 (corrected understanding, per your instruction): Run 001 did
+not merge a wrongly-classified finding. Its defect was that the
+deployed Reviewer required every named gate to PASS, so a genuine,
+correctly-classified P2 finding indirectly became merge-blocking even
+though canonical severity policy says only P0/P1 block.
+
+control/routing.py's review_is_consistent() (imported byte-for-byte in
+Commit 1, unmodified since):
+
+  failed = [name for name, value in review.gates.items() if value == "FAIL"]
+  if failed:
+      return False, f"verdict PASS contradicted by failing gates: ..."
+
+This treats ANY named gate graded FAIL (e.g. a Reviewer marking its own
+"ACCESSIBILITY" gate FAIL because of a P2-severity issue) as
+contradicting a PASS verdict, regardless of the severity of the
+finding(s) behind that gate. review.blocking (severity in {P0, P1}) is
+checked separately and correctly does not include P2/P3 findings — but
+the gate-level check is a second, coarser signal that can still block
+on a P2, independent of severity. This is the same class of defect
+RUN001-F1 named, reproduced in the inherited Python control plane, not
+fixed by A1's severity.py port (severity.py computes correct per-
+finding merge_blocked; it does not touch how routing.py aggregates a
+Reviewer's own named-gate grades).
+
+No fix applied. This needs an explicit decision: whether the gate-PASS
+requirement should be relaxed to ignore FAIL gates whose only
+associated findings are non-blocking (P2/P3), or whether some other
+reconciliation is intended. Left for you to decide; not folded into
+A1 or any other Wave-1 commit.

@@ -1,0 +1,20 @@
+test_a_citation_fails_closed_when_no_registry_is_supplied (tests.test_severity.TestMigratedSeverityFloorCases.test_a_citation_fails_closed_when_no_registry_is_supplied) ... ok
+test_a_failure_already_p0_stays_p0_floor_never_caps (tests.test_severity.TestMigratedSeverityFloorCases.test_a_failure_already_p0_stays_p0_floor_never_caps) ... ok
+test_a_valid_non_failure_p2_recommendation_does_not_block (tests.test_severity.TestMigratedSeverityFloorCases.test_a_valid_non_failure_p2_recommendation_does_not_block) ... ok
+test_a_valid_non_failure_p3_recommendation_does_not_block (tests.test_severity.TestMigratedSeverityFloorCases.test_a_valid_non_failure_p3_recommendation_does_not_block) ... ok
+test_an_arbitrary_citation_not_in_the_registry_is_invalid (tests.test_severity.TestMigratedSeverityFloorCases.test_an_arbitrary_citation_not_in_the_registry_is_invalid) ... ok
+test_contradictory_failure_with_non_failure_rationale_is_invalid (tests.test_severity.TestMigratedSeverityFloorCases.test_contradictory_failure_with_non_failure_rationale_is_invalid) ... ok
+test_contradictory_non_failure_with_unmet_requirement_is_invalid (tests.test_severity.TestMigratedSeverityFloorCases.test_contradictory_non_failure_with_unmet_requirement_is_invalid) ... ok
+test_fails_closed_on_malformed_non_object_finding_instead_of_throwing (tests.test_severity.TestMigratedSeverityFloorCases.test_fails_closed_on_malformed_non_object_finding_instead_of_throwing) ... ok
+test_fails_closed_on_unknown_classification_instead_of_throwing (tests.test_severity.TestMigratedSeverityFloorCases.test_fails_closed_on_unknown_classification_instead_of_throwing) ... ok
+test_fails_closed_on_unknown_severity_instead_of_throwing (tests.test_severity.TestMigratedSeverityFloorCases.test_fails_closed_on_unknown_severity_instead_of_throwing) ... ok
+test_jev_p2_accessibility_failure_is_raised_to_p1_and_blocks (tests.test_severity.TestMigratedSeverityFloorCases.test_jev_p2_accessibility_failure_is_raised_to_p1_and_blocks) ... ok
+test_no_classification_citation_rationale_is_invalid_and_blocks (tests.test_severity.TestMigratedSeverityFloorCases.test_no_classification_citation_rationale_is_invalid_and_blocks) ... ok
+test_property_1_unfloored_p2_p3_is_non_blocking (tests.test_severity.TestRun001F1RegressionProperties.test_property_1_unfloored_p2_p3_is_non_blocking) ... ok
+test_property_2_recognised_failure_receives_p1_floor_and_blocks (tests.test_severity.TestRun001F1RegressionProperties.test_property_2_recognised_failure_receives_p1_floor_and_blocks) ... ok
+test_property_3_invalid_evidence_blocks_independently_of_severity (tests.test_severity.TestRun001F1RegressionProperties.test_property_3_invalid_evidence_blocks_independently_of_severity) ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 0.001s
+
+OK
