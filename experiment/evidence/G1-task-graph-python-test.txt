@@ -1,0 +1,14 @@
+test_a_dangling_dependency_is_rejected (tests.test_task_graph.TestTaskGraphValidation.test_a_dangling_dependency_is_rejected) ... ok
+test_a_duplicate_task_id_is_rejected (tests.test_task_graph.TestTaskGraphValidation.test_a_duplicate_task_id_is_rejected) ... ok
+test_a_missing_depends_on_field_is_rejected (tests.test_task_graph.TestTaskGraphValidation.test_a_missing_depends_on_field_is_rejected) ... ok
+test_a_non_list_depends_on_value_is_rejected (tests.test_task_graph.TestTaskGraphValidation.test_a_non_list_depends_on_value_is_rejected) ... ok
+test_a_self_dependency_is_rejected (tests.test_task_graph.TestTaskGraphValidation.test_a_self_dependency_is_rejected) ... ok
+test_a_two_node_cycle_is_rejected (tests.test_task_graph.TestTaskGraphValidation.test_a_two_node_cycle_is_rejected) ... ok
+test_a_valid_linear_chain_passes_with_no_errors (tests.test_task_graph.TestTaskGraphValidation.test_a_valid_linear_chain_passes_with_no_errors) ... ok
+test_an_empty_task_graph_fails_closed (tests.test_task_graph.TestTaskGraphValidation.test_an_empty_task_graph_fails_closed) ... ok
+test_the_real_config_tasks_json_graph_is_valid (tests.test_task_graph.TestTaskGraphValidation.test_the_real_config_tasks_json_graph_is_valid) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.003s
+
+OK

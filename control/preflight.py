@@ -29,6 +29,7 @@ from . import (
     routing,
     state as state_mod,
     supabase_health,
+    task_graph,
     telemetry,
     workers,
 )
@@ -82,6 +83,13 @@ class Preflight:
                     "Protocol v2.0 and all specification files present" if ok
                     else f"missing: {', '.join(missing) or 'version marker'}",
                     {"missing": missing})
+
+    def gate_task_graph(self) -> Gate:
+        result = task_graph.validate_task_graph(repo_root=str(config.REPO_ROOT))
+        return Gate("task_graph_valid", True, result["ok"],
+                    "no cycles, no dangling/self dependencies, no duplicates" if result["ok"]
+                    else f"errors: {'; '.join(result['errors'])}",
+                    {"task_count": result["task_count"], "errors": result["errors"]})
 
     def gate_secrets(self) -> Gate:
         config.load_secrets_file()
@@ -422,6 +430,7 @@ class Preflight:
 
     GATES = (
         ("protocol_present", "gate_protocol"),
+        ("task_graph_valid", "gate_task_graph"),
         ("required_secrets", "gate_secrets"),
         ("control_plane_self_tests", "gate_self_tests"),
         ("clean_baseline", "gate_clean_baseline"),
