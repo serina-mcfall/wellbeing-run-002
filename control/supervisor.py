@@ -874,7 +874,7 @@ class Supervisor:
         task = active[0]
 
         decision = self.jev.decide(
-            "task_health",
+            "worker_health",
             {
                 "task": task["id"],
                 "state": task["state"],

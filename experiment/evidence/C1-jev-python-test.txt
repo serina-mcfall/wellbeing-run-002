@@ -1,0 +1,16 @@
+test_every_fallback_is_a_member_of_its_own_options (tests.test_jev.TestExactlyFiveRun002Kinds.test_every_fallback_is_a_member_of_its_own_options) ... ok
+test_exactly_five_top_level_kinds (tests.test_jev.TestExactlyFiveRun002Kinds.test_exactly_five_top_level_kinds) ... ok
+test_incident_classification_enum_is_exactly_the_frozen_set (tests.test_jev.TestExactlyFiveRun002Kinds.test_incident_classification_enum_is_exactly_the_frozen_set) ... ok
+test_no_run_001_kinds_present (tests.test_jev.TestExactlyFiveRun002Kinds.test_no_run_001_kinds_present) ... ok
+test_off_schema_incident_classification_falls_back (tests.test_jev.TestFallbackOnOffSchemaResponse.test_off_schema_incident_classification_falls_back) ... ok
+test_unparseable_response_falls_back_instead_of_raising (tests.test_jev.TestFallbackOnOffSchemaResponse.test_unparseable_response_falls_back_instead_of_raising) ... ok
+test_valid_on_schema_response_is_accepted_for_each_kind (tests.test_jev.TestFallbackOnOffSchemaResponse.test_valid_on_schema_response_is_accepted_for_each_kind) ... ok
+test_each_kind_falls_back_when_not_allowed (tests.test_jev.TestFallbackWhenNotAllowed.test_each_kind_falls_back_when_not_allowed) ... ok
+test_incident_classification_fallback_is_none_but_marked_uncertain (tests.test_jev.TestFallbackWhenNotAllowed.test_incident_classification_fallback_is_none_but_marked_uncertain)
+NONE from the fallback path means 'Jev unreachable', not ... ok
+test_unknown_kind_is_not_silently_handled (tests.test_jev.TestFallbackWhenNotAllowed.test_unknown_kind_is_not_silently_handled) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.006s
+
+OK

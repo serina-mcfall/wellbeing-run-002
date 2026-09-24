@@ -20,22 +20,38 @@ from . import http, redact
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 
 # The only questions the control plane may ask, with their permitted answers
-# and the deterministic answer used when Jev cannot be reached.
+# and the deterministic answer used when Jev cannot be reached. This is the
+# Run 002 vocabulary (protocol/JEV-CONTROL-PLANE-V2.md). It replaces Run
+# 001's own control-plane vocabulary (task_health/event_significance/
+# next_attention), which product/AI.md documents as historical only; Run 002
+# code must not implement those Run 001 labels.
 DECISIONS: dict[str, dict] = {
-    "task_health": {
-        "options": ["HEALTHY", "STRUGGLING", "STALE", "BLOCKED"],
+    "finding_severity": {
+        "options": ["P0", "P1", "P2", "P3"],
+        "fallback": "P1",
+        "question": "Classify the severity of this finding from the evidence.",
+    },
+    "worker_health": {
+        "options": ["HEALTHY", "SLOW", "STALLED", "WAITING"],
         "fallback": "HEALTHY",
-        "question": "Classify the health of this development task from the evidence.",
+        "question": "Classify the health of this worker from the evidence.",
     },
-    "event_significance": {
-        "options": ["ROUTINE", "NOTABLE", "IMPORTANT", "POTENTIAL_ESCALATION"],
-        "fallback": "ROUTINE",
-        "question": "Classify the significance of this control-plane event.",
+    "queue_priority": {
+        "options": ["LOWEST", "LOW", "NORMAL", "HIGH", "HIGHEST"],
+        "fallback": "NORMAL",
+        "question": "Classify the dispatch priority of this already-legal task from the evidence.",
     },
-    "next_attention": {
-        "options": ["CONTINUE", "RECHECK_SOON", "REVIEW", "FIXER", "HUMAN_REVIEW"],
-        "fallback": "CONTINUE",
-        "question": "What should receive attention next for this task?",
+    "model_routing": {
+        "options": ["STAY_TIER", "ESCALATE_ONE_TIER", "HUMAN_REQUIRED"],
+        "fallback": "STAY_TIER",
+        "question": "Recommend a model-tier action from the evidence.",
+    },
+    "incident_classification": {
+        "options": ["NONE", "WORKER", "PROVIDER", "CI", "EVIDENCE", "SECURITY",
+                    "PRIVACY", "BUDGET", "STATE_INVARIANT", "APPARATUS",
+                    "CREDENTIAL"],
+        "fallback": "NONE",
+        "question": "Classify what class of incident, if any, this evidence shows.",
     },
 }
 

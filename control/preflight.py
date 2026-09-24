@@ -296,12 +296,12 @@ class Preflight:
     def gate_jev(self) -> Gate:
         service = jev.DecisionService(self.cfg.roles["jev"].model)
         decision = service.decide(
-            "task_health",
+            "worker_health",
             {"task": "PREFLIGHT", "state": "ACTIVE", "attempts": 0,
              "minutes_since_progress": 0, "review_queue_depth": 0},
         )
         ok = decision.source == "jev" and decision.choice in jev.DECISIONS[
-            "task_health"]["options"]
+            "worker_health"]["options"]
         return Gate("jev_minimal_decision", True, ok,
                     f"Jev returned {decision.choice}" if ok
                     else f"Jev unavailable: {decision.error}",
