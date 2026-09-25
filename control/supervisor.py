@@ -161,7 +161,7 @@ class Supervisor:
     # ------------------------------------------------------------- dispatching
 
     def dispatchable(self, doc: dict, cs: clock.ClockState) -> list[dict]:
-        """Dependency-ready tasks permitted by phase, provider policy and backpressure."""
+        """Dependency-ready tasks permitted by provider policy and backpressure."""
         if cs.expired or doc.get("frozen_at"):
             return []
         if not providers.may(doc, "new_builds") or providers.safe_hold(doc):
@@ -180,8 +180,6 @@ class Supervisor:
                                      "WAITING_DB_LOCK"):
                 continue
             if not state_mod.dependencies_met(doc, task):
-                continue
-            if not clock.phase_allows(cs.phase, task.get("kind", "feature")):
                 continue
             ready.append(task)
 

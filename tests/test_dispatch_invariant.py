@@ -26,14 +26,17 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from control import (  # noqa: E402
     clock,
     config,
+    providers,
     routing,
     state,
     supervisor as supervisor_mod,
@@ -310,6 +313,82 @@ class TestTheInvariantIsGeneral(InvariantCase):
         self.assertIsNone(path)
         self.assertIn(str(BUILDER_WORKTREE), why)
         self.assertIn("two worktrees", why)
+
+
+class TestPhaseIndependentDispatch(InvariantCase):
+    """C-07: the imported Run 001 intra-day phase schedule no longer gates
+    dispatch (experiment/CONTRADICTION-AUDIT.md, C-07). Before T+24, task
+    eligibility is governed only by the dependency DAG, concurrency limits
+    and provider state; cs.expired alone stops dispatch at/after T+24.
+    """
+
+    def _clock_at(self, hours: float) -> clock.ClockState:
+        started = datetime(2026, 1, 1, 0, 0, tzinfo=ZoneInfo(TZ))
+        return clock.ClockState(started, started + timedelta(hours=hours), 24)
+
+    def _eligible_doc(self) -> dict:
+        doc = state.initial_document("run-002", "v2.0")
+        providers.ensure(doc)
+        state.add_task(doc, "TASK-008", "Integration", [], "feature", False, TZ)
+        return doc
+
+    def test_a_required_feature_task_dispatches_at_every_pre_expiry_hour(self):
+        doc = self._eligible_doc()
+        for hours in (2, 19, 22, 23.5):
+            with self.subTest(hours=hours):
+                ready = self.sup.dispatchable(doc, self._clock_at(hours))
+                self.assertIn(
+                    "TASK-008", [t["id"] for t in ready],
+                    f"a feature task must be dispatchable at T+{hours}: "
+                    "inherited phase labels must not gate eligibility",
+                )
+
+    def test_t24_still_stops_dispatch_after_phase_removal(self):
+        doc = self._eligible_doc()
+        for hours in (24, 24.1):
+            with self.subTest(hours=hours):
+                ready = self.sup.dispatchable(doc, self._clock_at(hours))
+                self.assertEqual(
+                    ready, [], f"cs.expired must still stop dispatch at T+{hours}"
+                )
+
+    def test_unmet_dependency_still_blocks_at_early_and_late_hours(self):
+        for hours in (2, 19):
+            with self.subTest(hours=hours):
+                doc = self._eligible_doc()
+                state.add_task(doc, "TASK-001", "Foundation", [], "feature", False, TZ)
+                doc["tasks"]["TASK-001"]["state"] = "ACTIVE"
+                doc["tasks"]["TASK-008"]["depends_on"] = ["TASK-001"]
+                ready = self.sup.dispatchable(doc, self._clock_at(hours))
+                self.assertEqual(ready, [])
+
+    def test_exhausted_builder_concurrency_still_blocks_at_early_and_late_hours(self):
+        for hours in (2, 19):
+            with self.subTest(hours=hours):
+                doc = self._eligible_doc()
+                for i in range(self.cfg.max_builders):
+                    filler_id = f"TASK-RUN-{i}"
+                    state.add_task(doc, filler_id, "Filler", [], "feature", False, TZ)
+                    doc["tasks"][filler_id]["state"] = "ACTIVE"
+                ready = self.sup.dispatchable(doc, self._clock_at(hours))
+                self.assertEqual(ready, [])
+
+    def test_provider_new_builds_denial_still_blocks_at_early_and_late_hours(self):
+        for hours in (2, 19):
+            with self.subTest(hours=hours):
+                doc = self._eligible_doc()
+                doc["providers"]["claude"]["state"] = providers.COOLDOWN
+                ready = self.sup.dispatchable(doc, self._clock_at(hours))
+                self.assertEqual(ready, [])
+
+    def test_provider_safe_hold_still_blocks_at_early_and_late_hours(self):
+        for hours in (2, 19):
+            with self.subTest(hours=hours):
+                doc = self._eligible_doc()
+                doc["providers"]["claude"]["state"] = providers.COOLDOWN
+                doc["providers"]["codex"]["state"] = providers.COOLDOWN
+                ready = self.sup.dispatchable(doc, self._clock_at(hours))
+                self.assertEqual(ready, [])
 
 
 if __name__ == "__main__":
