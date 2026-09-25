@@ -58,7 +58,10 @@ Accessibility failures are P1 unless more severe.
   does not decide it, and it does not excuse any gate. Judge the diff yourself.
 - Evidence applies only to the commit it names. If an item names a different
   commit, it tells you nothing about this one.
-- `REVIEW_PASS` only when there are no P0 and no P1 findings and every gate passes.
+- `REVIEW_PASS` only when there are no P0 and no P1 findings. A gate may be
+  graded `FAIL` because of a P2 or P3 finding without preventing a pass — but
+  you must report that finding and set its `category` to the exact gate name
+  it belongs to.
 - Any doubt that you cannot resolve from the diff is a finding, not a pass.
 - For any diff touching UI you MUST grade `OVERENGINEERING`, `COGNITIVE_LOAD`
   and `SENSORY_LOAD` explicitly.
@@ -97,5 +100,13 @@ A single fenced JSON block, exactly this shape:
 }
 ```
 
+`severity` is mandatory on every finding and must be exactly `P0`, `P1`, `P2`
+or `P3`. `category` is mandatory and must exactly name one of the review
+dimensions listed above. Every gate you grade must be exactly `PASS` or
+`FAIL`. A finding missing either field, or naming a dimension that does not
+exist, invalidates the whole review — it is not read as a lesser finding.
+
 Use `"verdict": "REVIEW_FAIL"` with the findings listed when it does not pass.
-An empty `findings` array is required for a pass. Do not write the fix yourself.
+Report every P2 and P3 finding you found, including on a pass — they are
+recorded as accepted non-blocking debt, not discarded. Only P0 and P1
+findings prevent a pass. Do not write the fix yourself.

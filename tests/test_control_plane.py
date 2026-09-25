@@ -7,7 +7,9 @@ the migration lock, deadline phases, review parsing and secret redaction.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -163,7 +165,8 @@ class TestReviewParsing(unittest.TestCase):
     def test_pass_with_blocking_findings_is_inconsistent(self):
         review = routing.parse_review(
             '```json\n{"verdict":"REVIEW_PASS","gates":{},'
-            '"findings":[{"severity":"P1","summary":"no focus style"}]}\n```'
+            '"findings":[{"severity":"P1","category":"ACCESSIBILITY",'
+            '"summary":"no focus style"}]}\n```'
         )
         consistent, why = routing.review_is_consistent(review, touches_ui=True)
         self.assertFalse(consistent)
@@ -192,6 +195,248 @@ class TestReviewParsing(unittest.TestCase):
             '{"severity":"P2"}]}\n```'
         )
         self.assertEqual([f["id"] for f in review.findings], ["F1", "F2"])
+
+
+def _review(verdict="REVIEW_PASS", gates=None, findings=None):
+    payload = {"verdict": verdict, "gates": gates or {}, "findings": findings or []}
+    return routing.parse_review("```json\n" + json.dumps(payload) + "\n```")
+
+
+def _finding(severity="P2", category="TESTS", fid="F1", **extra):
+    finding = {"id": fid, "severity": severity, "category": category}
+    finding.update(extra)
+    return finding
+
+
+UI_PASS = {"OVERENGINEERING": "PASS", "COGNITIVE_LOAD": "PASS", "SENSORY_LOAD": "PASS"}
+
+
+class TestGateVocabulary(unittest.TestCase):
+    """KNOWN_GATES is a contract shared with prompts/reviewer.md. If the two
+    drift, a reviewer can emit a category the code rejects, or grade a gate the
+    code has never heard of. This catches a twelfth dimension being added to
+    one without the other."""
+
+    def _prompt(self) -> str:
+        return (Path(__file__).resolve().parent.parent
+                / "prompts" / "reviewer.md").read_text(encoding="utf-8")
+
+    def test_known_gates_match_the_prompt_dimension_list(self):
+        block = self._prompt().split("## Review dimensions")[1] \
+                              .split("Specifically check for")[0]
+        dims = tuple(t.strip() for t in re.split(r"[·\n]", block) if t.strip())
+        self.assertEqual(routing.KNOWN_GATES, dims)
+
+    def test_known_gates_match_the_prompt_json_example(self):
+        gates = re.search(r'"gates":\s*\{(.*?)\}', self._prompt(), re.DOTALL).group(1)
+        self.assertEqual(routing.KNOWN_GATES,
+                         tuple(re.findall(r'"([A-Z_]+)"\s*:', gates)))
+
+    def test_required_ui_gates_are_a_subset(self):
+        self.assertTrue(set(routing.REQUIRED_UI_GATES) <= set(routing.KNOWN_GATES))
+
+    def test_only_pass_and_fail_are_governed_gate_values(self):
+        self.assertEqual(routing.GATE_VALUES, frozenset({"PASS", "FAIL"}))
+
+
+class TestReviewParserContract(unittest.TestCase):
+    """Parser-level guarantees, asserted directly rather than only through
+    review_is_consistent."""
+
+    def test_missing_severity_is_not_defaulted_to_p2(self):
+        review = _review(findings=[{"id": "F1", "category": "TESTS"}])
+        self.assertIsNone(review.findings[0].get("severity"))
+        self.assertEqual(review.blocking, [])
+
+    def test_blank_severity_is_preserved_as_invalid(self):
+        review = _review(findings=[{"id": "F1", "severity": "  ", "category": "TESTS"}])
+        self.assertEqual(review.findings[0]["severity"], "")
+        self.assertNotIn(review.findings[0]["severity"], routing.SEVERITIES)
+
+    def test_severity_is_normalised(self):
+        review = _review(findings=[_finding(severity=" p1 ", category="TESTS")])
+        self.assertEqual(review.findings[0]["severity"], "P1")
+
+    def test_category_is_normalised(self):
+        review = _review(findings=[_finding(category=" accessibility ")])
+        self.assertEqual(review.findings[0]["category"], "ACCESSIBILITY")
+
+    def test_absent_category_key_stays_absent(self):
+        """So consumers calling .get('category', '') keep their own default."""
+        review = _review(findings=[{"id": "F1", "severity": "P2"}])
+        self.assertNotIn("category", review.findings[0])
+
+    def test_ids_are_still_defaulted_positionally(self):
+        review = _review(verdict="REVIEW_FAIL",
+                         findings=[{"severity": "P1"}, {"severity": "P2"}])
+        self.assertEqual([f["id"] for f in review.findings], ["F1", "F2"])
+
+
+class TestC10GateAggregation(unittest.TestCase):
+    """C-10.1: only P0/P1 independently block a REVIEW_PASS. A gate graded FAIL
+    for a correctly-attributed P2/P3 no longer prevents a pass; everything
+    malformed or unattributable still fails closed."""
+
+    def assertConsistent(self, review):
+        consistent, why = routing.review_is_consistent(review, touches_ui=True)
+        self.assertTrue(consistent, f"expected consistent, got: {why}")
+
+    def assertInconsistent(self, review, fragment):
+        consistent, why = routing.review_is_consistent(review, touches_ui=True)
+        self.assertFalse(consistent, "expected inconsistent")
+        self.assertIn(fragment, why)
+        return why
+
+    # ---------------------------------------------- the contradiction, fixed
+    def test_p2_backed_gate_fail_no_longer_blocks(self):
+        self.assertConsistent(_review(
+            gates={**UI_PASS, "ACCESSIBILITY": "FAIL"},
+            findings=[_finding("P2", "ACCESSIBILITY")]))
+
+    def test_p3_backed_gate_fail_no_longer_blocks(self):
+        self.assertConsistent(_review(
+            gates={**UI_PASS, "TESTS": "FAIL"},
+            findings=[_finding("P3", "TESTS")]))
+
+    def test_mixed_p2_and_p3_backing_one_gate_does_not_block(self):
+        self.assertConsistent(_review(
+            gates={**UI_PASS, "SCOPE": "FAIL"},
+            findings=[_finding("P2", "SCOPE", "F1"), _finding("P3", "SCOPE", "F2")]))
+
+    def test_two_gates_each_backed_by_non_blocking_findings(self):
+        self.assertConsistent(_review(
+            gates={**UI_PASS, "SCOPE": "FAIL", "TESTS": "FAIL"},
+            findings=[_finding("P2", "SCOPE", "F1"), _finding("P3", "TESTS", "F2")]))
+
+    # -------------------------------------------------- blocking still blocks
+    def test_p0_backed_gate_fail_blocks(self):
+        self.assertInconsistent(_review(
+            gates={**UI_PASS, "SECURITY": "FAIL"},
+            findings=[_finding("P0", "SECURITY")]), "P0/P1")
+
+    def test_p1_backed_gate_fail_blocks(self):
+        self.assertInconsistent(_review(
+            gates={**UI_PASS, "ACCESSIBILITY": "FAIL"},
+            findings=[_finding("P1", "ACCESSIBILITY")]), "P0/P1")
+
+    def test_mixed_blocking_and_non_blocking_on_one_gate_blocks(self):
+        self.assertInconsistent(_review(
+            gates={**UI_PASS, "TESTS": "FAIL"},
+            findings=[_finding("P1", "TESTS", "F1"), _finding("P2", "TESTS", "F2")]),
+            "P0/P1")
+
+    def test_blocking_finding_blocks_even_with_every_gate_passing(self):
+        self.assertInconsistent(_review(
+            gates=UI_PASS, findings=[_finding("P1", "PRIVACY")]), "P0/P1")
+
+    # --------------------------------------------------------- fail closed
+    def test_unbacked_gate_fail_is_inconsistent(self):
+        self.assertInconsistent(_review(
+            gates={**UI_PASS, "SCOPE": "FAIL"}), "no attributable finding")
+
+    def test_gate_fail_backed_only_by_a_different_category_is_inconsistent(self):
+        self.assertInconsistent(_review(
+            gates={**UI_PASS, "SCOPE": "FAIL"},
+            findings=[_finding("P2", "TESTS")]), "no attributable finding")
+
+    def test_unknown_gate_name_graded_fail_is_unbacked(self):
+        """No finding may carry a category outside KNOWN_GATES, so a FAIL on an
+        invented gate is caught by the attribution rule without needing one."""
+        self.assertInconsistent(_review(
+            gates={**UI_PASS, "VIBES": "FAIL"},
+            findings=[_finding("P2", "TESTS")]), "gate VIBES FAIL")
+
+    def test_missing_severity_is_inconsistent(self):
+        self.assertInconsistent(_review(
+            gates=UI_PASS, findings=[{"id": "F1", "category": "TESTS"}]),
+            "missing or unrecognised severity")
+
+    def test_unknown_severity_is_inconsistent(self):
+        self.assertInconsistent(_review(
+            gates=UI_PASS, findings=[_finding("CRITICAL", "TESTS")]),
+            "missing or unrecognised severity")
+
+    def test_missing_category_is_inconsistent(self):
+        self.assertInconsistent(_review(
+            gates=UI_PASS, findings=[{"id": "F1", "severity": "P2"}]),
+            "missing or unrecognised category")
+
+    def test_unknown_category_is_inconsistent(self):
+        self.assertInconsistent(_review(
+            gates=UI_PASS, findings=[_finding("P2", "VIBES")]),
+            "missing or unrecognised category")
+
+    def test_malformed_category_is_inconsistent_even_when_no_gate_fails(self):
+        """Q3: malformed attribution must not enter a validated review at all,
+        because an accepted P2/P3 may later become durable debt."""
+        self.assertInconsistent(_review(
+            gates=UI_PASS, findings=[_finding("P2", "NOT_A_DIMENSION")]),
+            "missing or unrecognised category")
+
+    def test_unknown_gate_value_is_inconsistent(self):
+        self.assertInconsistent(_review(
+            gates={**UI_PASS, "TESTS": "SKIPPED"}), "unrecognised gate value")
+
+    def test_lowercase_gate_value_is_normalised_not_rejected(self):
+        self.assertConsistent(_review(
+            gates={**UI_PASS, "TESTS": "pass"}))
+
+    def test_malformed_evidence_is_reported_before_it_is_interpreted(self):
+        """A P1 with no category reports the category defect, not the severity
+        one — malformed evidence is never read as a lesser finding."""
+        self.assertInconsistent(_review(
+            gates=UI_PASS, findings=[{"id": "F1", "severity": "P1"}]),
+            "missing or unrecognised category")
+
+    # -------------------------------------------------------- normalisation
+    def test_category_matching_is_case_insensitive(self):
+        self.assertConsistent(_review(
+            gates={**UI_PASS, "ACCESSIBILITY": "FAIL"},
+            findings=[_finding("p2", " accessibility ")]))
+
+    # ------------------------------------------------- unchanged behaviours
+    def test_ui_required_gate_presence_still_enforced(self):
+        self.assertInconsistent(_review(gates={"SCOPE": "PASS"}),
+                                "missing required gates")
+
+    def test_non_ui_review_need_not_grade_the_ui_gates(self):
+        review = _review(gates={"SCOPE": "PASS"})
+        consistent, _ = routing.review_is_consistent(review, touches_ui=False)
+        self.assertTrue(consistent)
+
+    def test_review_fail_with_only_p2_p3_is_not_upgraded(self):
+        review = _review(verdict="REVIEW_FAIL", gates={**UI_PASS, "TESTS": "FAIL"},
+                         findings=[_finding("P2", "TESTS")])
+        consistent, _ = routing.review_is_consistent(review, touches_ui=True)
+        self.assertTrue(consistent, "consistency validation does not judge a FAIL")
+        self.assertEqual(review.verdict, routing.REVIEW_FAIL)
+
+    def test_review_fail_is_never_inspected_for_malformed_findings(self):
+        review = _review(verdict="REVIEW_FAIL", findings=[{"id": "F1"}])
+        consistent, _ = routing.review_is_consistent(review, touches_ui=True)
+        self.assertTrue(consistent)
+        self.assertEqual(review.verdict, routing.REVIEW_FAIL)
+
+    def test_unparseable_is_still_not_a_pass(self):
+        self.assertEqual(routing.parse_review("looks fine").verdict,
+                         routing.REVIEW_UNPARSEABLE)
+
+    # --------------------------------------------- RUN001-F1 reproduction pair
+    def test_run001_f1_reproduction_is_resolved(self):
+        """The exact shape C-10 exists to fix: a PASS verdict with one gate
+        graded FAIL for a genuine, correctly-classified P2."""
+        self.assertConsistent(_review(
+            gates={"SCOPE": "PASS", "OVERENGINEERING": "FAIL",
+                   "COGNITIVE_LOAD": "PASS", "SENSORY_LOAD": "PASS"},
+            findings=[_finding("P2", "OVERENGINEERING", "F1",
+                               summary="helper with a single caller")]))
+
+    def test_run001_f1_fail_closed_counterpart(self):
+        """Same failing gate, no finding accounting for it — still refused."""
+        self.assertInconsistent(_review(
+            gates={"SCOPE": "PASS", "OVERENGINEERING": "FAIL",
+                   "COGNITIVE_LOAD": "PASS", "SENSORY_LOAD": "PASS"}),
+            "gate OVERENGINEERING FAIL with no attributable finding")
 
 
 class TestBudget(unittest.TestCase):

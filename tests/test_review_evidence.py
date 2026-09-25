@@ -216,7 +216,8 @@ class TestIndependenceAndMergeGateUnchanged(unittest.TestCase):
         review = routing.parse_review(
             '```json\n{"verdict":"REVIEW_PASS","gates":{"OVERENGINEERING":"PASS",'
             '"COGNITIVE_LOAD":"PASS","SENSORY_LOAD":"PASS"},'
-            '"findings":[{"severity":"P1","summary":"still broken"}]}\n```')
+            '"findings":[{"severity":"P1","category":"CORRECTNESS",'
+            '"summary":"still broken"}]}\n```')
         consistent, why = routing.review_is_consistent(review, touches_ui=True)
         self.assertFalse(consistent)
         self.assertIn("P0/P1", why)

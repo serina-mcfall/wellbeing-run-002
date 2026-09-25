@@ -24,6 +24,21 @@ REVIEW_PASS = "REVIEW_PASS"
 REVIEW_FAIL = "REVIEW_FAIL"
 REVIEW_UNPARSEABLE = "REVIEW_UNPARSEABLE"
 
+# The canonical review dimensions, in prompts/reviewer.md's own order. Gate keys
+# and a finding's category are drawn from this one vocabulary — that shared
+# vocabulary is what makes attribution checkable at all. A test asserts this
+# tuple still matches the prompt, so a twelfth dimension cannot be added to one
+# without the other.
+KNOWN_GATES = (
+    "SCOPE", "ACCEPTANCE_CRITERIA", "CORRECTNESS", "TESTS", "ACCESSIBILITY",
+    "COGNITIVE_LOAD", "SENSORY_LOAD", "SECURITY", "PRIVACY", "ARCHITECTURE",
+    "OVERENGINEERING",
+)
+
+# A gate is graded or it is not. An unrecognised value must fail closed rather
+# than slip past the FAIL branch as an accidental third state.
+GATE_VALUES = frozenset({"PASS", "FAIL"})
+
 REQUIRED_UI_GATES = ("OVERENGINEERING", "COGNITIVE_LOAD", "SENSORY_LOAD")
 
 _BLOCK = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
@@ -56,6 +71,12 @@ class Review:
         }
 
 
+def _normalised(value) -> str:
+    """Upper-cased, stripped token. Never None, so a consumer using
+    .get(field, "") is unaffected by a blank the reviewer sent."""
+    return "" if value is None else str(value).strip().upper()
+
+
 def parse_review(text: str) -> Review:
     """Extract the reviewer's machine-readable verdict block.
 
@@ -76,7 +97,15 @@ def parse_review(text: str) -> Review:
         findings = [f for f in data.get("findings", []) if isinstance(f, dict)]
         for index, finding in enumerate(findings, start=1):
             finding.setdefault("id", f"F{index}")
-            finding["severity"] = str(finding.get("severity", "P2")).upper()
+            # Normalise in place, but never invent a value. A missing severity
+            # used to default to "P2", which silently made an unlabelled
+            # finding non-blocking; absence must survive to
+            # review_is_consistent so it can fail closed. Only keys the
+            # reviewer actually sent are rewritten, so consumers that call
+            # .get(field, "") keep their own defaults for an absent field.
+            for field in ("severity", "category"):
+                if field in finding:
+                    finding[field] = _normalised(finding[field])
         gates = {str(k).upper(): str(v).upper()
                  for k, v in (data.get("gates") or {}).items()}
         return Review(verdict, findings, gates, str(data.get("summary", "")), excerpt)
@@ -84,14 +113,46 @@ def parse_review(text: str) -> Review:
 
 
 def review_is_consistent(review: Review, touches_ui: bool) -> tuple[bool, str]:
-    """A PASS must actually be clean, and UI reviews must grade the named gates."""
+    """Whether a claimed REVIEW_PASS is supportable by the evidence it carries.
+
+    C-10: a gate graded FAIL for a correctly-attributed P2/P3 finding no longer
+    prevents a pass. Protocol v2 "Severity --- single source of truth" makes
+    only P0/P1 independently blocking; the previous gate-level check ignored
+    severity entirely and so reproduced RUN001-F1, where a genuine,
+    correctly-classified P2 became merge-blocking.
+
+    Everything else fails closed: a missing or unrecognised severity, a missing
+    or unrecognised category, an unrecognised gate value, and a FAIL gate that
+    no finding accounts for. Malformed evidence is checked before it is
+    interpreted, so it can never be read as a lesser finding.
+
+    REVIEW_FAIL is never upgraded here. The reviewer is the acceptance
+    authority; this only asks whether a claimed PASS holds up.
+    """
     if review.verdict != REVIEW_PASS:
         return True, ""
+
+    ungraded = sorted({v for v in review.gates.values() if v not in GATE_VALUES})
+    if ungraded:
+        return False, f"unrecognised gate value(s): {', '.join(ungraded)}"
+
+    for finding in review.findings:
+        name = finding.get("id") or "(unidentified finding)"
+        if finding.get("severity") not in SEVERITIES:
+            return False, f"{name} has a missing or unrecognised severity"
+        if finding.get("category") not in KNOWN_GATES:
+            return False, f"{name} has a missing or unrecognised category"
+
     if review.blocking:
         return False, "verdict PASS contradicted by P0/P1 findings"
-    failed = [name for name, value in review.gates.items() if value == "FAIL"]
-    if failed:
-        return False, f"verdict PASS contradicted by failing gates: {', '.join(failed)}"
+
+    # A gate key outside KNOWN_GATES needs no separate rule: no finding can
+    # carry that category, so a FAIL on it is unbacked and caught here, while a
+    # PASS on it changes nothing.
+    for gate in sorted(g for g, value in review.gates.items() if value == "FAIL"):
+        if not any(f.get("category") == gate for f in review.findings):
+            return False, f"gate {gate} FAIL with no attributable finding"
+
     if touches_ui:
         missing = [g for g in REQUIRED_UI_GATES if g not in review.gates]
         if missing:
