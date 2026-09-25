@@ -63,7 +63,7 @@ def default_branch(repo: str) -> str | None:
 
 PR_FIELDS = (
     "number,state,isDraft,title,headRefName,headRefOid,baseRefName,mergeable,"
-    "mergeStateStatus,reviewDecision,statusCheckRollup,url,labels,author"
+    "mergeStateStatus,reviewDecision,statusCheckRollup,url,labels,author,mergeCommit"
 )
 
 

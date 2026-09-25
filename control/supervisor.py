@@ -376,6 +376,8 @@ class Supervisor:
                  provider=role_cfg.provider, model=role_cfg.model, agent_id=worker,
                  activity_class="FIX", outcome="DISPATCHED",
                  metadata_redacted={"finding_ids": record["open_finding_ids"]})
+        self.notify_out(doc, notify.INFO, f"{task['id']} PR #{pr_number}: fixer dispatched",
+                        f"Repair cycle {record['repair_cycles']}.")
 
     def on_dispatch_failure(self, doc: dict, task: dict, pr_number: int, role: str,
                             reason: str) -> None:
@@ -606,6 +608,10 @@ class Supervisor:
             # Persist the findings so a retry dispatches the same repair work
             # instead of paying for another review to rediscover it.
             record["pending_findings"] = review.blocking or review.findings
+            self.notify_out(doc, notify.INFO,
+                            f"{task['id']} PR #{pr_number}: review found issues",
+                            f"{len(record['pending_findings'])} finding(s) reported; "
+                            "dispatching a fixer.")
             self.dispatch_fixer(doc, task, pr_number, record["pending_findings"])
             return
 
@@ -613,6 +619,8 @@ class Supervisor:
         record["approval_current"] = True
         self.log("REVIEW_PASS_RECORDED", task_id=task["id"], pr_id=pr_number,
                  outcome="APPROVED", activity_class="REVIEW")
+        self.notify_out(doc, notify.INFO, f"{task['id']} PR #{pr_number}: review passed",
+                        "Awaiting merge eligibility.")
 
     def release_review_worktree(self, worker: str) -> None:
         """Remove a finished reviewer's worktree. Never touches a live worker."""
@@ -651,6 +659,8 @@ class Supervisor:
         self.transition(doc, task["id"], "PR_OPEN", f"PR #{pr_number} opened")
         self.log("PR_OPENED", task_id=task["id"], pr_id=pr_number, branch=task["branch"],
                  activity_class="BUILD", outcome="PR_OPEN")
+        self.notify_out(doc, notify.INFO, f"{task['id']}: PR #{pr_number} opened",
+                        f"Branch {task['branch']}.")
 
     def route_prs(self, doc: dict, cs: clock.ClockState, prs: list[dict]) -> None:
         open_prs = {pr["number"]: pr for pr in prs}
@@ -669,8 +679,28 @@ class Supervisor:
             pr = open_prs.get(pr_number)
 
             if pr is None:
-                merged = gh.pr_view(self.cfg.github_repo, pr_number) or {}
-                if (merged.get("state") or "").upper() == "MERGED":
+                merged_view = gh.pr_view(self.cfg.github_repo, pr_number)
+                merge_sha_observed = merged_view is not None
+                merged_data = merged_view or {}
+                if (merged_data.get("state") or "").upper() == "MERGED":
+                    merged_sha = (merged_data.get("mergeCommit") or {}).get("oid")
+                    record["merged"] = True
+                    record["merged_sha"] = merged_sha
+                    record["merge_sha_observed"] = merge_sha_observed
+                    self.log(
+                        "MERGED",
+                        task_id=task["id"],
+                        pr_id=pr_number,
+                        branch=task["branch"],
+                        outcome="MERGED",
+                        activity_class="ORCHESTRATION",
+                        metadata_redacted={
+                            "reviewed_head": record.get("reviewed_head"),
+                            "merged_sha": merged_sha,
+                            "merge_sha_observed": merge_sha_observed,
+                            "detected_externally": True,
+                        },
+                    )
                     self.complete_task(doc, task, pr_number)
                 continue
 
@@ -782,8 +812,29 @@ class Supervisor:
             return
 
         record["merged"] = True
-        self.log("MERGED", task_id=task["id"], pr_id=number, branch=task["branch"],
-                 outcome="MERGED", activity_class="ORCHESTRATION")
+
+        merged_view = gh.pr_view(repo, number)
+        merge_sha_observed = merged_view is not None
+        merged_data = merged_view or {}
+        merged_sha = (merged_data.get("mergeCommit") or {}).get("oid")
+
+        record["merged_sha"] = merged_sha
+        record["merge_sha_observed"] = merge_sha_observed
+
+        self.log(
+            "MERGED",
+            task_id=task["id"],
+            pr_id=number,
+            branch=task["branch"],
+            outcome="MERGED",
+            activity_class="ORCHESTRATION",
+            metadata_redacted={
+                "reviewed_head": record.get("reviewed_head"),
+                "merged_sha": merged_sha,
+                "merge_sha_observed": merge_sha_observed,
+            },
+        )
+
         self.complete_task(doc, task, number)
 
     def complete_task(self, doc: dict, task: dict, pr_number: int) -> None:
@@ -800,8 +851,17 @@ class Supervisor:
         worker = task.get("worker")
         if worker:
             workers.close_worker(worker)
-        self.notify_out(doc, notify.INFO, f"{task['id']} complete",
-                        f"{task['title']} merged as PR #{pr_number}.")
+
+        reviewed_sha = (record or {}).get("reviewed_head")
+        merged_sha = (record or {}).get("merged_sha")
+        reviewed_sha_text = reviewed_sha or "unavailable"
+        merged_sha_text = merged_sha or "not observed"
+        self.notify_out(
+            doc, notify.INFO, f"{task['id']} complete",
+            f"{task['title']} merged as PR #{pr_number}. "
+            f"Reviewed SHA {reviewed_sha_text}, merged SHA {merged_sha_text}. "
+            "No human action required.",
+        )
 
     # ------------------------------------------------------- staleness and Jev
 
