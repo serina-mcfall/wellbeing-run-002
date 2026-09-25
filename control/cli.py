@@ -5,6 +5,7 @@
   ctl start       record T+00 and hand implementation to the agent organisation
   ctl status      current experiment state
   ctl report      metrics summary from the raw ledger
+  ctl verify-manifest  C-13: verify the frozen T+00 manifest has not drifted
   ctl freeze      force the T+24 freeze path
 """
 
@@ -22,6 +23,7 @@ from . import (
     config,
     gh,
     ledger as ledger_mod,
+    manifest,
     migration_lock,
     notify,
     preflight as preflight_mod,
@@ -137,11 +139,8 @@ def cmd_start(args) -> int:
             "main_branch": cfg.main_branch,
             "required_checks": list(cfg.required_checks),
             "tool_versions": preflight_mod.tool_versions(),
-            "providers_and_models": {
-                role: {"provider": spec.provider, "model": spec.model,
-                       "escalation_model": spec.escalation_model, "effort": spec.effort}
-                for role, spec in cfg.roles.items()
-            },
+            "providers_and_models": manifest.providers_and_models(cfg),
+            **manifest.frozen_content_fields(),
             "budget": {"total_usd": cfg.budget_usd,
                        "configured_by": cfg.budget_configured_by,
                        "scope": "incremental metered OpenRouter spend only"},
@@ -162,7 +161,7 @@ def cmd_start(args) -> int:
                 "and ledger state once the runtime returns."
             ],
         }
-        config.BASELINE_PATH.write_text(json.dumps(baseline, indent=2), encoding="utf-8")
+        manifest.atomic_write_json(config.BASELINE_PATH, baseline)
 
         ledger.append("EXPERIMENT_STARTED", outcome="T+00",
                       activity_class="ORCHESTRATION", state_after="RUNNING",
@@ -248,6 +247,20 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_verify_manifest(args) -> int:
+    """C-13 frozen validation: does every frozen input still recompute to
+    what `ctl start` recorded? Only meaningful after T+00 - refuses to run
+    against a baseline that doesn't exist yet."""
+    cfg = config.load()
+    if not config.BASELINE_PATH.exists():
+        print("refusing to verify: no baseline artifact yet (T+00 has not occurred).")
+        return 1
+    baseline = json.loads(config.BASELINE_PATH.read_text(encoding="utf-8"))
+    result = manifest.frozen_check(baseline, cfg)
+    print(result.detail)
+    return 0 if result.ok else 1
+
+
 def cmd_freeze(args) -> int:
     supervisor = supervisor_mod.Supervisor()
     with supervisor.store.transaction() as doc:
@@ -286,6 +299,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("status", help="print current state").set_defaults(func=cmd_status)
     sub.add_parser("report", help="ledger metrics summary").set_defaults(func=cmd_report)
+    sub.add_parser("verify-manifest",
+                   help="C-13: verify the frozen T+00 manifest has not drifted"
+                   ).set_defaults(func=cmd_verify_manifest)
     sub.add_parser("freeze", help="force the freeze path").set_defaults(func=cmd_freeze)
     sub.add_parser("supervisor", help="run the supervisor loop in the foreground"
                    ).set_defaults(func=cmd_supervisor)

@@ -22,6 +22,7 @@ from . import (
     gh,
     jev,
     ledger as ledger_mod,
+    manifest,
     migration_lock,
     notify,
     providers,
@@ -90,6 +91,17 @@ class Preflight:
                     "no cycles, no dangling/self dependencies, no duplicates" if result["ok"]
                     else f"errors: {'; '.join(result['errors'])}",
                     {"task_count": result["task_count"], "errors": result["errors"]})
+
+    def gate_manifest_readiness(self) -> Gate:
+        """C-13: every frozen-input hash must be computable pre-T+00.
+
+        Does not require baseline_sha - that is filled only at `ctl start`.
+        This proves the hashing pipeline works now; it does not compare
+        against a stored baseline, since none exists before T+00.
+        """
+        result = manifest.readiness_check(self.cfg)
+        evidence = {k: v for k, v in result.fields.items() if k != "providers_and_models"}
+        return Gate("manifest_readiness", True, result.ok, result.detail, evidence)
 
     def gate_secrets(self) -> Gate:
         config.load_secrets_file()
@@ -431,6 +443,7 @@ class Preflight:
     GATES = (
         ("protocol_present", "gate_protocol"),
         ("task_graph_valid", "gate_task_graph"),
+        ("manifest_readiness", "gate_manifest_readiness"),
         ("required_secrets", "gate_secrets"),
         ("control_plane_self_tests", "gate_self_tests"),
         ("clean_baseline", "gate_clean_baseline"),
