@@ -20,6 +20,7 @@ from . import (
     clock,
     config,
     gh,
+    hostcheck,
     jev,
     ledger as ledger_mod,
     manifest,
@@ -102,6 +103,15 @@ class Preflight:
         result = manifest.readiness_check(self.cfg)
         evidence = {k: v for k, v in result.fields.items() if k != "providers_and_models"}
         return Gate("manifest_readiness", True, result.ok, result.detail, evidence)
+
+    def gate_host_headroom(self) -> Gate:
+        """C-08c: pre-T+00 host CPU/RAM/disk/fd/inotify/port headroom.
+
+        All threshold logic lives in control/hostcheck.py; this is a thin
+        wrapper, matching gate_manifest_readiness's shape.
+        """
+        result = hostcheck.headroom_check()
+        return Gate("host_headroom", True, result.ok, result.detail, result.fields)
 
     def gate_secrets(self) -> Gate:
         config.load_secrets_file()
@@ -444,6 +454,7 @@ class Preflight:
         ("protocol_present", "gate_protocol"),
         ("task_graph_valid", "gate_task_graph"),
         ("manifest_readiness", "gate_manifest_readiness"),
+        ("host_headroom", "gate_host_headroom"),
         ("required_secrets", "gate_secrets"),
         ("control_plane_self_tests", "gate_self_tests"),
         ("clean_baseline", "gate_clean_baseline"),

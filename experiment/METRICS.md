@@ -62,9 +62,23 @@ the Capability column.
 
 ## Pre-T+00 host-resource headroom gate — C-08c
 
-| Requirement | Capability | Runtime data | Evidence |
+| Signal | Capability | Real-host result (2026-09-25) | Evidence |
 |---|---|---|---|
-| Host CPU/RAM/disk/fd/inotify/port headroom gate before T+00 | NOT_IMPLEMENTED | NOT_APPLICABLE | `control/preflight.py`'s `GATES` tuple (21 entries) contains no corresponding gate. Genuine T+00 blocker per Protocol v2's own Preflight enumeration, distinct from the ongoing runtime tracking above. See C-08. |
+| CPU | IMPLEMENTED | PASS | `control/hostcheck.py::cpu_ok`. Tested: `tests/test_hostcheck.py::TestCpu`. |
+| RAM | IMPLEMENTED | PASS | `control/hostcheck.py::ram_ok`. Tested: `TestRam`. |
+| Disk | IMPLEMENTED | PASS | `control/hostcheck.py::disk_ok`. Tested: `TestDisk`. |
+| fd | IMPLEMENTED | PASS (weakly discriminating on this WSL2 host — file-max is 2^63-1) | `control/hostcheck.py::fd_ok`, uses max_handles - allocated_handles per proc_sys_fs(5), never the legacy second field. Tested: `TestFd`. |
+| inotify watches | IMPLEMENTED | PASS (10,595/524,288, ~2.0%) | `control/hostcheck.py::inotify_watches_ok`. Tested: `TestInotifyThresholds`. |
+| inotify instances | IMPLEMENTED | **FAIL** (113/128 real-UID instances, exceeding the governed 50% ceiling of 64) | `control/hostcheck.py::inotify_instances_ok`. Tested: `TestInotifyThresholds`. |
+| Ports | IMPLEMENTED | PASS (97/100 candidate ports bindable, threshold 20) | `control/hostcheck.py::ports_ok`. Tested: `TestPorts`. |
+| Overall gate (`gate_host_headroom`) | IMPLEMENTED | **FAIL**, solely due to inotify instances | `control/preflight.py::gate_host_headroom`. |
+
+T+00 remains NOT_STARTED (see `experiment/TIMELINE.md`). This table records one
+point-in-time real-host preflight observation. It is not runtime telemetry and
+does not predict the host state at the eventual T+00 preflight. Re-run
+gate_host_headroom at the actual preflight; this snapshot is evidence that the
+implemented gate currently detects a genuine host-readiness failure, not
+evidence about future host state.
 
 ## Worker resource lifecycle — C-09
 
