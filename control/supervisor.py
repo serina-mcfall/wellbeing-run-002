@@ -18,6 +18,7 @@ from . import (
     budget,
     clock,
     config,
+    debt,
     evidence,
     gh,
     jev,
@@ -568,6 +569,14 @@ class Supervisor:
         consistent, why = routing.review_is_consistent(
             review, routing.touches_ui(self.cfg.github_repo, pr_number)
         )
+        # C-10.2: the accepted P2/P3 set has to be constructible BEFORE the PR
+        # becomes merge-eligible. A duplicate or malformed finding identity is
+        # a pre-merge review failure, not a post-merge evidence loss: once
+        # gh.merge() has run there is no way to refuse the debt without
+        # stranding a task that has already merged.
+        retained = (debt.retain_accepted(review)
+                    if review.verdict == routing.REVIEW_PASS and consistent
+                    else None)
 
         record["last_review_at"] = clock.iso(self.now())
         self.log("REVIEW_RESULT", task_id=task["id"], pr_id=pr_number, role="reviewer",
@@ -575,18 +584,21 @@ class Supervisor:
                  activity_class="REVIEW", outcome=review.verdict,
                  metadata_redacted=review.as_dict())
 
-        if review.verdict == routing.REVIEW_UNPARSEABLE or not consistent:
+        if (review.verdict == routing.REVIEW_UNPARSEABLE or not consistent
+                or (retained is not None and not retained.ok)):
             record["approval_current"] = False
             record["review_verdict"] = routing.REVIEW_FAIL
+            reason = (why or (retained.reason if retained else "")
+                      or "unparseable verdict")
             self.log("REVIEW_REJECTED_BY_SUPERVISOR", task_id=task["id"], pr_id=pr_number,
                      outcome="REJECTED", activity_class="REVIEW",
-                     metadata_redacted={"reason": why or "unparseable verdict"})
+                     metadata_redacted={"reason": reason})
             if record["review_cycles"] >= self.cfg.max_repair_cycles:
                 self.transition(doc, task["id"], "HUMAN_REQUIRED",
                                 "reviewer output unusable")
                 self.notify_out(doc, notify.HUMAN_REQUIRED,
                                 f"{task['id']} PR #{pr_number}: review unusable",
-                                why or "The reviewer did not return a valid verdict.")
+                                reason or "The reviewer did not return a valid verdict.")
             else:
                 self.transition(doc, task["id"], "PR_OPEN", "review unusable; re-review")
             return
@@ -615,6 +627,9 @@ class Supervisor:
 
         record["review_verdict"] = routing.REVIEW_PASS
         record["approval_current"] = True
+        # Validated and scrubbed at the approving review, because the reviewer's
+        # output does not survive to merge time and must not be re-trusted then.
+        record["accepted_findings"] = list(retained.entries)
         self.log("REVIEW_PASS_RECORDED", task_id=task["id"], pr_id=pr_number,
                  outcome="APPROVED", activity_class="REVIEW")
         self.notify_out(doc, notify.INFO, f"{task['id']} PR #{pr_number}: review passed",
@@ -819,6 +834,31 @@ class Supervisor:
         record["merged_sha"] = merged_sha
         record["merge_sha_observed"] = merge_sha_observed
 
+        # C-10.2. The merge above is irreversible, so this never raises and
+        # never writes a partial set: either every accepted P2/P3 becomes debt
+        # or none does, and the task completes either way.
+        retained_entries = record.get("accepted_findings")
+        debt_result = debt.accept(
+            doc, task_id=task["id"], pr_number=number,
+            accepted_findings=retained_entries,
+            merged_sha=merged_sha, at=clock.iso(self.now()),
+        )
+        record["debt_recording_status"] = debt_result.status
+        if debt_result.error:
+            record["debt_recording_error"] = debt_result.error
+        else:
+            record.pop("debt_recording_error", None)
+        if debt_result.status == debt.FAILED:
+            self.log("DEBT_RECORDING_FAILED", task_id=task["id"], pr_id=number,
+                     outcome="FAILED", activity_class="ESCALATION",
+                     human_intervention=False,
+                     metadata_redacted={
+                         "code": debt_result.error,
+                         "retained_count": (len(retained_entries)
+                                            if isinstance(retained_entries, list) else 0),
+                         "merged_sha": merged_sha,
+                     })
+
         self.log(
             "MERGED",
             task_id=task["id"],
@@ -830,6 +870,8 @@ class Supervisor:
                 "reviewed_head": record.get("reviewed_head"),
                 "merged_sha": merged_sha,
                 "merge_sha_observed": merge_sha_observed,
+                "debt_recording_status": debt_result.status,
+                "debt_ids": list(debt_result.debt_ids),
             },
         )
 
