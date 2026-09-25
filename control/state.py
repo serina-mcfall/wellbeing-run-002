@@ -168,6 +168,7 @@ def initial_document(experiment_id: str, protocol_version: str) -> dict:
                            "acquired_at": None, "waiters": [], "contention_events": 0},
         "workers": {},
         "prs": {},
+        "interventions": {},
         "counters": {"human_interventions": 0, "guardrail_activations": 0,
                      "merge_approvals_invalidated": 0, "throttle_events": 0,
                      "recoveries": 0, "migration_lock_waits": 0},

@@ -7,11 +7,15 @@
   ctl report      metrics summary from the raw ledger
   ctl verify-manifest  C-13: verify the frozen T+00 manifest has not drifted
   ctl freeze      force the T+24 freeze path
+  ctl human-list        C-08b.1: list human interventions
+  ctl human-acknowledge C-08b.1: acknowledge a human intervention
+  ctl human-resolve     C-08b.1: resolve an acknowledged human intervention
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import subprocess
 import sys
@@ -22,12 +26,14 @@ from . import (
     clock,
     config,
     gh,
+    intervention,
     ledger as ledger_mod,
     manifest,
     migration_lock,
     notify,
     preflight as preflight_mod,
     providers,
+    redact,
     state as state_mod,
     supervisor as supervisor_mod,
     telemetry,
@@ -213,6 +219,7 @@ def cmd_status(args) -> int:
         "migration_lock": doc["migration_lock"],
         "counters": doc["counters"],
         "workers": list(doc["workers"]),
+        "human_interventions_open": intervention.simultaneous_open_count(doc),
     }
     print(json.dumps(payload, indent=2))
     return 0
@@ -279,6 +286,251 @@ def cmd_supervisor(args) -> int:
     return supervisor_mod.main()
 
 
+def _ledger_has_event(ledger, event_type: str, intervention_id: str) -> bool:
+    """Whether the ledger already carries this event for this intervention.
+
+    The ledger is append-only evidence, so its absence has to be asked about
+    rather than inferred from state: a state document can commit and the
+    following ledger append still fail. Matching is on
+    metadata_redacted["intervention_id"], the one field every human-intervention
+    event carries.
+    """
+    for event in ledger.events(event_type):
+        metadata = event.get("metadata_redacted") or {}
+        if metadata.get("intervention_id") == intervention_id:
+            return True
+    return False
+
+
+def cmd_human_list(args) -> int:
+    """C-08b.1: read-only listing. Never opens a transaction and never logs.
+
+    active_human_minutes is added here, at the reporting boundary, exactly as
+    control/intervention.py intends - the durable record keeps whole seconds.
+    """
+    cfg = config.load()
+    store = state_mod.Store(tz=cfg.timezone)
+    doc = store.read()
+
+    records = list(doc.get("interventions", {}).values())
+    if args.status != "ALL":
+        records = [r for r in records if r.get("status") == args.status]
+    records.sort(key=lambda r: (r.get("requested_at") or "", r.get("id") or ""))
+
+    print(json.dumps({
+        "status_filter": args.status,
+        "count": len(records),
+        "interventions": [
+            dict(r, active_human_minutes=intervention.active_human_minutes(r))
+            for r in records
+        ],
+    }, indent=2))
+    return 0
+
+
+def cmd_human_acknowledge(args) -> int:
+    """C-08b.1: record a human's acknowledgement.
+
+    State first, ledger second, deliberately. The durable record commits inside
+    the transaction; the append happens after it closes. That ordering makes the
+    ledger the only part that can lag, and a lag is repairable - rerunning the
+    same command appends the missing event and nothing else.
+    """
+    cfg = config.load()
+    # Secret rejection runs before the transaction opens, so a refused command
+    # cannot have touched state or the ledger. It runs after config.load()
+    # deliberately: that call loads the operator secrets file into the
+    # environment, which is what lets contains_secret() match known values and
+    # not merely secret-shaped patterns. Only operator-supplied --by is checked
+    # - getpass.getuser() is the OS's answer, not free text, and is never
+    # rejected for merely matching a broad pattern.
+    if args.by is not None and redact.contains_secret(args.by):
+        print(f"refusing to acknowledge {args.intervention_id}: --by appears to "
+              f"contain a secret; the supplied value is deliberately not shown. "
+              f"If it is a live credential, rotate it and revoke the old one "
+              f"server-side.")
+        return 1
+
+    store = state_mod.Store(tz=cfg.timezone)
+
+    with store.transaction() as doc:
+        record = doc.get("interventions", {}).get(args.intervention_id)
+        if record is None:
+            print(f"unknown intervention {args.intervention_id}")
+            return 1
+
+        status = record.get("status")
+        if status == "OPEN":
+            actor = args.by or getpass.getuser()
+            try:
+                intervention.acknowledge(doc, args.intervention_id, by=actor,
+                                         tz=cfg.timezone)
+            except intervention.InterventionError as exc:
+                print(f"refusing to acknowledge {args.intervention_id}: {exc}")
+                return 1
+        elif status == "ACKNOWLEDGED":
+            # Idempotent repair. The stored actor is authoritative: an omitted
+            # --by is never filled in from whoever happens to be rerunning this,
+            # or a repair would quietly rewrite who actually responded.
+            if args.by is not None and args.by != record["acknowledged_by"]:
+                print(f"refusing to acknowledge {args.intervention_id}: already "
+                      f"acknowledged by {record['acknowledged_by']}, not {args.by}")
+                return 1
+        elif status == "RESOLVED":
+            print(f"refusing to acknowledge {args.intervention_id}: already RESOLVED")
+            return 1
+        else:
+            print(f"refusing to acknowledge {args.intervention_id}: unrecognised "
+                  f"status {status!r}")
+            return 1
+
+        committed = dict(record)
+
+    ledger = ledger_mod.Ledger(tz=cfg.timezone, experiment_id=cfg.experiment_id)
+    if _ledger_has_event(ledger, "HUMAN_INTERVENTION_ACKNOWLEDGED", committed["id"]):
+        print(f"{committed['id']} acknowledged by {committed['acknowledged_by']} at "
+              f"{committed['acknowledged_at']} (ledger evidence already present)")
+        return 0
+
+    try:
+        ledger.append(
+            "HUMAN_INTERVENTION_ACKNOWLEDGED",
+            task_id=committed["task_id"],
+            outcome="ACKNOWLEDGED",
+            activity_class="ESCALATION",
+            human_intervention=True,
+            metadata_redacted={
+                "intervention_id": committed["id"],
+                "intervention_type": committed["type"],
+                "scope": committed["scope"],
+                "condition_code": committed["condition_code"],
+                "requested_at": committed["requested_at"],
+                "acknowledged_at": committed["acknowledged_at"],
+                "acknowledged_by": committed["acknowledged_by"],
+            },
+        )
+    except OSError as exc:
+        print(f"STATE COMMITTED BUT LEDGER EVIDENCE FAILED for {committed['id']}: {exc}\n"
+              f"The acknowledgement is durable in state; the ledger event is missing. "
+              f"Rerun this same command to append it.")
+        return 1
+
+    print(f"{committed['id']} acknowledged by {committed['acknowledged_by']} at "
+          f"{committed['acknowledged_at']}")
+    return 0
+
+
+def cmd_human_resolve(args) -> int:
+    """C-08b.1: record a human's resolution of an acknowledged intervention.
+
+    A RESOLVED intervention is not an error here, but it is only ever a
+    ledger-repair retry: every supplied field must match what is already stored,
+    and the record is never touched again. That is what makes rerunning the exact
+    same command safe after a ledger failure, while a command differing in any
+    way is refused rather than quietly reinterpreted.
+
+    This records the decision. Executing it - clearing the guardrail, retrying
+    the task, freezing the run - is C-08b.2's job, not this command's.
+    """
+    cfg = config.load()
+    # Before the transaction, for the same reason as cmd_human_acknowledge: a
+    # refused command must leave neither state nor ledger touched. On a repair
+    # retry this also runs first, so a secret-shaped --by is rejected here
+    # rather than reaching the stored-actor equality check below.
+    if args.by is not None and redact.contains_secret(args.by):
+        print(f"refusing to resolve {args.intervention_id}: --by appears to "
+              f"contain a secret; the supplied value is deliberately not shown. "
+              f"If it is a live credential, rotate it and revoke the old one "
+              f"server-side.")
+        return 1
+    if args.note is not None and redact.contains_secret(args.note):
+        print(f"refusing to resolve {args.intervention_id}: --note appears to "
+              f"contain a secret; the matched value is deliberately not shown. "
+              f"Remove it and rerun. If it is a live credential, rotate it and "
+              f"revoke the old one server-side.")
+        return 1
+
+    store = state_mod.Store(tz=cfg.timezone)
+
+    with store.transaction() as doc:
+        record = doc.get("interventions", {}).get(args.intervention_id)
+        if record is None:
+            print(f"unknown intervention {args.intervention_id}")
+            return 1
+
+        status = record.get("status")
+        if status == "OPEN":
+            print(f"refusing to resolve {args.intervention_id}: it must be "
+                  f"acknowledged before it can be resolved")
+            return 1
+        elif status == "ACKNOWLEDGED":
+            actor = args.by or getpass.getuser()
+            try:
+                intervention.resolve(doc, args.intervention_id, outcome=args.outcome,
+                                     by=actor, tz=cfg.timezone, note=args.note)
+            except intervention.InterventionError as exc:
+                print(f"refusing to resolve {args.intervention_id}: {exc}")
+                return 1
+        elif status == "RESOLVED":
+            if args.outcome != record["resolution"]:
+                print(f"refusing to resolve {args.intervention_id}: already RESOLVED "
+                      f"as {record['resolution']}, not {args.outcome}")
+                return 1
+            if args.note is not None and args.note != record["resolution_note"]:
+                print(f"refusing to resolve {args.intervention_id}: the supplied note "
+                      f"differs from the stored one")
+                return 1
+            if args.by is not None and args.by != record["resolved_by"]:
+                print(f"refusing to resolve {args.intervention_id}: already resolved by "
+                      f"{record['resolved_by']}, not {args.by}")
+                return 1
+        else:
+            print(f"refusing to resolve {args.intervention_id}: unrecognised status "
+                  f"{status!r}")
+            return 1
+
+        committed = dict(record)
+
+    ledger = ledger_mod.Ledger(tz=cfg.timezone, experiment_id=cfg.experiment_id)
+    if _ledger_has_event(ledger, "HUMAN_INTERVENTION_RESOLVED", committed["id"]):
+        print(f"{committed['id']} already resolved as {committed['resolution']} at "
+              f"{committed['resolved_at']} (ledger evidence already present)")
+        return 0
+
+    try:
+        ledger.append(
+            "HUMAN_INTERVENTION_RESOLVED",
+            task_id=committed["task_id"],
+            outcome=committed["resolution"],
+            activity_class="ESCALATION",
+            human_intervention=True,
+            metadata_redacted={
+                "intervention_id": committed["id"],
+                "intervention_type": committed["type"],
+                "scope": committed["scope"],
+                "condition_code": committed["condition_code"],
+                "requested_at": committed["requested_at"],
+                "acknowledged_at": committed["acknowledged_at"],
+                "acknowledged_by": committed["acknowledged_by"],
+                "resolved_at": committed["resolved_at"],
+                "resolved_by": committed["resolved_by"],
+                "resolution": committed["resolution"],
+                "active_human_seconds": committed["active_human_seconds"],
+                "active_human_minutes": intervention.active_human_minutes(committed),
+            },
+        )
+    except OSError as exc:
+        print(f"STATE COMMITTED BUT LEDGER EVIDENCE FAILED for {committed['id']}: {exc}\n"
+              f"The resolution is durable in state; the ledger event is missing. "
+              f"Rerun this same resolution command to append it.")
+        return 1
+
+    print(f"{committed['id']} resolved as {committed['resolution']} by "
+          f"{committed['resolved_by']} at {committed['resolved_at']} "
+          f"({committed['active_human_seconds']}s active human time)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ctl", description="Run 002 control plane")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -309,6 +561,31 @@ def main(argv: list[str] | None = None) -> int:
     p_res = sub.add_parser("resurrect", help="restore worker windows after a crash")
     p_res.add_argument("--dry-run", action="store_true")
     p_res.set_defaults(func=cmd_resurrect)
+
+    p_hlist = sub.add_parser("human-list", help="C-08b.1: list human interventions")
+    p_hlist.add_argument("--status", default="OPEN",
+                         choices=["OPEN", "ACKNOWLEDGED", "RESOLVED", "ALL"],
+                         help="lifecycle status to list (default: OPEN)")
+    p_hlist.set_defaults(func=cmd_human_list)
+
+    p_hack = sub.add_parser("human-acknowledge",
+                            help="C-08b.1: acknowledge a human intervention")
+    p_hack.add_argument("intervention_id")
+    p_hack.add_argument("--by", default=None,
+                        help="acknowledging actor; defaults to the invoking user on a "
+                             "first acknowledgement and is never inferred on a repair")
+    p_hack.set_defaults(func=cmd_human_acknowledge)
+
+    p_hres = sub.add_parser("human-resolve",
+                            help="C-08b.1: resolve an acknowledged human intervention")
+    p_hres.add_argument("intervention_id")
+    p_hres.add_argument("--outcome", required=True,
+                        choices=sorted(intervention.RESOLUTION_OUTCOMES))
+    p_hres.add_argument("--note", default=None)
+    p_hres.add_argument("--by", default=None,
+                        help="resolving actor; defaults to the invoking user on a first "
+                             "resolution and is never inferred on a repair")
+    p_hres.set_defaults(func=cmd_human_resolve)
 
     args = parser.parse_args(argv)
     return args.func(args)

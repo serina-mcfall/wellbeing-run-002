@@ -52,13 +52,18 @@ the Capability column.
 
 ## Human-intervention measurement — C-08b
 
+Capability below describes C-08b.1's lifecycle foundation, which is
+implementation complete. No production code path creates an intervention yet
+— that is C-08b.2, still NOT_IMPLEMENTED — so every metric here reads
+empty/zero until those sites are wired. See C-08.
+
 | Metric | Capability | Runtime data | Evidence |
 |---|---|---|---|
-| Simultaneous open `HUMAN_REQUIRED` events | NOT_IMPLEMENTED as a surfaced metric | NOT_APPLICABLE | `doc["counters"]["human_interventions"]` is a lifetime cumulative counter (`control/supervisor.py:92`), never decremented — cannot answer "how many are open right now." Derivable from existing task-state data (`state.tasks_in(doc, "HUMAN_REQUIRED")`), but nothing currently computes or surfaces it. See C-08. |
-| `requested_at` | NOT_IMPLEMENTED | NOT_APPLICABLE | No such field exists anywhere in the codebase. See C-08. |
-| `acknowledged_at` | NOT_IMPLEMENTED | NOT_APPLICABLE | No such field exists anywhere in the codebase. See C-08. |
-| `resolved_at` | NOT_IMPLEMENTED | NOT_APPLICABLE | No such field exists anywhere in the codebase. See C-08. |
-| Active human minutes | NOT_IMPLEMENTED | NOT_APPLICABLE | Depends on the three timestamps above, none of which exist. Unlike C-08a's provider events, this cannot be reconstructed after the fact once an intervention has already occurred — must exist before T+00. See C-08. |
+| Simultaneous open `HUMAN_REQUIRED` events | IMPLEMENTED (C-08b.1); NOT YET FED — C-08b.2 | NOT_APPLICABLE (pre-T+00) | `control/intervention.py::simultaneous_open_count` counts records whose status is OPEN or ACKNOWLEDGED; surfaced as `human_interventions_open` by `ctl status` and listable via `ctl human-list --status`. Fails closed: an unrecognised status raises rather than returning a misleading count. This counts *intervention records*, not tasks in the `HUMAN_REQUIRED` task state, and reads 0 until C-08b.2 wires production sites to `intervention.request()`. The pre-existing `doc["counters"]["human_interventions"]` lifetime counter is unchanged and is still not a substitute. See C-08. |
+| `requested_at` | IMPLEMENTED (C-08b.1); NOT YET FED — C-08b.2 | NOT_APPLICABLE (pre-T+00) | Set by `control/intervention.py::request` at creation. A deduplicated recurrence reuses the existing record and does not re-stamp it. See C-08. |
+| `acknowledged_at` | IMPLEMENTED (C-08b.1); NOT YET FED — C-08b.2 | NOT_APPLICABLE (pre-T+00) | Set by `control/intervention.py::acknowledge` on the OPEN → ACKNOWLEDGED transition only; a repeat acknowledgement never re-stamps it or overwrites the stored actor. Recorded via `ctl human-acknowledge`. See C-08. |
+| `resolved_at` | IMPLEMENTED (C-08b.1); NOT YET FED — C-08b.2 | NOT_APPLICABLE (pre-T+00) | Set by `control/intervention.py::resolve` on the ACKNOWLEDGED → RESOLVED transition. Acknowledgement is mandatory first, so OPEN → RESOLVED is refused. Recorded via `ctl human-resolve`. See C-08. |
+| Active human minutes | IMPLEMENTED (C-08b.1); NOT YET FED — C-08b.2 | NOT_APPLICABLE (pre-T+00) | Stored as exact integer `active_human_seconds` spanning `acknowledged_at` → `resolved_at`; a negative span is refused rather than stored. `control/intervention.py::active_human_minutes` derives minutes to one decimal at the reporting boundary only, never in durable state. Always computable, because acknowledgement is mandatory before resolution. See C-08. |
 
 ## Pre-T+00 host-resource headroom gate — C-08c
 
