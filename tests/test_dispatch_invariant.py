@@ -244,13 +244,18 @@ class TestIndependentReviewStillRequired(InvariantCase):
         self.assertIn("REVIEW_PASS", decision.reason)
 
     def test_merge_is_not_attempted_from_a_recovered_review_state(self):
+        # C-14.1 moved merging out of route_prs into execute_merges, so
+        # patching attempt_merge here would assert against a call route_prs
+        # can no longer make - true whatever the recovery did. The invariant
+        # is now proved where it lives: a recovered review state must not
+        # produce a merge candidate in the first place.
         doc = doc_after_fix()
         doc["prs"][str(PR)]["pending_findings"] = None
-        with mock.patch.object(self.sup, "attempt_merge") as merge, \
-                mock.patch.object(self.sup, "dispatch_reviewer"):
-            self.sup.route_prs(doc, clock.ClockState(clock.now(TZ), clock.now(TZ), 24),
-                               [self.open_pr()])
-        merge.assert_not_called()
+        with mock.patch.object(self.sup, "dispatch_reviewer"):
+            candidates = self.sup.route_prs(
+                doc, clock.ClockState(clock.now(TZ), clock.now(TZ), 24),
+                [self.open_pr()])
+        self.assertEqual(candidates, [])
 
 
 class TestTheInvariantIsGeneral(InvariantCase):

@@ -675,7 +675,16 @@ class Supervisor:
         self.notify_out(doc, notify.INFO, f"{task['id']}: PR #{pr_number} opened",
                         f"Branch {task['branch']}.")
 
-    def route_prs(self, doc: dict, cs: clock.ClockState, prs: list[dict]) -> None:
+    def route_prs(self, doc: dict, cs: clock.ClockState,
+                  prs: list[dict]) -> list[tuple[str, int]]:
+        """Route every PR-bearing task, and return the merge-ready ones.
+
+        C-14.1: routing decides, it does not merge. Candidates are returned as
+        (task_id, pr_number) identifiers - never the task, record or PR dicts,
+        which belong to this transaction's document and are stale the moment it
+        commits. execute_merges() re-reads them from fresh state.
+        """
+        candidates: list[tuple[str, int]] = []
         open_prs = {pr["number"]: pr for pr in prs}
         depth = state_mod.review_queue_depth(doc)
         doc["review_queue_depth_history"].append(
@@ -719,10 +728,12 @@ class Supervisor:
 
             if task["state"] == "REVIEW" and record.get("review_verdict") == \
                     routing.REVIEW_PASS and record.get("approval_current"):
-                self.attempt_merge(doc, task, pr, record)
+                candidates.append((task["id"], pr_number))
                 continue
 
             self.route_awaiting_dispatch(doc, task, pr_number, record)
+
+        return candidates
 
     ROUTING_STATES = ("PR_OPEN", "REVIEW", "FIX_REQUIRED")
 
@@ -778,6 +789,63 @@ class Supervisor:
         """Whether a worker in any of these roles is already live on this PR."""
         return any(meta.get("pr") == pr_number and meta.get("role") in roles
                    for meta in doc["workers"].values())
+
+    @staticmethod
+    def merge_no_longer_ready(task: dict | None, record: dict | None,
+                              pr_number: int) -> str | None:
+        """Why this candidate must not merge now, or None if it still may.
+
+        route_prs's gate, re-applied to freshly read state. The lock is dropped
+        between the two transactions and the Watchdog can freeze a task in that
+        gap, so none of these may be assumed to still hold.
+        """
+        if task is None:
+            return "task no longer exists"
+        if task.get("pr") != pr_number:
+            return "task is no longer attached to this pull request"
+        if record is None:
+            return "pull request record no longer exists"
+        if record.get("merged"):
+            return "pull request is already recorded as merged"
+        if task["state"] != "REVIEW":
+            return f"task is {task['state']}, not REVIEW"
+        if record.get("review_verdict") != routing.REVIEW_PASS:
+            return "no current REVIEW_PASS"
+        if not record.get("approval_current"):
+            return "approval is not current"
+        return None
+
+    def execute_merges(self, candidates: list[tuple[str, int]]) -> None:
+        """C-14.1. One dedicated transaction per merge, entered only after the
+        ordinary tick transaction has committed and left immediately once the
+        merge is recorded.
+
+        gh.merge() is irreversible and its MERGED event is durable the instant
+        it is written. Nothing unrelated may follow it inside the transaction
+        that records it, or an exception in that unrelated work rolls the merge,
+        its debt and its completion out of state while GitHub and the ledger
+        keep them. Candidates are therefore merged here, one transaction each,
+        with nothing after attempt_merge() inside the block.
+
+        The pull request is observed again under the lock this merge runs under:
+        route_prs decided against a list taken before the lock was ever held.
+        """
+        for task_id, pr_number in candidates:
+            with self.store.transaction() as doc:
+                task = doc["tasks"].get(task_id)
+                record = doc["prs"].get(str(pr_number))
+                reason = self.merge_no_longer_ready(task, record, pr_number)
+                pr = None
+                if reason is None:
+                    pr = gh.pr_view(self.cfg.github_repo, pr_number)
+                    if pr is None:
+                        reason = "pull request could not be observed"
+                if reason is not None:
+                    self.log("MERGE_BLOCKED", task_id=task_id, pr_id=pr_number,
+                             outcome="BLOCKED", activity_class="ORCHESTRATION",
+                             metadata_redacted={"reason": reason})
+                    continue
+                self.attempt_merge(doc, task, pr, record)
 
     def attempt_merge(self, doc: dict, task: dict, pr: dict, record: dict) -> None:
         repo = self.cfg.github_repo
@@ -1145,8 +1213,15 @@ class Supervisor:
         anything inside it raises, while ledger events are written immediately.
         Slow network work therefore stays outside it: GitHub is polled before the
         lock is taken, and Jev and the Observer run after it is released.
+
+        C-14.1 splits the cycle in two. Ordinary work runs in one transaction
+        which decides which pull requests are merge-ready but performs no merge.
+        Each merge then runs in its own transaction, after that one has
+        committed and before the slow provider work, so that no unrelated later
+        failure can roll back a merge GitHub and the ledger already record.
         """
         open_prs = gh.list_open_prs(self.cfg.github_repo)
+        merge_candidates: list[tuple[str, int]] = []
 
         with self.store.transaction() as doc:
             providers.ensure(doc)
@@ -1173,7 +1248,7 @@ class Supervisor:
                 return
 
             self.reap_workers(doc)
-            self.route_prs(doc, cs, open_prs)
+            merge_candidates = self.route_prs(doc, cs, open_prs)
             self.detect_stale(doc)
 
             for task in self.dispatchable(doc, cs):
@@ -1187,6 +1262,10 @@ class Supervisor:
                          metadata_redacted={"review_queue_depth": depth})
 
             self.checkpoints(doc, cs)
+
+        # T1 has committed. Each merge now gets its own transaction, before the
+        # slow provider work so a merge never waits on a provider call.
+        self.execute_merges(merge_candidates)
 
         # Outside the lock: a slow provider must never stall the control cycle.
         # Each is declared as bounded busy work so a healthy supervisor is not
