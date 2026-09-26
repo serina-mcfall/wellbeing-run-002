@@ -51,6 +51,7 @@ TYPE_FOR = {
     "supervisor_restart_failed": "HUMAN_APPARATUS_AUTHORISATION",
     "merge_invariant_violation": "HUMAN_VERIFICATION",
     "worker_state_invariant": "HUMAN_VERIFICATION",
+    "builder_dispatch_failed": "HUMAN_APPARATUS_AUTHORISATION",
 }
 
 SYSTEMIC = {"red_guardrail", "budget_hard_stop", "supervisor_crash_loop",
@@ -125,11 +126,14 @@ class ResolutionCase(unittest.TestCase):
     def stored(self, iid: str) -> dict:
         return self.doc()["interventions"][iid]
 
-    def resolve(self, iid: str, outcome: str) -> tuple[int, str]:
+    def resolve(self, iid: str, outcome: str,
+                note: str | None = None) -> tuple[int, str]:
+        argv = ["human-resolve", iid, "--outcome", outcome, "--by", "serina"]
+        if note is not None:
+            argv += ["--note", note]
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
-            code = cli.main(["human-resolve", iid, "--outcome", outcome,
-                             "--by", "serina"])
+            code = cli.main(argv)
         return code, buffer.getvalue()
 
     def assert_refused(self, iid: str, outcome: str, *, out_contains: str = "refusing"):
@@ -336,7 +340,7 @@ class TestMigrationLock(ResolutionCase):
     def test_human_fail_releases_a_lock_the_task_owns(self):
         iid = self.seed("worker_state_invariant", task_state="FROZEN",
                         lock_owner=True)
-        code, _ = self.resolve(iid, "FAIL")
+        code, _ = self.resolve(iid, "FAIL", note="schema verified safe")
         self.assertEqual(code, 0)
         lock = self.doc()["migration_lock"]
         self.assertEqual(lock["state"], "FREE")
@@ -361,7 +365,7 @@ class TestMigrationLock(ResolutionCase):
             return real_append(ledger_self, event_type, **fields)
 
         with mock.patch.object(ledger_mod.Ledger, "append", refuse_lock_event):
-            first, out = self.resolve(iid, "FAIL")
+            first, out = self.resolve(iid, "FAIL", note="schema verified safe")
         self.assertEqual(first, 1)
         self.assertIn("LEDGER EVIDENCE FAILED", out)
         # State effects are all durable already...
@@ -375,7 +379,7 @@ class TestMigrationLock(ResolutionCase):
                          [e["event_type"] for e in events])
 
         history_before = list(self.task()["history"])
-        second, _ = self.resolve(iid, "FAIL")
+        second, _ = self.resolve(iid, "FAIL", note="schema verified safe")
         self.assertEqual(second, 0)
         events = [json.loads(line) for line in
                   self.ledger_path.read_text(encoding="utf-8").splitlines() if line]
@@ -402,7 +406,7 @@ class TestMigrationLock(ResolutionCase):
             return real_append(ledger_self, event_type, **fields)
 
         with mock.patch.object(ledger_mod.Ledger, "append", refuse_lock_event):
-            first, _ = self.resolve(iid, "FAIL")
+            first, _ = self.resolve(iid, "FAIL", note="schema verified safe")
         self.assertEqual(first, 1)
 
         # A different task acquires and releases the lock through the real
@@ -413,7 +417,7 @@ class TestMigrationLock(ResolutionCase):
         self.state_path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
 
         history_before = list(self.task()["history"])
-        second, _ = self.resolve(iid, "FAIL")
+        second, _ = self.resolve(iid, "FAIL", note="schema verified safe")
         self.assertEqual(second, 0)
         events = [json.loads(line) for line in
                   self.ledger_path.read_text(encoding="utf-8").splitlines() if line]
@@ -437,9 +441,9 @@ class TestMigrationLock(ResolutionCase):
     def test_repair_rerun_with_both_events_present_appends_nothing(self):
         iid = self.seed("worker_state_invariant", task_state="FROZEN",
                         lock_owner=True)
-        first, _ = self.resolve(iid, "FAIL")
+        first, _ = self.resolve(iid, "FAIL", note="schema verified safe")
         self.assertEqual(first, 0)
-        second, out = self.resolve(iid, "FAIL")
+        second, out = self.resolve(iid, "FAIL", note="schema verified safe")
         self.assertEqual(second, 0)
         self.assertIn("already resolved", out)
         events = [json.loads(line) for line in
@@ -455,7 +459,7 @@ class TestMigrationLock(ResolutionCase):
         doc = self.doc()
         doc["migration_lock"] = with_owner
         self.state_path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
-        code, _ = self.resolve(iid, "FAIL")
+        code, _ = self.resolve(iid, "FAIL")   # non-owner: no note required
         self.assertEqual(code, 0)
         self.assertEqual(self.doc()["migration_lock"]["owner_task"], "TASK-999")
 
@@ -506,6 +510,141 @@ class TestGovernanceBoundaries(ResolutionCase):
                     if e["event_type"] == "HUMAN_INTERVENTION_RESOLVED"]
         self.assertEqual(len(resolved), 1)
         self.assertEqual(resolved[0]["outcome"], "NO_ACTION")
+
+
+class TestC15NoteGuard(ResolutionCase):
+    def test_lock_releasing_fail_without_note_is_refused_whole(self):
+        iid = self.seed("worker_state_invariant", task_state="FROZEN",
+                        lock_owner=True)
+        code, out = self.resolve(iid, "FAIL")
+        self.assertEqual(code, 1)
+        self.assertIn("note", out)
+        self.assertEqual(self.stored(iid)["status"], "ACKNOWLEDGED")
+        self.assertEqual(self.task()["state"], "FROZEN")
+        self.assertEqual(self.doc()["migration_lock"]["owner_task"], "TASK-001")
+
+    def test_blank_note_is_refused(self):
+        iid = self.seed("worker_state_invariant", task_state="FROZEN",
+                        lock_owner=True)
+        code, _ = self.resolve(iid, "FAIL", note="   ")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.stored(iid)["status"], "ACKNOWLEDGED")
+
+    def test_non_lock_fail_never_requires_a_note(self):
+        iid = self.seed("merge_invariant_violation", task_state="FROZEN")
+        code, _ = self.resolve(iid, "FAIL")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.task()["state"], "FAILED")
+
+    def test_note_is_persisted_as_the_attestation(self):
+        iid = self.seed("worker_state_invariant", task_state="FROZEN",
+                        lock_owner=True)
+        code, _ = self.resolve(iid, "FAIL", note="schema verified safe")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.stored(iid)["resolution_note"],
+                         "schema verified safe")
+
+
+class TestS3FailC15(ResolutionCase):
+    def test_owner_fail_without_note_refused(self):
+        iid = self.seed("builder_attempts_exhausted", task_state="FAILED",
+                        lock_owner=True)
+        code, out = self.resolve(iid, "FAIL")
+        self.assertEqual(code, 1)
+        self.assertIn("note", out)
+        self.assertEqual(self.doc()["migration_lock"]["owner_task"], "TASK-001")
+
+    def test_owner_fail_with_note_releases_via_executed_effects(self):
+        iid = self.seed("builder_attempts_exhausted", task_state="FAILED",
+                        lock_owner=True)
+        history_before = list(self.task()["history"])
+        code, _ = self.resolve(iid, "FAIL", note="schema verified safe")
+        self.assertEqual(code, 0)
+        lock = self.doc()["migration_lock"]
+        self.assertEqual(lock["state"], "FREE")
+        self.assertIsNone(lock["owner_task"])
+        rec = self.stored(iid)
+        self.assertEqual(rec["status"], "RESOLVED")
+        self.assertIn("MIGRATION_LOCK_RELEASED", rec["executed_effects"])
+        # already FAILED: no task-state transition happened.
+        self.assertEqual(self.task()["state"], "FAILED")
+        self.assertEqual(self.task()["history"], history_before)
+        events = [json.loads(line) for line in
+                  self.ledger_path.read_text(encoding="utf-8").splitlines() if line]
+        self.assertEqual([e["event_type"] for e in events].count(
+            "MIGRATION_LOCK_RELEASED"), 1)
+
+    def test_owner_fail_ledger_repair_never_re_executes(self):
+        iid = self.seed("builder_attempts_exhausted", task_state="FAILED",
+                        lock_owner=True)
+        real_append = ledger_mod.Ledger.append
+
+        def refuse_lock_event(ledger_self, event_type, **fields):
+            if event_type == "MIGRATION_LOCK_RELEASED":
+                raise OSError("no space left on device")
+            return real_append(ledger_self, event_type, **fields)
+
+        with mock.patch.object(ledger_mod.Ledger, "append", refuse_lock_event):
+            first, _ = self.resolve(iid, "FAIL", note="schema verified safe")
+        self.assertEqual(first, 1)
+        second, _ = self.resolve(iid, "FAIL", note="schema verified safe")
+        self.assertEqual(second, 0)
+        events = [json.loads(line) for line in
+                  self.ledger_path.read_text(encoding="utf-8").splitlines() if line]
+        types_ = [e["event_type"] for e in events]
+        self.assertEqual(types_.count("MIGRATION_LOCK_RELEASED"), 1)
+        self.assertEqual(types_.count("HUMAN_INTERVENTION_RESOLVED"), 1)
+
+    def test_non_owner_fail_refused_toward_no_action(self):
+        iid = self.seed("builder_attempts_exhausted", task_state="FAILED")
+        code, out = self.resolve(iid, "FAIL", note="schema verified safe")
+        self.assertEqual(code, 1)
+        self.assertIn("NO_ACTION", out)
+        self.assertEqual(self.stored(iid)["status"], "ACKNOWLEDGED")
+        self.assertEqual(self.task()["state"], "FAILED")
+
+    def test_retry_and_no_action_retain_the_lock(self):
+        for outcome in ("RETRY", "NO_ACTION"):
+            with self.subTest(outcome=outcome):
+                iid = self.seed("builder_attempts_exhausted", task_state="FAILED",
+                                lock_owner=True)
+                code, _ = self.resolve(iid, outcome)
+                self.assertEqual(code, 0)
+                self.assertEqual(self.doc()["migration_lock"]["owner_task"],
+                                 "TASK-001")
+
+
+class TestBuilderDispatchFailedResolution(ResolutionCase):
+    def test_retry_returns_to_ready_and_retains_the_lock(self):
+        iid = self.seed("builder_dispatch_failed", lock_owner=True)
+        code, _ = self.resolve(iid, "RETRY")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.task()["state"], "READY")
+        self.assertEqual(self.doc()["migration_lock"]["owner_task"], "TASK-001")
+
+    def test_fail_is_note_guarded_and_releases(self):
+        iid = self.seed("builder_dispatch_failed", lock_owner=True)
+        code, _ = self.resolve(iid, "FAIL")
+        self.assertEqual(code, 1)
+        code, _ = self.resolve(iid, "FAIL", note="schema verified safe")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.task()["state"], "FAILED")
+        lock = self.doc()["migration_lock"]
+        self.assertEqual(lock["state"], "FREE")
+        self.assertIn("MIGRATION_LOCK_RELEASED",
+                      self.stored(iid)["executed_effects"])
+
+    def test_no_action_parks_and_retains(self):
+        iid = self.seed("builder_dispatch_failed", lock_owner=True)
+        code, _ = self.resolve(iid, "NO_ACTION")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.task()["state"], "HUMAN_REQUIRED")
+        self.assertEqual(self.doc()["migration_lock"]["owner_task"], "TASK-001")
+
+    def test_resume_and_clear_guardrail_refused(self):
+        iid = self.seed("builder_dispatch_failed", lock_owner=True)
+        self.assert_refused(iid, "RESUME")
+        self.assert_refused(iid, "CLEAR_GUARDRAIL")
 
 
 if __name__ == "__main__":

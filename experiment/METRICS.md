@@ -57,7 +57,9 @@ implementation complete (C-08b.2: 2026-09-27). The twelve production
 escalation conditions S1–S12 — six task-scoped Supervisor sites, the RED
 guardrail path, the budget hard stop, the Watchdog crash-loop and
 restart-failure paths, the C-14.2 merge-invariant obligation and the D2
-worker-state freeze — now feed durable intervention records. Runtime data
+worker-state freeze — now feed durable intervention records, joined by
+C-15's builder_dispatch_failed condition (a re-entrant migration-lock owner
+whose builder dispatch fails pre-execution). Runtime data
 remains NOT_APPLICABLE only because T+00 has not started. Notification counts
 and intervention-open counts are distinct metrics and are never summed:
 C-14.2 re-annunciation may legitimately produce multiple notifications for one
@@ -68,7 +70,7 @@ See C-08.
 
 | Metric | Capability | Runtime data | Evidence |
 |---|---|---|---|
-| Simultaneous open `HUMAN_REQUIRED` events | IMPLEMENTED (C-08b.1); FED BY PRODUCTION (C-08b.2) | NOT_APPLICABLE (pre-T+00) | `control/intervention.py::simultaneous_open_count` counts records whose status is OPEN or ACKNOWLEDGED; surfaced as `human_interventions_open` by `ctl status` and listable via `ctl human-list --status`. Fails closed: an unrecognised status raises rather than returning a misleading count. This counts *intervention records*, not tasks in the `HUMAN_REQUIRED` task state; the C-08b.2 production sites S1–S12 — including the C-14.2 merge-invariant obligation and the D2 worker-state freeze — now feed it. The pre-existing `doc["counters"]["human_interventions"]` lifetime counter is unchanged and is still not a substitute. See C-08. |
+| Simultaneous open `HUMAN_REQUIRED` events | IMPLEMENTED (C-08b.1); FED BY PRODUCTION (C-08b.2) | NOT_APPLICABLE (pre-T+00) | `control/intervention.py::simultaneous_open_count` counts records whose status is OPEN or ACKNOWLEDGED; surfaced as `human_interventions_open` by `ctl status` and listable via `ctl human-list --status`. Fails closed: an unrecognised status raises rather than returning a misleading count. This counts *intervention records*, not tasks in the `HUMAN_REQUIRED` task state; the C-08b.2 production sites S1–S12 — including the C-14.2 merge-invariant obligation and the D2 worker-state freeze — now feed it, as does C-15's `builder_dispatch_failed` condition. The pre-existing `doc["counters"]["human_interventions"]` lifetime counter is unchanged and is still not a substitute. See C-08. |
 | `requested_at` | IMPLEMENTED (C-08b.1); FED BY PRODUCTION (C-08b.2) | NOT_APPLICABLE (pre-T+00) | Set by `control/intervention.py::request` at creation. A deduplicated recurrence reuses the existing record and does not re-stamp it. See C-08. |
 | `acknowledged_at` | IMPLEMENTED (C-08b.1); FED BY PRODUCTION (C-08b.2) | NOT_APPLICABLE (pre-T+00) | Set by `control/intervention.py::acknowledge` on the OPEN → ACKNOWLEDGED transition only; a repeat acknowledgement never re-stamps it or overwrites the stored actor. Recorded via `ctl human-acknowledge`. See C-08. |
 | `resolved_at` | IMPLEMENTED (C-08b.1); FED BY PRODUCTION (C-08b.2) | NOT_APPLICABLE (pre-T+00) | Set by `control/intervention.py::resolve` on the ACKNOWLEDGED → RESOLVED transition. Acknowledgement is mandatory first, so OPEN → RESOLVED is refused. Recorded via `ctl human-resolve`. See C-08. |

@@ -432,7 +432,8 @@ def cmd_human_acknowledge(args) -> int:
 CONDITION_OUTCOMES: dict[str, frozenset[str]] = {
     "repair_cycle_limit": frozenset({"RETRY", "FAIL", "NO_ACTION"}),
     "dispatch_failure_limit": frozenset({"RETRY", "FAIL", "NO_ACTION"}),
-    "builder_attempts_exhausted": frozenset({"RETRY", "NO_ACTION"}),
+    "builder_attempts_exhausted": frozenset({"RETRY", "FAIL", "NO_ACTION"}),
+    "builder_dispatch_failed": frozenset({"RETRY", "FAIL", "NO_ACTION"}),
     "fixer_failed": frozenset({"RETRY", "FAIL", "NO_ACTION"}),
     "review_unusable": frozenset({"RETRY", "FAIL", "NO_ACTION"}),
     "p0_finding": frozenset({"RETRY", "FAIL", "NO_ACTION"}),
@@ -464,10 +465,32 @@ def _pr_record(doc: dict, task: dict, task_id: str) -> dict:
     return record
 
 
-def _fail_task(doc: dict, cfg, task: dict, record: dict) -> None:
+def _require_release_note(task_id: str, note: str | None) -> None:
+    """C-15: every human FAIL that actually releases a migration lock needs a
+    non-empty note - the durable attestation that the task is finally
+    abandoned for this run AND the shared schema is safe for later
+    schema-changing work (pre-merge mutation is proven possible). The note's
+    content is not validated; secret-shaped notes are already refused at the
+    command boundary. A FAIL that releases no lock never requires one."""
+    if not note or not note.strip():
+        raise ResolutionRefused(
+            f"{task_id} owns the migration lock; a lock-releasing FAIL "
+            f"requires a non-empty --note attesting the shared schema is "
+            f"safe for subsequent schema-changing work")
+
+
+def _fail_task(doc: dict, cfg, task: dict, record: dict,
+               note: str | None) -> None:
     """The one human FAIL executor. FROZEN exits through the documented
     FROZEN -> HUMAN_REQUIRED -> FAILED path; delivered work is never falsified;
-    a lock the task owns is released so the FAIL cannot strand it.
+    a lock the task owns is released - note-guarded - so the FAIL cannot
+    strand it.
+
+    C-15 adds the owner-conditional S3 case: a builder_attempts_exhausted
+    task is already FAILED, so FAIL there performs no transition and means
+    exactly one thing - final abandonment for this run, releasing the owned
+    lock. Without ownership it is refused toward NO_ACTION, so FAIL never
+    records a decision that executed nothing.
 
     An executed lock release is recorded as the finite identifier
     MIGRATION_LOCK_RELEASED in the intervention record's executed_effects,
@@ -477,23 +500,37 @@ def _fail_task(doc: dict, cfg, task: dict, record: dict) -> None:
     MIGRATION_LOCK_RELEASED append from (see cmd_human_resolve)."""
     task_id = task["id"]
     current = task["state"]
+    reason = f"human FAIL resolution of {record['id']}"
+    owns_lock = migration_lock.owner(doc) == task_id
+
+    if record["condition_code"] == "builder_attempts_exhausted":
+        if not owns_lock:
+            raise ResolutionRefused(
+                f"{task_id} is already FAILED and owns no migration lock; "
+                f"use NO_ACTION to accept the existing failed state")
+        _require_release_note(task_id, note)
+        migration_lock.release(doc, task_id, reason)
+        record.setdefault("executed_effects", []).append("MIGRATION_LOCK_RELEASED")
+        return
+
     if current in ("MERGED", "COMPLETE"):
         raise ResolutionRefused(
             f"{task_id} is {current}; marking delivered work FAILED would "
             f"falsify history")
     if current == "FAILED":
         raise ResolutionRefused(f"{task_id} is already FAILED")
-    reason = f"human FAIL resolution of {record['id']}"
+    if owns_lock:
+        _require_release_note(task_id, note)
     if current == "FROZEN":
         state_mod.transition(doc, task_id, "HUMAN_REQUIRED", reason, cfg.timezone)
     state_mod.transition(doc, task_id, "FAILED", reason, cfg.timezone)
-    if migration_lock.owner(doc) == task_id:
+    if owns_lock:
         migration_lock.release(doc, task_id, reason)
         record.setdefault("executed_effects", []).append("MIGRATION_LOCK_RELEASED")
 
 
 def _apply_resolution_effects(doc: dict, cfg, record: dict,
-                              outcome: str) -> None:
+                              outcome: str, note: str | None) -> None:
     """Execute the governed effect for an already-validated pair. Explicit
     branches, deliberately - C-08b.2 is intervention integration, not a
     resolution framework. Raises ResolutionRefused when the current task state
@@ -513,7 +550,7 @@ def _apply_resolution_effects(doc: dict, cfg, record: dict,
         raise ResolutionRefused(f"task {task_id!r} not found in state")
     try:
         if outcome == "FAIL":
-            _fail_task(doc, cfg, task, record)
+            _fail_task(doc, cfg, task, record, note)
             return
         # outcome == "RETRY"
         if condition == "repair_cycle_limit":
@@ -542,6 +579,12 @@ def _apply_resolution_effects(doc: dict, cfg, record: dict,
         elif condition == "fixer_failed":
             state_mod.transition(doc, task_id, "FIX_REQUIRED",
                                  f"human RETRY of {iid}: redispatch the fixer",
+                                 cfg.timezone)
+        elif condition == "builder_dispatch_failed":
+            # C-15: back to READY; the next dispatch reacquires the retained
+            # lock re-entrantly.
+            state_mod.transition(doc, task_id, "READY",
+                                 f"human RETRY of {iid}: redispatch the builder",
                                  cfg.timezone)
         elif condition in ("review_unusable", "p0_finding"):
             # Only the stale verdict is cleared - enough for routing to
@@ -629,7 +672,7 @@ def _resolve_in_transaction(args, cfg, store) -> int:
             # Effects run after the lifecycle mutation on purpose: both live in
             # this one transaction, and any ResolutionRefused from here rolls
             # the resolution back with the effect - never one without the other.
-            _apply_resolution_effects(doc, cfg, record, args.outcome)
+            _apply_resolution_effects(doc, cfg, record, args.outcome, args.note)
         elif status == "RESOLVED":
             if args.outcome != record["resolution"]:
                 print(f"refusing to resolve {args.intervention_id}: already RESOLVED "

@@ -237,12 +237,18 @@ class Supervisor:
         return ready[:slots]
 
     def dispatch_builder(self, doc: dict, task: dict) -> None:
+        lock_newly_acquired = False
         if task.get("schema_changing"):
+            # C-15: fresh-vs-re-entrant ownership decides what a dispatch
+            # failure may do with the lock. Read inside this same transaction,
+            # so the answer cannot race.
+            owner_before = migration_lock.owner(doc)
             if not migration_lock.acquire(doc, task["id"], self.tz):
                 if task["state"] != "WAITING_DB_LOCK":
                     self.transition(doc, task["id"], "WAITING_DB_LOCK",
                                     f"migration lock held by {migration_lock.owner(doc)}")
                 return
+            lock_newly_acquired = owner_before is None
             self.log("MIGRATION_LOCK_ACQUIRED", task_id=task["id"],
                      activity_class="ORCHESTRATION", outcome="HELD")
 
@@ -263,12 +269,14 @@ class Supervisor:
             self.log("WORKER_CREATE_FAILED", task_id=task["id"], role="builder",
                      activity_class="FAILED_WORK", outcome="FAILED",
                      metadata_redacted={"stderr": created.stderr[:500]})
-            self.transition(doc, task["id"], "BLOCKED", "worktree creation failed")
+            self.on_builder_dispatch_failure(doc, task, lock_newly_acquired,
+                                             "worktree creation failed")
             return
 
         path = workers.worktree_path(worker)
         if path is None:
-            self.transition(doc, task["id"], "BLOCKED", "worktree path not resolvable")
+            self.on_builder_dispatch_failure(doc, task, lock_newly_acquired,
+                                             "worktree path not resolvable")
             return
 
         job = workers.write_job(
@@ -281,7 +289,8 @@ class Supervisor:
             self.log("WORKER_START_FAILED", task_id=task["id"], role="builder",
                      activity_class="FAILED_WORK", outcome="FAILED",
                      metadata_redacted={"stderr": started.stderr[:500]})
-            self.transition(doc, task["id"], "BLOCKED", "worker start failed")
+            self.on_builder_dispatch_failure(doc, task, lock_newly_acquired,
+                                             "worker start failed")
             return
 
         task["worker"] = worker
@@ -296,6 +305,103 @@ class Supervisor:
         self.log("TASK_DISPATCHED", task_id=task["id"], role="builder",
                  provider=role_cfg.provider, model=role_cfg.model, branch=branch,
                  agent_id=worker, activity_class="BUILD", outcome="DISPATCHED")
+
+    def on_builder_dispatch_failure(self, doc: dict, task: dict,
+                                    lock_newly_acquired: bool, why: str) -> None:
+        """C-15: a builder dispatch failed at a proven pre-execution point.
+
+        All three call sites fail before any builder process exists for THIS
+        dispatch, so ownership history decides what may happen to the
+        migration lock:
+
+          * FRESH owner (this dispatch newly acquired it): no builder has ever
+            run under this ownership, so no schema mutation is attributable to
+            it - release automatically, atomically with the BLOCKED transition
+            and a task-owned durable marker the evidence pass converges later.
+            General BLOCKED recovery stays out of C-15's scope.
+          * RE-ENTRANT owner (a previous builder ran while it held the lock):
+            shared-schema mutation is possible, so never auto-release - the
+            task goes to HUMAN_REQUIRED with a builder_dispatch_failed
+            intervention instead of invisible BLOCKED, and a human decides
+            RETRY (retain), FAIL (note-guarded release) or NO_ACTION (park).
+        """
+        if migration_lock.owner(doc) == task["id"]:
+            if lock_newly_acquired:
+                existing = task.get("migration_lock_auto_release")
+                if existing and not existing.get("evidenced"):
+                    # A fresh acquisition over an unevidenced prior release
+                    # claim contradicts the one-marker cardinality this
+                    # design proves; failing closed aborts the transaction
+                    # rather than silently overwriting evidence.
+                    raise RuntimeError(
+                        f"{task['id']}: unevidenced migration_lock_auto_release "
+                        f"marker already present; refusing to overwrite")
+                if not migration_lock.release(doc, task["id"],
+                                              "dispatch failed before any builder ran"):
+                    # Supposed to be impossible for the current owner; a False
+                    # here means the lock and this code disagree - fail closed
+                    # so BLOCKED plus false release evidence never persists.
+                    raise RuntimeError(
+                        f"{task['id']}: migration lock release refused for "
+                        f"the current owner")
+                task["migration_lock_auto_release"] = {
+                    "at": clock.iso(self.now()),
+                    "why": "DISPATCH_FAILED_BEFORE_BUILDER_STARTED",
+                    "evidenced": False,
+                }
+                self.transition(doc, task["id"], "BLOCKED", why)
+                return
+            self.transition(doc, task["id"], "HUMAN_REQUIRED",
+                            f"builder dispatch failed while owning the "
+                            f"migration lock: {why}")
+            self.request_intervention(
+                doc, type_="HUMAN_APPARATUS_AUTHORISATION",
+                condition_code="builder_dispatch_failed",
+                task_id=task["id"],
+                reason=f"Builder dispatch failed for {task['id']} while it "
+                       f"owns the migration lock",
+                title=f"{task['id']}: builder dispatch failed while owning "
+                      f"the migration lock",
+                body=f"{why}. A previous builder ran under this ownership, so "
+                     f"the migration lock is retained pending a human decision.")
+            return
+        self.transition(doc, task["id"], "BLOCKED", why)
+
+    AUTO_RELEASE_BY = "dispatch_failed_before_builder_started"
+
+    def reconcile_auto_release_evidence(self, doc: dict) -> None:
+        """C-15: converge task-owned auto-release markers to ledger evidence.
+
+        The release itself commits with state only; this pass derives the
+        MIGRATION_LOCK_RELEASED event from the marker, at most once, guarded
+        by the ledger itself. Its only state change is evidenced False -> True.
+        It never releases anything, never reads the mutable lock fields, and
+        never transitions a task - so unrelated later lock activity cannot
+        confuse it. A failed append aborts this transaction and a later tick
+        retries; an append that landed while the evidenced flip was lost is
+        found by the guard and not duplicated.
+        """
+        for task in doc["tasks"].values():
+            marker = task.get("migration_lock_auto_release")
+            if not marker or marker.get("evidenced"):
+                continue
+            if not self._auto_release_event_exists(task["id"]):
+                self.log("MIGRATION_LOCK_RELEASED", task_id=task["id"],
+                         outcome="FREE", activity_class="ORCHESTRATION",
+                         metadata_redacted={
+                             "released_by": self.AUTO_RELEASE_BY,
+                             "released_at": marker["at"],
+                             "why": marker["why"],
+                         })
+            marker["evidenced"] = True
+
+    def _auto_release_event_exists(self, task_id: str) -> bool:
+        for event in self.ledger.events("MIGRATION_LOCK_RELEASED"):
+            metadata = event.get("metadata_redacted") or {}
+            if (event.get("task_id") == task_id
+                    and metadata.get("released_by") == self.AUTO_RELEASE_BY):
+                return True
+        return False
 
     def dispatch_reviewer(self, doc: dict, task: dict, pr_number: int) -> None:
         if not providers.may(doc, "review"):
@@ -1352,6 +1458,7 @@ class Supervisor:
             providers.ensure(doc)
             budget.ensure(doc, self.cfg.budget_usd)
             migration_lock.ensure(doc)
+            self.reconcile_auto_release_evidence(doc)
 
             for provider, before, after in providers.refresh(doc, self.tz):
                 self.log("PROVIDER_STATE_CHANGE", provider=provider, state_before=before,
