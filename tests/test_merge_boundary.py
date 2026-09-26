@@ -19,7 +19,9 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -423,3 +425,412 @@ class TestRoutePrsQueuesButNeverMerges(MergeBoundaryCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ====================================================================== C-14.2
+# Behavioural fail-before/pass-after coverage for three-source detection.
+# These assert observable outcomes - task state, ledger events, notifications -
+# and deliberately do NOT import control.merge_invariant, so a red run proves
+# the missing BEHAVIOUR rather than a missing module name.
+
+
+GUARDRAIL_RED = "GUARDRAIL_RED"
+STATE_INVARIANT_VIOLATION = "STATE_INVARIANT_VIOLATION"
+
+
+class InvariantDetectionCase(MergeBoundaryCase):
+    """A real Supervisor with a REAL ledger on disk, so the control plane can
+    read its own durable claims back the way C-14.2 requires."""
+
+    def setUp(self):
+        super().setUp()
+        from control import ledger as ledger_mod
+        self.ledger_path = Path(self.tmp.name) / "ledger.jsonl"
+        self.sup.ledger = ledger_mod.Ledger(path=self.ledger_path, tz=TZ,
+                                            experiment_id="run-002")
+        del self.sup.log                      # restore the real, appending log()
+        self.notifier = mock.Mock()
+        self.notifier.send = mock.Mock(return_value={"ok": True})
+        self.sup.notifier = self.notifier
+        self.sup.notify_out = mock.Mock(return_value={"ok": True})
+
+    # ------------------------------------------------------------- fixtures
+
+    def merged_state(self, *, merged=False, task_state="REVIEW", debt=None,
+                     last_review_at=mock.sentinel.default, history_pr_open=True):
+        doc = state_mod.initial_document("run-002", "2.0")
+        doc["started_at"] = clock.iso(clock.now(TZ))
+        from control import providers
+        providers.ensure(doc)
+        task = state_mod.add_task(doc, "TASK-001", "T", [], "feature", False, TZ)
+        task.update({"state": task_state, "branch": "task/task-001", "pr": 100,
+                     "worker": None})
+        if history_pr_open:
+            task["history"].append({"at": clock.iso(clock.now(TZ) - timedelta(hours=2)),
+                                    "from": "ACTIVE", "to": "PR_OPEN", "reason": "opened"})
+        record = routing.blank_pr_record(100, "TASK-001", "task/task-001")
+        record.update({"review_verdict": routing.REVIEW_PASS, "approval_current": True,
+                       "reviewed_diff_hash": DIFF_HASH, "merged": merged,
+                       "review_cycles": 1})
+        record["last_review_at"] = (clock.iso(clock.now(TZ) - timedelta(hours=1))
+                                    if last_review_at is mock.sentinel.default
+                                    else last_review_at)
+        doc["prs"]["100"] = record
+        if debt:
+            doc["debt"] = dict(debt)
+        self.store._write(doc)
+        return doc
+
+    def local_merged_event(self, *, debt_ids=(), status="NOT_REQUIRED",
+                           detected_externally=mock.sentinel.absent):
+        meta = {"reviewed_head": "0" * 40, "merged_sha": MERGED_SHA,
+                "merge_sha_observed": True, "debt_recording_status": status,
+                "debt_ids": list(debt_ids)}
+        if detected_externally is not mock.sentinel.absent:
+            meta["detected_externally"] = detected_externally
+        self.sup.ledger.append("MERGED", task_id="TASK-001", pr_id=100,
+                               branch="task/task-001", outcome="MERGED",
+                               activity_class="ORCHESTRATION", metadata_redacted=meta)
+
+    def blocked_merged_event(self, *, hours_ago):
+        """A GUARDRAIL_RED substitution, stamped explicitly so the window can
+        be exercised on both sides. Written raw because Ledger.append stamps
+        its own timestamp."""
+        event = {"timestamp": clock.iso(clock.now(TZ) - timedelta(hours=hours_ago)),
+                 "experiment_id": "run-002", "event_type": GUARDRAIL_RED,
+                 "guardrail": "SECRET_IN_LEDGER_EVENT_BLOCKED", "outcome": "BLOCKED",
+                 "metadata_redacted": {"blocked_event_type": "MERGED"}}
+        with open(self.ledger_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event) + "\n")
+
+    def run_external_branch(self, doc, *, pr_state="MERGED"):
+        view = None if pr_state is None else {
+            "number": 100, "state": pr_state, "isDraft": False,
+            "mergeCommit": {"oid": MERGED_SHA}}
+        with mock.patch.object(supervisor_mod.gh, "pr_view", return_value=view), \
+                mock.patch.object(supervisor_mod.workers, "close_worker"):
+            self.sup.route_prs(doc, None, [])
+        return doc
+
+    def ledger_events(self, name=None):
+        raw = self.ledger_path.read_text(encoding="utf-8").splitlines()
+        out = []
+        for line in raw:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if name is None or event.get("event_type") == name:
+                out.append(event)
+        return out
+
+    def violation(self):
+        found = self.ledger_events(STATE_INVARIANT_VIOLATION)
+        return found[-1] if found else None
+
+
+class TestLostLocalCommit(InvariantDetectionCase):
+
+    def test_f1_lost_local_commit_is_frozen_not_silently_completed(self):
+        """F1. GitHub merged + durable local MERGED evidence + state unmerged.
+        Today the external branch silently completes it."""
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+
+        self.assertEqual(doc["tasks"]["TASK-001"]["state"], "FROZEN")
+        self.assertNotEqual(doc["tasks"]["TASK-001"]["state"], "COMPLETE")
+        violation = self.violation()
+        self.assertIsNotNone(violation, "no STATE_INVARIANT_VIOLATION was emitted")
+        self.assertEqual(violation["metadata_redacted"]["verdict"], "LOST_LOCAL_COMMIT")
+        self.assertTrue(violation["metadata_redacted"]["froze"])
+
+    def test_f1b_lost_local_commit_does_not_complete_the_task(self):
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+        self.assertFalse(doc["prs"]["100"]["merged"])
+
+
+class TestOrdinaryExternal(InvariantDetectionCase):
+
+    def test_f3_ordinary_external_merge_still_completes_and_does_not_freeze(self):
+        """F3. No local merge evidence -> unchanged behaviour."""
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+
+        self.assertEqual(doc["tasks"]["TASK-001"]["state"], "COMPLETE")
+        self.assertTrue(doc["prs"]["100"]["merged"])
+        self.assertIsNone(self.violation())
+        merged = self.ledger_events("MERGED")
+        self.assertTrue(merged[-1]["metadata_redacted"]["detected_externally"])
+
+    def test_f4b_blocked_merged_outside_the_window_stays_ordinary(self):
+        """F4b. The window must NARROW, not merely fail closed."""
+        self.blocked_merged_event(hours_ago=5)       # before last_review_at (1h ago)
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+        self.assertEqual(doc["tasks"]["TASK-001"]["state"], "COMPLETE")
+        self.assertIsNone(self.violation())
+
+
+class TestUnprovable(InvariantDetectionCase):
+
+    def test_f4_blocked_merged_inside_the_window_is_unprovable(self):
+        self.blocked_merged_event(hours_ago=0)       # after last_review_at
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+
+        self.assertEqual(doc["tasks"]["TASK-001"]["state"], "FROZEN")
+        self.assertEqual(self.violation()["metadata_redacted"]["verdict"], "UNPROVABLE")
+
+    def test_f8_truncated_ledger_line_is_unprovable_not_absence(self):
+        with open(self.ledger_path, "a", encoding="utf-8") as handle:
+            handle.write('{"event_type": "MERGED", "task_id": "TASK-0\n')  # corrupt
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+
+        self.assertEqual(doc["tasks"]["TASK-001"]["state"], "FROZEN")
+        meta = self.violation()["metadata_redacted"]
+        self.assertEqual(meta["verdict"], "UNPROVABLE")
+        self.assertFalse(meta["ledger_readable"])
+
+    def test_f15_no_reliable_lower_bound_is_unprovable(self):
+        self.blocked_merged_event(hours_ago=0)
+        doc = self.merged_state(last_review_at=None, history_pr_open=False)
+        self.run_external_branch(doc)
+
+        self.assertEqual(doc["tasks"]["TASK-001"]["state"], "FROZEN")
+        meta = self.violation()["metadata_redacted"]
+        self.assertEqual(meta["verdict"], "UNPROVABLE")
+        self.assertIsNone(meta["window_lower_source"])
+
+    def test_f13a_unobservable_without_contradiction_defers(self):
+        """A failed GitHub observation is not a merge invariant violation. With
+        no durable local merge claim there is nothing to reconcile - only
+        insufficient evidence to reach a conclusion this tick."""
+        doc = self.merged_state()
+        self.run_external_branch(doc, pr_state=None)
+
+        self.assertEqual(doc["tasks"]["TASK-001"]["state"], "REVIEW")
+        self.assertFalse(doc["prs"]["100"]["merged"])
+        self.assertIsNone(self.violation())
+        self.notifier.send.assert_not_called()
+        self.assertEqual(doc["counters"]["human_interventions"], 0)
+        self.assertEqual(self.ledger_events("MERGED"), [])
+
+    def test_f13b_unobservable_with_a_durable_local_claim_is_unprovable(self):
+        """Two sources already contradict each other. Being unable to ask
+        GitHub makes that unverifiable, not benign."""
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_external_branch(doc, pr_state=None)
+
+        self.assertEqual(doc["tasks"]["TASK-001"]["state"], "FROZEN")
+        meta = self.violation()["metadata_redacted"]
+        self.assertEqual(meta["verdict"], "UNPROVABLE")
+        self.assertTrue(meta["froze"])
+        self.assertEqual(self.notifier.send.call_count, 1)
+        self.assertEqual(doc["counters"]["human_interventions"], 1)
+
+    def test_unobservable_does_not_hide_a_provable_debt_divergence(self):
+        """An independently provable contradiction must not vanish because
+        GitHub is temporarily unavailable."""
+        self.local_merged_event(debt_ids=("TASK-001-PR100-F1",), status="RECORDED")
+        doc = self.merged_state(merged=True, task_state="MERGE_READY")
+        self.run_external_branch(doc, pr_state=None)
+        # route_prs skips merged records, so prove it through the classifier
+        # the Watchdog also uses.
+        from control import merge_invariant as mi
+        github, state_view, ledger_view = mi.gather(
+            task_id="TASK-001", pr_number=100, doc=doc,
+            task=doc["tasks"]["TASK-001"], record=doc["prs"]["100"],
+            ledger=self.sup.ledger, pr_view=None,
+            now_iso=clock.iso(clock.now(TZ)))
+        v = mi.classify(task_id="TASK-001", pr_number=100, github=github,
+                        state_view=state_view, ledger_view=ledger_view)
+        self.assertEqual(v.verdict, "DEBT_DIVERGENCE")
+        self.assertEqual(v.missing_debt_ids, ("TASK-001-PR100-F1",))
+
+    def test_unreadable_ledger_still_fails_closed_when_github_is_unobservable(self):
+        """The narrowing does not extend to ledger corruption: an incomplete
+        ledger means neither presence nor absence of a local claim can be
+        established, so neither concluding nor deferring is safe."""
+        with open(self.ledger_path, "a", encoding="utf-8") as handle:
+            handle.write('{"event_type": "MERGED", "task_id": "TASK-0\n')
+        doc = self.merged_state()
+        self.run_external_branch(doc, pr_state=None)
+
+        self.assertEqual(doc["tasks"]["TASK-001"]["state"], "FROZEN")
+        meta = self.violation()["metadata_redacted"]
+        self.assertEqual(meta["verdict"], "UNPROVABLE")
+        self.assertFalse(meta["ledger_readable"])
+
+
+class TestMergeOriginContract(InvariantDetectionCase):
+
+    def test_f6_local_merge_records_detected_externally_false(self):
+        doc = self.merged_state()
+        with mock.patch.object(supervisor_mod.gh, "merge",
+                               return_value=mock.Mock(ok=True, stderr="", stdout="")), \
+                mock.patch.object(supervisor_mod.gh, "pr_view",
+                                  return_value=_open_pr(100, "task/task-001")), \
+                mock.patch.object(supervisor_mod.routing, "material_diff_hash",
+                                  return_value=DIFF_HASH), \
+                mock.patch.object(supervisor_mod.workers, "close_worker"):
+            self.sup.execute_merges([("TASK-001", 100)])
+
+        merged = self.ledger_events("MERGED")
+        self.assertEqual(len(merged), 1)
+        self.assertIn("detected_externally", merged[0]["metadata_redacted"])
+        self.assertFalse(merged[0]["metadata_redacted"]["detected_externally"])
+
+    def test_f7_historical_merged_without_the_key_counts_as_local(self):
+        self.local_merged_event(detected_externally=mock.sentinel.absent)
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+        self.assertEqual(self.violation()["metadata_redacted"]["verdict"],
+                         "LOST_LOCAL_COMMIT")
+
+    def test_external_merged_evidence_is_not_local_evidence(self):
+        self.local_merged_event(detected_externally=True)
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+        self.assertIsNone(self.violation())
+        self.assertEqual(doc["tasks"]["TASK-001"]["state"], "COMPLETE")
+
+
+class TestMetadataDiscipline(InvariantDetectionCase):
+
+    def test_notification_status_is_a_finite_code_never_raw_text(self):
+        self.notifier.send.return_value = {"ok": False, "status": 500,
+                                           "error": "Traceback: secret-ish raw text"}
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+
+        meta = self.violation()["metadata_redacted"]
+        self.assertFalse(meta["notification_delivered"])
+        self.assertEqual(meta["notification_status"], "NOTIFICATION_SEND_FAILED")
+        self.assertNotIn("Traceback", json.dumps(meta))
+        self.assertNotIn("raw text", json.dumps(meta))
+
+    def test_existing_finite_notifier_reason_is_reused(self):
+        self.notifier.send.return_value = {"ok": False,
+                                           "reason": "DISCORD_WEBHOOK_URL_NOT_SET"}
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+        self.assertEqual(self.violation()["metadata_redacted"]["notification_status"],
+                         "DISCORD_WEBHOOK_URL_NOT_SET")
+
+    def test_durable_metadata_keys_are_a_closed_set(self):
+        """Absence of one known offender proves nothing - a NEW unbounded key
+        would slip straight past. The key set itself is the contract."""
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+        self.assertEqual(set(self.violation()["metadata_redacted"]), {
+            "check_id", "verdict", "detector", "fingerprint", "freezable", "froze",
+            "evidence_codes", "github_observed", "github_merged", "merged_sha",
+            "state_merged", "task_state", "local_merged_events",
+            "external_merged_events", "claimed_debt_status", "claimed_debt_ids",
+            "missing_debt_ids", "ledger_readable", "ledger_unreadable_lines",
+            "blocked_merged_in_window", "window_lower_bound", "window_lower_source",
+            "notification_delivered", "notification_status",
+        })
+
+    def test_durable_evidence_is_structured_codes_not_prose(self):
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+        meta = self.violation()["metadata_redacted"]
+        self.assertNotIn("evidence", meta)
+        self.assertIn("evidence_codes", meta)
+        self.assertTrue(all(isinstance(c, str) and c.isupper().__bool__()
+                            for c in meta["evidence_codes"]))
+        self.assertIn("LOCAL_MERGE_EVIDENCE", meta["evidence_codes"])
+
+
+class TestDuplicateSuppression(InvariantDetectionCase):
+
+    def test_f10_identical_finding_annunciates_once(self):
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+        first = len(self.ledger_events(STATE_INVARIANT_VIOLATION))
+        self.assertEqual(first, 1)
+        # Identical evidence, driven again. Nothing is mutated between runs.
+        self.run_external_branch(doc)
+        self.assertEqual(len(self.ledger_events(STATE_INVARIANT_VIOLATION)), first)
+        self.assertEqual(doc["counters"]["human_interventions"], 1)
+
+    def test_f12_materially_changed_evidence_reannunciates(self):
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+        before = len(self.ledger_events(STATE_INVARIANT_VIOLATION))
+
+        with mock.patch.object(supervisor_mod.gh, "pr_view", return_value={
+                "number": 100, "state": "MERGED", "isDraft": False,
+                "mergeCommit": {"oid": "f" * 40}}), \
+                mock.patch.object(supervisor_mod.workers, "close_worker"):
+            self.sup.route_prs(doc, None, [])       # same verdict, different SHA
+        self.assertGreater(len(self.ledger_events(STATE_INVARIANT_VIOLATION)), before)
+
+
+class TestFreezability(InvariantDetectionCase):
+
+    def test_f14_merge_ready_is_annunciated_not_frozen(self):
+        self.local_merged_event()
+        doc = self.merged_state(task_state="MERGE_READY")
+        self.run_external_branch(doc)
+
+        self.assertEqual(doc["tasks"]["TASK-001"]["state"], "MERGE_READY")
+        meta = self.violation()["metadata_redacted"]
+        self.assertFalse(meta["freezable"])
+        self.assertFalse(meta["froze"])
+        self.assertEqual(self.violation()["state_after"], "MERGE_READY")
+
+
+class TestCrossDetectorSuppression(InvariantDetectionCase):
+    """F16. The fingerprint deliberately excludes detector identity: whichever
+    component sees a finding first annunciates, and the other must recognise
+    the same finding rather than duplicating it."""
+
+    def test_f16_supervisor_then_watchdog_annunciate_once_between_them(self):
+        from control import watchdog
+
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_external_branch(doc)                      # Supervisor first
+        self.assertEqual(len(self.ledger_events(STATE_INVARIANT_VIOLATION)), 1)
+
+        cfg = SimpleNamespace(timezone=TZ, github_repo="UNASSIGNED")
+        with mock.patch.object(watchdog.gh, "pr_view", return_value={
+                "number": 100, "state": "MERGED", "isDraft": False,
+                "mergeCommit": {"oid": MERGED_SHA}}):
+            watchdog.reconcile_merge_invariants(cfg, self.sup.ledger,
+                                                self.notifier, doc)
+
+        self.assertEqual(len(self.ledger_events(STATE_INVARIANT_VIOLATION)), 1)
+        self.assertEqual(doc["counters"]["human_interventions"], 1)
+
+    def test_f16b_watchdog_then_supervisor_annunciate_once_between_them(self):
+        from control import watchdog
+
+        self.local_merged_event()
+        doc = self.merged_state()
+        cfg = SimpleNamespace(timezone=TZ, github_repo="UNASSIGNED")
+        with mock.patch.object(watchdog.gh, "pr_view", return_value={
+                "number": 100, "state": "MERGED", "isDraft": False,
+                "mergeCommit": {"oid": MERGED_SHA}}):
+            watchdog.reconcile_merge_invariants(cfg, self.sup.ledger,
+                                                self.notifier, doc)   # Watchdog first
+        self.assertEqual(len(self.ledger_events(STATE_INVARIANT_VIOLATION)), 1)
+
+        self.run_external_branch(doc)
+        self.assertEqual(len(self.ledger_events(STATE_INVARIANT_VIOLATION)), 1)
+        self.assertEqual(doc["counters"]["human_interventions"], 1)

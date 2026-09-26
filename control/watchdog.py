@@ -18,8 +18,8 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import clock, config, ledger as ledger_mod, notify, proc, reconcile
-from . import state as state_mod, reconcile
+from . import clock, config, gh, ledger as ledger_mod, merge_invariant, notify
+from . import proc, reconcile
 from . import state as state_mod
 
 CHECK_SECONDS = 30
@@ -106,6 +106,46 @@ def start_supervisor() -> int | None:
     return process.pid if process.poll() is None else None
 
 
+def reconcile_merge_invariants(cfg, ledger, notifier, doc) -> None:
+    """C-14.2: the Watchdog's own three-source merge check.
+
+    Independent by construction. The Supervisor is the component whose merge
+    claims are in doubt, so a check only it runs proves nothing; this pass
+    makes its own GitHub observation and reads the ledger itself.
+
+    A sibling of reconcile.reconcile(), not an extension of it: that function
+    stays pure, worker-scoped and bounded to a single git call. This one is
+    also the only path that can see a divergence on an already-COMPLETE task,
+    because the Supervisor's routing skips pull requests state records as
+    merged.
+
+    Detects, annunciates and freezes where legal. Never repairs, and never
+    raises the experiment-wide guardrail.
+    """
+    now_iso = clock.iso(clock.now(cfg.timezone))
+    for task_id, task in sorted((doc.get("tasks") or {}).items()):
+        pr_number = task.get("pr")
+        if pr_number is None:
+            continue
+        record = (doc.get("prs") or {}).get(str(pr_number))
+        pr_view = gh.pr_view(getattr(cfg, "github_repo", ""), pr_number)
+        github, state_view, ledger_view = merge_invariant.gather(
+            task_id=task_id, pr_number=pr_number, doc=doc, task=task,
+            record=record, ledger=ledger, pr_view=pr_view, now_iso=now_iso,
+        )
+        verdict = merge_invariant.classify(
+            task_id=task_id, pr_number=pr_number, github=github,
+            state_view=state_view, ledger_view=ledger_view,
+        )
+        if verdict is None or not verdict.dangerous:
+            continue
+        merge_invariant.annunciate(
+            doc=doc, task=task, record=record, verdict=verdict, github=github,
+            state_view=state_view, ledger_view=ledger_view, ledger=ledger,
+            notifier=notifier, detector="watchdog", tz=cfg.timezone,
+        )
+
+
 def reconcile_worker_state(cfg, ledger, notifier, *, store=None) -> None:
     """Deterministic policy acting on control/reconcile.py's facts: one
     dangerous finding is sufficient to freeze the task it names. Never
@@ -132,6 +172,7 @@ def reconcile_worker_state(cfg, ledger, notifier, *, store=None) -> None:
 
     try:
         with store.transaction() as doc:
+            reconcile_merge_invariants(cfg, ledger, notifier, doc)
             findings = reconcile.reconcile(doc, tz=cfg.timezone)
             already_handled: set[str] = set()
             for finding in findings:

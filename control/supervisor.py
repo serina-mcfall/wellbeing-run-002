@@ -23,6 +23,7 @@ from . import (
     gh,
     jev,
     ledger as ledger_mod,
+    merge_invariant,
     migration_lock,
     notify,
     proc,
@@ -702,6 +703,12 @@ class Supervisor:
 
             if pr is None:
                 merged_view = gh.pr_view(self.cfg.github_repo, pr_number)
+                # C-14.2: a pull request merged out there while state says it
+                # is not may be an ordinary human merge, or this control plane's
+                # own merge whose commit was lost. Completing both the same way
+                # converts a durable contradiction into a clean-looking task.
+                if self.invariant_violated(doc, task, record, pr_number, merged_view):
+                    continue
                 merge_sha_observed = merged_view is not None
                 merged_data = merged_view or {}
                 if (merged_data.get("state") or "").upper() == "MERGED":
@@ -789,6 +796,28 @@ class Supervisor:
         """Whether a worker in any of these roles is already live on this PR."""
         return any(meta.get("pr") == pr_number and meta.get("role") in roles
                    for meta in doc["workers"].values())
+
+    def invariant_violated(self, doc: dict, task: dict, record: dict,
+                           pr_number: int, pr_view: dict | None) -> bool:
+        """C-14.2. True when this pull request must not be treated as an
+        ordinary external merge. Detects and annunciates; never repairs."""
+        github, state_view, ledger_view = merge_invariant.gather(
+            task_id=task["id"], pr_number=pr_number, doc=doc, task=task,
+            record=record, ledger=self.ledger, pr_view=pr_view,
+            now_iso=clock.iso(self.now()),
+        )
+        verdict = merge_invariant.classify(
+            task_id=task["id"], pr_number=pr_number, github=github,
+            state_view=state_view, ledger_view=ledger_view,
+        )
+        if verdict is None or not verdict.dangerous:
+            return False
+        merge_invariant.annunciate(
+            doc=doc, task=task, record=record, verdict=verdict, github=github,
+            state_view=state_view, ledger_view=ledger_view, ledger=self.ledger,
+            notifier=self.notifier, detector="supervisor", tz=self.tz,
+        )
+        return True
 
     @staticmethod
     def merge_no_longer_ready(task: dict | None, record: dict | None,
@@ -940,6 +969,10 @@ class Supervisor:
                 "merge_sha_observed": merge_sha_observed,
                 "debt_recording_status": debt_result.status,
                 "debt_ids": list(debt_result.debt_ids),
+                # C-14.2 merge-origin contract: always present on both paths,
+                # so absence of the key is never how local and external merges
+                # are told apart.
+                "detected_externally": False,
             },
         )
 

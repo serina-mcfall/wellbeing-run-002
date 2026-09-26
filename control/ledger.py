@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
@@ -59,6 +60,23 @@ FIELDS = (
     "human_intervention",
     "metadata_redacted",
 )
+
+
+# Finite error vocabulary for the invariant inspection path. An OS exception
+# string is never persisted.
+LEDGER_FILE_MISSING = "LEDGER_FILE_MISSING"
+LEDGER_UNREADABLE = "LEDGER_UNREADABLE"
+
+
+@dataclass(frozen=True)
+class Inspection:
+    """Result of a bounded invariant lookup. `complete` is False whenever any
+    line could not be parsed, so callers can refuse to treat an absence as
+    proof. Matched events that DID parse remain valid evidence."""
+    events: tuple
+    complete: bool
+    unreadable_lines: int
+    error: str | None
 
 
 class Ledger:
@@ -140,3 +158,50 @@ class Ledger:
 
     def count(self) -> int:
         return sum(1 for _ in self.read())
+
+    def inspect(self, *, task_id: str | None = None, pr_id=None,
+                event_types: tuple[str, ...] = ()) -> "Inspection":
+        """C-14.2: a bounded, fail-closed lookup for invariant checking.
+
+        read()/events()/last()/count() silently skip a line that will not
+        parse, which is right for reporting and wrong here: for invariant work
+        "no matching event" and "the matching event was truncated" are
+        different answers and must not collapse into the same one. A crash
+        mid-append - exactly the fault C-14 is about - leaves a truncated
+        final line, so this path reports completeness instead of hiding it.
+
+        Deliberately separate from the existing readers so no other consumer
+        changes behaviour.
+        """
+        matched: list[dict] = []
+        unreadable = 0
+        error: str | None = None
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                for raw in handle:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        event = json.loads(raw)
+                    except json.JSONDecodeError:
+                        unreadable += 1
+                        continue
+                    if event_types and event.get("event_type") not in event_types:
+                        continue
+                    if task_id is not None and event.get("task_id") != task_id:
+                        continue
+                    if pr_id is not None and event.get("pr_id") != pr_id:
+                        continue
+                    matched.append(event)
+        except FileNotFoundError:
+            # A missing ledger during invariant reconciliation is the loss of a
+            # durable evidence source, not proof that no events occurred. It is
+            # reported incomplete here even though read() and the ordinary
+            # reporting path legitimately treat absence as empty.
+            return Inspection((), False, 0, LEDGER_FILE_MISSING)
+        except OSError:
+            # Unreadable file is not an empty file. Never report completeness
+            # we cannot demonstrate.
+            return Inspection((), False, 0, LEDGER_UNREADABLE)
+        return Inspection(tuple(matched), unreadable == 0, unreadable, error)

@@ -134,6 +134,18 @@ class ExternalMergeDetectionCase(unittest.TestCase):
                 mock.patch.object(supervisor_mod, "telemetry"), \
                 mock.patch.object(supervisor_mod, "jev"):
             self.sup = supervisor_mod.Supervisor(cfg)
+        # C-14.2 reads durable merge evidence before treating a merged-but-
+        # unmerged-in-state PR as external. A real, empty ledger states the
+        # premise of these tests explicitly: no local merge was ever claimed,
+        # so every case below really is an ordinary external merge.
+        import tempfile
+        from pathlib import Path as _Path
+        from control import ledger as _ledger_mod
+        self._ledger_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._ledger_tmp.cleanup)
+        self.sup.ledger = _ledger_mod.Ledger(
+            path=_Path(self._ledger_tmp.name) / "ledger.jsonl", tz=TZ,
+            experiment_id="run-002")
         self.events: list[tuple] = []
         self.sup.log = mock.Mock(side_effect=lambda e, **k: self.events.append((e, k)))
         self.sup.notify_out = mock.Mock(return_value={"ok": True})
@@ -144,6 +156,13 @@ class ExternalMergeDetectionCase(unittest.TestCase):
     def doc_with_pr_task(self, reviewed_head=REVIEWED_SHA):
         doc = _doc(reviewed_head=reviewed_head, merged_sha=None)
         doc["tasks"]["TASK-001"]["pr"] = PR
+        # Production guarantees this entry for any task carrying a PR:
+        # attach_pr() assigns task["pr"] and transitions to PR_OPEN in the
+        # same committed operation. The hand-built fixture has to say so, or
+        # it describes a state the control plane cannot actually produce.
+        doc["tasks"]["TASK-001"]["history"].append(
+            {"at": "2026-09-26T09:00:00.000+12:00", "from": "ACTIVE",
+             "to": "PR_OPEN", "reason": "PR opened"})
         return doc
 
     def run_route_prs(self, doc, *, pr_view_result):
