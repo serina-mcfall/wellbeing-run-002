@@ -4,10 +4,11 @@ Protocol v2's "Human intervention taxonomy" names six intervention types and
 requires recording requested_at, acknowledged_at, resolved_at and active
 human minutes, plus visibility into simultaneous open HUMAN_REQUIRED events.
 This module is the durable record and the OPEN -> ACKNOWLEDGED -> RESOLVED
-state machine for one intervention. It stores and validates a human's
-decision only - it never executes one. Clearing a guardrail, retrying a
-task, freezing the experiment, or any other effect of a resolution outcome
-belongs to a later integration checkpoint (C-08b.2), not here.
+state machine for one intervention. Its lifecycle primitives store and
+validate a human's decision only - they never execute one. Clearing a
+guardrail, retrying a task, or any other effect of a resolution outcome is
+executed by the integration/CLI layer (control/cli.py's human-resolve,
+C-08b.2), never here.
 
 Records live in doc["interventions"], inside the existing durable state
 document (control/state.py's JSON doc via control/state.py::Store) - no new
@@ -31,7 +32,7 @@ from __future__ import annotations
 import re
 import secrets
 
-from . import clock
+from . import clock, redact
 
 INTERVENTION_TYPES = frozenset({
     "HUMAN_PRIVILEGED_ACTION",
@@ -56,6 +57,14 @@ SCOPES = frozenset({"task", "systemic"})
 VALID_STATUSES = frozenset({"OPEN", "ACKNOWLEDGED", "RESOLVED"})
 
 CONDITION_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+# C-08b.2: production reasons are structurally generated from fixed control-plane
+# templates plus canonical identifiers and bounded integers, so the secret
+# detector firing on one is supposed to be impossible. If it fires anyway, the
+# TEXT is rejected from persistence - never the intervention occurrence. The
+# matched value is not echoed, not stored, and not excerpted; this fixed
+# placeholder is stored instead and the record carries reason_withheld=True.
+WITHHELD_REASON = "reason withheld: the generated reason matched the secret detector"
 
 
 class InterventionError(RuntimeError):
@@ -124,12 +133,14 @@ def request(doc: dict, *, type_: str, scope: str, task_id: str | None,
     while intervention_id in existing:
         intervention_id = new_intervention_id()
 
+    reason_withheld = redact.contains_secret(reason)
     record = {
         "id": intervention_id,
         "type": type_,
         "scope": scope,
         "task_id": task_id,
-        "reason": reason,
+        "reason": WITHHELD_REASON if reason_withheld else reason,
+        "reason_withheld": reason_withheld,
         "condition_code": condition_code,
         "dedup_key": dedup_key,
         "status": "OPEN",
@@ -275,3 +286,12 @@ def open_interventions(doc: dict) -> list[dict]:
 
 def simultaneous_open_count(doc: dict) -> int:
     return len(open_interventions(doc))
+
+
+def notification_suffix(record: dict) -> str:
+    """The intervention identity/action line every escalation notification
+    carries (C-08b.2). One home, because the Supervisor, the Watchdog and the
+    merge-invariant annunciator all append the same sentence."""
+    return (f" Intervention {record['id']} ({record['type']}) recorded: "
+            f"acknowledge with ctl human-acknowledge {record['id']}, then "
+            f"resolve with ctl human-resolve.")

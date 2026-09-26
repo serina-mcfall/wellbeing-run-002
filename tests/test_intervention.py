@@ -110,11 +110,12 @@ class TestRequest(unittest.TestCase):
         record, _ = _request(doc)
         self.assertEqual(
             set(record),
-            {"id", "type", "scope", "task_id", "reason", "condition_code",
-             "dedup_key", "status", "requested_at", "acknowledged_at",
-             "acknowledged_by", "resolved_at", "resolved_by", "resolution",
-             "resolution_note", "active_human_seconds"},
+            {"id", "type", "scope", "task_id", "reason", "reason_withheld",
+             "condition_code", "dedup_key", "status", "requested_at",
+             "acknowledged_at", "acknowledged_by", "resolved_at", "resolved_by",
+             "resolution", "resolution_note", "active_human_seconds"},
         )
+        self.assertFalse(record["reason_withheld"])
         for field in ("acknowledged_at", "acknowledged_by", "resolved_at",
                       "resolved_by", "resolution", "resolution_note",
                       "active_human_seconds"):
@@ -1055,13 +1056,13 @@ class TestCliHumanResolve(CliCase):
     def test_fresh_resolution_stores_the_decision_and_logs_it_once(self):
         iid = self.seed(status="ACKNOWLEDGED", by="serina")
         with _clock_at(_moment(12, 1, 30)):
-            code, _ = self.run_cli(["human-resolve", iid, "--outcome", "CLEAR_GUARDRAIL",
+            code, _ = self.run_cli(["human-resolve", iid, "--outcome", "NO_ACTION",
                                     "--note", "headroom restored", "--by", "serina"])
 
         record = self.stored(iid)
         self.assertEqual(code, 0)
         self.assertEqual(record["status"], "RESOLVED")
-        self.assertEqual(record["resolution"], "CLEAR_GUARDRAIL")
+        self.assertEqual(record["resolution"], "NO_ACTION")
         self.assertEqual(record["resolution_note"], "headroom restored")
         self.assertEqual(record["resolved_by"], "serina")
         self.assertEqual(record["resolved_at"], clock.iso(_moment(12, 1, 30)))
@@ -1072,7 +1073,7 @@ class TestCliHumanResolve(CliCase):
         iid = self.seed(status="ACKNOWLEDGED", by="serina")
         with mock.patch.object(cli.getpass, "getuser", return_value="ci-bot"):
             with _clock_at(_moment(12, 1, 30)):
-                code, _ = self.run_cli(["human-resolve", iid, "--outcome", "RETRY"])
+                code, _ = self.run_cli(["human-resolve", iid, "--outcome", "NO_ACTION"])
         self.assertEqual(code, 0)
         self.assertEqual(self.stored(iid)["resolved_by"], "ci-bot")
 
@@ -1087,17 +1088,17 @@ class TestCliHumanResolve(CliCase):
 
         with mock.patch.object(ledger_mod.Ledger, "append", spy):
             with _clock_at(_moment(12, 1, 30)):
-                code, _ = self.run_cli(["human-resolve", iid, "--outcome", "RETRY",
+                code, _ = self.run_cli(["human-resolve", iid, "--outcome", "NO_ACTION",
                                         "--by", "serina"])
 
         self.assertEqual(code, 0)
         self.assertEqual(seen["record_on_disk"]["status"], "RESOLVED")
-        self.assertEqual(seen["record_on_disk"]["resolution"], "RETRY")
+        self.assertEqual(seen["record_on_disk"]["resolution"], "NO_ACTION")
         self.assertEqual(seen["record_on_disk"]["active_human_seconds"], 90)
 
     def test_ledger_failure_then_identical_retry_repairs_exactly_one_event(self):
         iid = self.seed(status="ACKNOWLEDGED", by="serina")
-        argv = ["human-resolve", iid, "--outcome", "RETRY", "--note", "host restarted",
+        argv = ["human-resolve", iid, "--outcome", "NO_ACTION", "--note", "host restarted",
                 "--by", "serina"]
 
         with self.exploding_ledger():
@@ -1355,7 +1356,7 @@ class TestCliSecretShapedInput(CliCase):
     def test_ordinary_notes_and_actors_are_unaffected(self):
         iid = self.seed(status="ACKNOWLEDGED", by="serina")
         with _clock_at(_moment(12, 1, 30)):
-            code, _ = self.run_cli(["human-resolve", iid, "--outcome", "RETRY",
+            code, _ = self.run_cli(["human-resolve", iid, "--outcome", "NO_ACTION",
                                     "--note", "re-ran the gate after the host "
                                               "came back; nothing else changed",
                                     "--by", "serina"])
@@ -1375,7 +1376,7 @@ class TestCliSecretShapedInput(CliCase):
             with _clock_at(_moment(12, 0, 0)):
                 ack, _ = self.run_cli(["human-acknowledge", iid])
             with _clock_at(_moment(12, 1, 30)):
-                res, _ = self.run_cli(["human-resolve", iid, "--outcome", "FAIL"])
+                res, _ = self.run_cli(["human-resolve", iid, "--outcome", "NO_ACTION"])
         self.assertEqual((ack, res), (0, 0))
         self.assertEqual(self.stored(iid)["status"], "RESOLVED")
 

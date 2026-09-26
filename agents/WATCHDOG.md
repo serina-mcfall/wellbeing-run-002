@@ -1,2 +1,2 @@
 # Watchdog
-Minimal non-LLM process. Periodically check supervisor PID/heartbeat. If dead/stale, restart once and log. If restart fails, send Discord HUMAN_REQUIRED. Do nothing else.
+Minimal non-LLM process. Periodically check supervisor PID/heartbeat. If dead/stale, restart once and log. If restart fails, send Discord HUMAN_REQUIRED. Beyond liveness it performs only its governed reconciliation duties: the C-14.2/D2 state-invariant checks that detect, annunciate and freeze (never repair), and recording durable C-08b human-intervention obligations in those same established transaction paths. Its liveness/safety alerts are never suppressed by intervention bookkeeping failing. Nothing else.

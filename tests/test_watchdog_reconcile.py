@@ -19,7 +19,16 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from control import clock, ledger as ledger_mod, notify, reconcile, state, watchdog  # noqa: E402
+from control import (  # noqa: E402
+    clock,
+    intervention,
+    ledger as ledger_mod,
+    merge_invariant,
+    notify,
+    reconcile,
+    state,
+    watchdog,
+)
 
 TZ = "Pacific/Auckland"
 
@@ -315,12 +324,17 @@ class TestWatchdogAnnunciationAccounting(WatchdogMergeInvariantCase):
         self.run_watchdog()
         self.assertFalse(self.violations()[0]["human_intervention"])
 
-    def test_no_intervention_record_is_created(self):
-        """C-08b.2 production wiring is out of scope for C-14.2."""
+    def test_annunciation_now_creates_one_intervention_record(self):
+        """C-08b.2 flipped C-14.2's earlier boundary: annunciation feeds the
+        durable intervention lifecycle. The detailed evidence stays in the
+        STATE_INVARIANT_VIOLATION event; the intervention carries identity only."""
         self.local_merged_event()
         self.seed_pr_task()
         self.run_watchdog()
-        self.assertEqual(self.doc()["interventions"], {})
+        records = list(self.doc()["interventions"].values())
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["type"], "HUMAN_VERIFICATION")
+        self.assertEqual(records[0]["condition_code"], "merge_invariant_violation")
 
 
 class TestWatchdogWorkerReconcileUnaffected(WatchdogMergeInvariantCase):
@@ -376,3 +390,165 @@ class TestWatchdogUnobservableGithub(WatchdogMergeInvariantCase):
         meta = self.violations()[0]["metadata_redacted"]
         self.assertEqual(meta["verdict"], "UNPROVABLE")
         self.assertFalse(meta["ledger_readable"])
+
+
+# ====================================================================== C-08b.2
+# S11/S12: the merge-invariant annunciation and the worker-state freeze feed the
+# durable intervention lifecycle. All C-14.2/D2 semantics above must survive
+# unchanged; these classes pin only what integration added.
+
+
+class TestS11InterventionIntegration(WatchdogMergeInvariantCase):
+
+    def requested_events(self):
+        out = []
+        for line in Path(self.ledger.path).read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("event_type") == "HUMAN_INTERVENTION_REQUESTED":
+                out.append(event)
+        return out
+
+    def open_ids(self):
+        return [r["id"] for r in intervention.open_interventions(self.doc())]
+
+    def test_first_annunciation_creates_one_open_intervention(self):
+        self.local_merged_event()
+        self.seed_pr_task()
+        self.run_watchdog()
+        records = intervention.open_interventions(self.doc())
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+        self.assertEqual(rec["type"], "HUMAN_VERIFICATION")
+        self.assertEqual(rec["scope"], "task")
+        self.assertEqual(rec["task_id"], "TASK-001")
+        self.assertEqual(rec["condition_code"], "merge_invariant_violation")
+        self.assertEqual(rec["reason"],
+                         "Merge integrity requires human verification for "
+                         "TASK-001 PR #100")
+        requested = self.requested_events()
+        self.assertEqual(len(requested), 1)
+        self.assertEqual(requested[0]["metadata_redacted"]["intervention_id"],
+                         rec["id"])
+        # The single existing notification now carries the intervention identity.
+        self.assertEqual(self.notifier.send.call_count, 1)
+        self.assertIn(rec["id"], self.notifier.send.call_args.args[2])
+
+    def test_no_merge_vocabulary_enters_the_reason(self):
+        self.local_merged_event()
+        self.seed_pr_task()
+        self.run_watchdog()
+        rec = intervention.open_interventions(self.doc())[0]
+        for token in ("LOST_LOCAL_COMMIT", "DEBT_DIVERGENCE", "UNPROVABLE",
+                      "check_id"):
+            self.assertNotIn(token, rec["reason"])
+
+    def test_suppressed_fingerprint_creates_nothing_new(self):
+        self.local_merged_event()
+        self.seed_pr_task()
+        for _ in range(3):
+            self.run_watchdog()
+        self.assertEqual(len(self.open_ids()), 1)
+        self.assertEqual(len(self.requested_events()), 1)
+        self.assertEqual(self.notifier.send.call_count, 1)
+
+    def test_changed_evidence_reannunciates_but_reuses_the_open_intervention(self):
+        self.local_merged_event(debt_ids=("TASK-001-PR100-F1",), status="RECORDED")
+        self.seed_pr_task(task_state="COMPLETE", merged=True, debt={})
+        self.run_watchdog()
+        first = self.open_ids()
+        with self.store.transaction() as doc:          # evidence changes
+            doc["prs"]["100"]["merged"] = False
+            doc["tasks"]["TASK-001"]["state"] = "REVIEW"
+        self.run_watchdog()
+        self.assertEqual(len(self.violations()), 2)     # C-14.2 re-annunciation
+        self.assertEqual(self.open_ids(), first)        # same open intervention
+        self.assertEqual(len(self.requested_events()), 1)
+        self.assertEqual(self.notifier.send.call_count, 2)
+
+    def test_supervisor_and_watchdog_converge_on_one_intervention(self):
+        self.local_merged_event()
+        self.seed_pr_task()
+        self.run_watchdog()
+        # The same finding annunciated again via the Supervisor's own entry
+        # point, with fresh (changed) evidence so suppression does not hide it.
+        with self.store.transaction() as doc:
+            doc["prs"]["100"]["merged"] = True
+            task = doc["tasks"]["TASK-001"]
+            record = doc["prs"]["100"]
+            pr_view = {"number": 100, "state": "MERGED", "isDraft": False,
+                       "mergeCommit": {"oid": MERGED_SHA}}
+            github, state_view, ledger_view = merge_invariant.gather(
+                task_id="TASK-001", pr_number=100, doc=doc, task=task,
+                record=record, ledger=self.ledger, pr_view=pr_view,
+                now_iso=clock.iso(clock.now(TZ)))
+            verdict = merge_invariant.classify(
+                task_id="TASK-001", pr_number=100, github=github,
+                state_view=state_view, ledger_view=ledger_view)
+            if verdict is not None and verdict.dangerous:
+                merge_invariant.annunciate(
+                    doc=doc, task=task, record=record, verdict=verdict,
+                    github=github, state_view=state_view, ledger_view=ledger_view,
+                    ledger=self.ledger, notifier=self.notifier,
+                    detector="supervisor", tz=TZ)
+        self.assertEqual(len(self.open_ids()), 1)
+        self.assertEqual(len(self.requested_events()), 1)
+
+    def test_counter_behaviour_is_unchanged_by_integration(self):
+        self.local_merged_event()
+        self.seed_pr_task()
+        for _ in range(2):
+            self.run_watchdog()
+        self.assertEqual(self.doc()["counters"]["human_interventions"], 1)
+
+
+class TestS12InterventionIntegration(WatchdogReconcileCase):
+
+    def requested_events(self):
+        return [e for e in self._ledger_lines()
+                if e["event_type"] == "HUMAN_INTERVENTION_REQUESTED"]
+
+    def test_freeze_and_intervention_commit_together(self):
+        self._add_active_task_with_dead_pid()
+        self.run_reconcile(pid_alive=False)
+        doc = self.store.read()
+        self.assertEqual(doc["tasks"]["TASK-001"]["state"], "FROZEN")
+        records = intervention.open_interventions(doc)
+        self.assertEqual(len(records), 1)
+        rec = records[0]
+        self.assertEqual(rec["type"], "HUMAN_VERIFICATION")
+        self.assertEqual(rec["scope"], "task")
+        self.assertEqual(rec["task_id"], "TASK-001")
+        self.assertEqual(rec["condition_code"], "worker_state_invariant")
+        self.assertEqual(rec["reason"],
+                         "Worker state integrity requires human verification "
+                         "for TASK-001")
+        self.assertEqual(len(self.requested_events()), 1)
+
+    def test_reason_carries_no_check_id(self):
+        self._add_active_task_with_dead_pid()
+        self.run_reconcile(pid_alive=False)
+        rec = intervention.open_interventions(self.store.read())[0]
+        self.assertNotIn("PID", rec["reason"])
+        self.assertNotIn("HEARTBEAT", rec["reason"])
+
+    def test_single_critical_notification_carries_intervention_identity(self):
+        self._add_active_task_with_dead_pid()
+        self.run_reconcile(pid_alive=False)
+        self.assertEqual(self.notifier.send.call_count, 1)
+        call = self.notifier.send.call_args
+        self.assertEqual(call.args[0], notify.CRITICAL)
+        rec = intervention.open_interventions(self.store.read())[0]
+        self.assertIn(rec["id"], call.args[2])
+
+    def test_a_frozen_task_is_not_re_frozen_or_re_requested(self):
+        self._add_active_task_with_dead_pid()
+        self.run_reconcile(pid_alive=False)
+        self.run_reconcile(pid_alive=False)
+        doc = self.store.read()
+        self.assertEqual(len(doc["interventions"]), 1)
+        self.assertEqual(len(self.requested_events()), 1)

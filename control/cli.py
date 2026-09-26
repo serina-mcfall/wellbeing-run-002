@@ -9,7 +9,8 @@
   ctl freeze      force the T+24 freeze path
   ctl human-list        C-08b.1: list human interventions
   ctl human-acknowledge C-08b.1: acknowledge a human intervention
-  ctl human-resolve     C-08b.1: resolve an acknowledged human intervention
+  ctl human-resolve     C-08b.2: record a human's resolution and execute its
+                        governed condition-specific effect where one exists
 """
 
 from __future__ import annotations
@@ -420,17 +421,157 @@ def cmd_human_acknowledge(args) -> int:
     return 0
 
 
+# ------------------------------------------------------- C-08b.2 resolution
+#
+# The governed (condition_code, outcome) pairs. Fail-closed: a condition code
+# this table does not know permits NO_ACTION only, so an effectful outcome can
+# never resolve as a silent no-op. FREEZE appears nowhere - the freeze
+# side-effect bundle stays with `ctl freeze`, never inside a resolve
+# transaction. RESUME appears nowhere before C-14.3.
+
+CONDITION_OUTCOMES: dict[str, frozenset[str]] = {
+    "repair_cycle_limit": frozenset({"RETRY", "FAIL", "NO_ACTION"}),
+    "dispatch_failure_limit": frozenset({"RETRY", "FAIL", "NO_ACTION"}),
+    "builder_attempts_exhausted": frozenset({"RETRY", "NO_ACTION"}),
+    "fixer_failed": frozenset({"RETRY", "FAIL", "NO_ACTION"}),
+    "review_unusable": frozenset({"RETRY", "FAIL", "NO_ACTION"}),
+    "p0_finding": frozenset({"RETRY", "FAIL", "NO_ACTION"}),
+    "red_guardrail": frozenset({"CLEAR_GUARDRAIL", "NO_ACTION"}),
+    "budget_hard_stop": frozenset({"NO_ACTION"}),
+    "supervisor_crash_loop": frozenset({"NO_ACTION"}),
+    "supervisor_restart_failed": frozenset({"NO_ACTION"}),
+    "merge_invariant_violation": frozenset({"FAIL", "NO_ACTION"}),
+    "worker_state_invariant": frozenset({"FAIL", "NO_ACTION"}),
+}
+
+UNKNOWN_CONDITION_OUTCOMES = frozenset({"NO_ACTION"})
+
+
+class ResolutionRefused(Exception):
+    """Raised inside the resolve transaction to refuse a resolution whole.
+
+    Raising - rather than returning - is what aborts Store.transaction's
+    write, so a refusal can never persist a half-applied resolution: the
+    lifecycle mutation and any state effect roll back together.
+    """
+
+
+def _pr_record(doc: dict, task: dict, task_id: str) -> dict:
+    pr = task.get("pr")
+    record = (doc.get("prs") or {}).get(str(pr)) if pr is not None else None
+    if record is None:
+        raise ResolutionRefused(f"{task_id} has no pull request record to act on")
+    return record
+
+
+def _fail_task(doc: dict, cfg, task: dict, record: dict) -> None:
+    """The one human FAIL executor. FROZEN exits through the documented
+    FROZEN -> HUMAN_REQUIRED -> FAILED path; delivered work is never falsified;
+    a lock the task owns is released so the FAIL cannot strand it.
+
+    An executed lock release is recorded as the finite identifier
+    MIGRATION_LOCK_RELEASED in the intervention record's executed_effects,
+    inside this same transaction. That intervention-owned evidence - not the
+    lock's mutable last_release_reason, which any later legitimate lock
+    activity overwrites - is what the ledger-repair path derives a missed
+    MIGRATION_LOCK_RELEASED append from (see cmd_human_resolve)."""
+    task_id = task["id"]
+    current = task["state"]
+    if current in ("MERGED", "COMPLETE"):
+        raise ResolutionRefused(
+            f"{task_id} is {current}; marking delivered work FAILED would "
+            f"falsify history")
+    if current == "FAILED":
+        raise ResolutionRefused(f"{task_id} is already FAILED")
+    reason = f"human FAIL resolution of {record['id']}"
+    if current == "FROZEN":
+        state_mod.transition(doc, task_id, "HUMAN_REQUIRED", reason, cfg.timezone)
+    state_mod.transition(doc, task_id, "FAILED", reason, cfg.timezone)
+    if migration_lock.owner(doc) == task_id:
+        migration_lock.release(doc, task_id, reason)
+        record.setdefault("executed_effects", []).append("MIGRATION_LOCK_RELEASED")
+
+
+def _apply_resolution_effects(doc: dict, cfg, record: dict,
+                              outcome: str) -> None:
+    """Execute the governed effect for an already-validated pair. Explicit
+    branches, deliberately - C-08b.2 is intervention integration, not a
+    resolution framework. Raises ResolutionRefused when the current task state
+    cannot legally honour the outcome, aborting the whole transaction."""
+    if outcome == "NO_ACTION":
+        # For worker_state_invariant this is the governed meaning: the human
+        # deliberately leaves the task FROZEN for the remainder of this run.
+        return
+    if outcome == "CLEAR_GUARDRAIL":  # governed only for red_guardrail
+        doc["red_guardrail"] = None
+        return
+    condition = record["condition_code"]
+    task_id = record["task_id"]
+    iid = record["id"]
+    task = (doc.get("tasks") or {}).get(task_id)
+    if task is None:
+        raise ResolutionRefused(f"task {task_id!r} not found in state")
+    try:
+        if outcome == "FAIL":
+            _fail_task(doc, cfg, task, record)
+            return
+        # outcome == "RETRY"
+        if condition == "repair_cycle_limit":
+            # Exactly one additional repair attempt: the dispatch guard is
+            # `>= max_repair_cycles` and each dispatch increments by one, so
+            # max - 1 buys one dispatch. Zero would buy a full new allowance,
+            # which no governance supports. dispatch_failures stays untouched.
+            state_mod.transition(doc, task_id, "FIX_REQUIRED",
+                                 f"human RETRY of {iid}: one additional "
+                                 f"repair attempt", cfg.timezone)
+            _pr_record(doc, task, task_id)["repair_cycles"] = \
+                cfg.max_repair_cycles - 1
+        elif condition == "dispatch_failure_limit":
+            state_mod.transition(doc, task_id, "PR_OPEN",
+                                 f"human RETRY of {iid}: apparatus repaired",
+                                 cfg.timezone)
+            _pr_record(doc, task, task_id)["dispatch_failures"] = 0
+        elif condition == "builder_attempts_exhausted":
+            # The documented exception-state exit: FAILED -> HUMAN_REQUIRED
+            # -> READY. `attempts` stays at the limit, so one more builder
+            # failure re-escalates rather than looping.
+            reason = f"human RETRY of {iid}: one additional build attempt"
+            state_mod.transition(doc, task_id, "HUMAN_REQUIRED", reason,
+                                 cfg.timezone)
+            state_mod.transition(doc, task_id, "READY", reason, cfg.timezone)
+        elif condition == "fixer_failed":
+            state_mod.transition(doc, task_id, "FIX_REQUIRED",
+                                 f"human RETRY of {iid}: redispatch the fixer",
+                                 cfg.timezone)
+        elif condition in ("review_unusable", "p0_finding"):
+            # Only the stale verdict is cleared - enough for routing to
+            # dispatch a genuinely fresh review; counters stay untouched.
+            state_mod.transition(doc, task_id, "PR_OPEN",
+                                 f"human RETRY of {iid}: fresh review",
+                                 cfg.timezone)
+            pr = _pr_record(doc, task, task_id)
+            pr["review_verdict"] = None
+            pr["approval_current"] = False
+        else:
+            raise ResolutionRefused(
+                f"no RETRY effect is defined for condition {condition}")
+    except state_mod.TransitionError as exc:
+        raise ResolutionRefused(str(exc)) from exc
+
+
 def cmd_human_resolve(args) -> int:
-    """C-08b.1: record a human's resolution of an acknowledged intervention.
+    """Record a human's resolution and execute its governed effect (C-08b.2).
 
     A RESOLVED intervention is not an error here, but it is only ever a
     ledger-repair retry: every supplied field must match what is already stored,
-    and the record is never touched again. That is what makes rerunning the exact
-    same command safe after a ledger failure, while a command differing in any
-    way is refused rather than quietly reinterpreted.
+    the record is never touched again, and no state effect is ever re-executed.
+    That is what makes rerunning the exact same command safe after a ledger
+    failure, while a command differing in any way is refused rather than
+    quietly reinterpreted.
 
-    This records the decision. Executing it - clearing the guardrail, retrying
-    the task, freezing the run - is C-08b.2's job, not this command's.
+    The (condition_code, outcome) pair is validated against CONDITION_OUTCOMES
+    before the lifecycle mutation, and every refusal - including an effect the
+    current task state cannot legally honour - aborts the transaction whole.
     """
     cfg = config.load()
     # Before the transaction, for the same reason as cmd_human_acknowledge: a
@@ -452,6 +593,14 @@ def cmd_human_resolve(args) -> int:
 
     store = state_mod.Store(tz=cfg.timezone)
 
+    try:
+        return _resolve_in_transaction(args, cfg, store)
+    except ResolutionRefused as refusal:
+        print(f"refusing to resolve {args.intervention_id}: {refusal}")
+        return 1
+
+
+def _resolve_in_transaction(args, cfg, store) -> int:
     with store.transaction() as doc:
         record = doc.get("interventions", {}).get(args.intervention_id)
         if record is None:
@@ -464,13 +613,23 @@ def cmd_human_resolve(args) -> int:
                   f"acknowledged before it can be resolved")
             return 1
         elif status == "ACKNOWLEDGED":
+            allowed = CONDITION_OUTCOMES.get(record["condition_code"],
+                                             UNKNOWN_CONDITION_OUTCOMES)
+            if args.outcome not in allowed:
+                raise ResolutionRefused(
+                    f"outcome {args.outcome} is not governed for condition "
+                    f"{record['condition_code']}; allowed: "
+                    f"{', '.join(sorted(allowed))}")
             actor = args.by or getpass.getuser()
             try:
                 intervention.resolve(doc, args.intervention_id, outcome=args.outcome,
                                      by=actor, tz=cfg.timezone, note=args.note)
             except intervention.InterventionError as exc:
-                print(f"refusing to resolve {args.intervention_id}: {exc}")
-                return 1
+                raise ResolutionRefused(str(exc)) from exc
+            # Effects run after the lifecycle mutation on purpose: both live in
+            # this one transaction, and any ResolutionRefused from here rolls
+            # the resolution back with the effect - never one without the other.
+            _apply_resolution_effects(doc, cfg, record, args.outcome)
         elif status == "RESOLVED":
             if args.outcome != record["resolution"]:
                 print(f"refusing to resolve {args.intervention_id}: already RESOLVED "
@@ -492,6 +651,31 @@ def cmd_human_resolve(args) -> int:
         committed = dict(record)
 
     ledger = ledger_mod.Ledger(tz=cfg.timezone, experiment_id=cfg.experiment_id)
+
+    # An executed lock release is recorded in the intervention's own
+    # executed_effects, committed atomically with the resolution - so it
+    # survives any later, unrelated migration-lock activity. Deriving the
+    # append from it here - on the fresh path AND the ledger-repair retry -
+    # means a failed MIGRATION_LOCK_RELEASED append is restored by rerunning
+    # the identical command, without re-executing any state effect and without
+    # duplicating the event when it already landed. Records predating the
+    # field (or without an executed effect) simply derive nothing.
+    if ("MIGRATION_LOCK_RELEASED" in (committed.get("executed_effects") or [])
+            and not _ledger_has_event(ledger, "MIGRATION_LOCK_RELEASED",
+                                      committed["id"])):
+        try:
+            ledger.append(
+                "MIGRATION_LOCK_RELEASED", task_id=committed["task_id"],
+                outcome="FREE", activity_class="ORCHESTRATION",
+                metadata_redacted={"intervention_id": committed["id"],
+                                   "released_by": "human_fail_resolution"})
+        except OSError as exc:
+            print(f"STATE COMMITTED BUT LEDGER EVIDENCE FAILED for "
+                  f"{committed['id']}: {exc}\n"
+                  f"The resolution is durable in state; ledger evidence is "
+                  f"missing. Rerun this same resolution command to append it.")
+            return 1
+
     if _ledger_has_event(ledger, "HUMAN_INTERVENTION_RESOLVED", committed["id"]):
         print(f"{committed['id']} already resolved as {committed['resolution']} at "
               f"{committed['resolved_at']} (ledger evidence already present)")
@@ -577,7 +761,8 @@ def main(argv: list[str] | None = None) -> int:
     p_hack.set_defaults(func=cmd_human_acknowledge)
 
     p_hres = sub.add_parser("human-resolve",
-                            help="C-08b.1: resolve an acknowledged human intervention")
+                            help="C-08b.2: record a human's resolution and execute "
+                                 "its governed effect where one exists")
     p_hres.add_argument("intervention_id")
     p_hres.add_argument("--outcome", required=True,
                         choices=sorted(intervention.RESOLUTION_OUTCOMES))

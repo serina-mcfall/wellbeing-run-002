@@ -21,6 +21,7 @@ from . import (
     debt,
     evidence,
     gh,
+    intervention,
     jev,
     ledger as ledger_mod,
     merge_invariant,
@@ -147,6 +148,41 @@ class Supervisor:
         payload["at"] = clock.iso(self.now())
         self._write_heartbeat(payload)
 
+    def request_intervention(self, doc: dict, *, type_: str, condition_code: str,
+                             reason: str, title: str, body: str,
+                             task_id: str | None = None, pr_id: int | None = None,
+                             notify_when_new: bool = True) -> dict:
+        """C-08b.2: the one escalation sequence every S1-S8 site repeats.
+
+        Durable record first, ledger evidence second, notification last. A
+        deduplicated recurrence returns the already-open record and appends
+        no second REQUESTED event and no second notification. `reason` must be
+        structurally generated (fixed template + canonical/bounded values);
+        free text - stderr, provider output, reviewer prose - stays in the
+        notification body only, never in the durable reason.
+        """
+        record, is_new = intervention.request(
+            doc, type_=type_, scope="task" if task_id else "systemic",
+            task_id=task_id, reason=reason, condition_code=condition_code,
+            tz=self.tz)
+        if is_new:
+            self.log("HUMAN_INTERVENTION_REQUESTED", task_id=task_id, pr_id=pr_id,
+                     outcome="REQUESTED", activity_class="ESCALATION",
+                     human_intervention=True,
+                     metadata_redacted={
+                         "intervention_id": record["id"],
+                         "intervention_type": record["type"],
+                         "scope": record["scope"],
+                         "condition_code": condition_code,
+                         "requested_at": record["requested_at"],
+                         "reason": record["reason"],
+                         "reason_withheld": record["reason_withheld"],
+                     })
+            if notify_when_new:
+                self.notify_out(doc, notify.HUMAN_REQUIRED, title,
+                                body + intervention.notification_suffix(record))
+        return record
+
     # --------------------------------------------------------------- guardrails
 
     def red_guardrail_active(self, doc: dict) -> bool:
@@ -158,7 +194,19 @@ class Supervisor:
         doc["counters"]["guardrail_activations"] += 1
         self.log("GUARDRAIL_RED", guardrail=guardrail, outcome="BLOCKED",
                  activity_class="ESCALATION", metadata_redacted={"detail": detail})
-        self.notify_out(doc, notify.HUMAN_REQUIRED, f"RED guardrail: {guardrail}", detail)
+        # S7: record the governance obligation durably, but never let dedup
+        # rate-limit a RED alert - a second guardrail raised while the first
+        # intervention is still open must still be announced. The durable
+        # reason is constant: `guardrail` is caller-supplied and unvalidated
+        # at this boundary, so it stays in the GUARDRAIL_RED evidence and the
+        # notification, never in the persisted reason.
+        record = self.request_intervention(
+            doc, type_="HUMAN_GOVERNANCE_DECISION", condition_code="red_guardrail",
+            reason="Experiment-wide RED guardrail requires a human governance "
+                   "decision",
+            title=f"RED guardrail: {guardrail}", body=detail, notify_when_new=False)
+        self.notify_out(doc, notify.HUMAN_REQUIRED, f"RED guardrail: {guardrail}",
+                        detail + intervention.notification_suffix(record))
 
     # ------------------------------------------------------------- dispatching
 
@@ -332,9 +380,15 @@ class Supervisor:
         if record["repair_cycles"] >= self.cfg.max_repair_cycles:
             self.transition(doc, task["id"], "HUMAN_REQUIRED",
                             "repair cycle limit reached")
-            self.notify_out(doc, notify.HUMAN_REQUIRED,
-                            f"{task['id']} PR #{pr_number}: repair limit reached",
-                            f"{record['repair_cycles']} repair cycles without a pass.")
+            self.request_intervention(
+                doc, type_="HUMAN_PRODUCT_DECISION",
+                condition_code="repair_cycle_limit",
+                task_id=task["id"], pr_id=pr_number,
+                reason=f"Repair cycle limit reached for {task['id']} "
+                       f"PR #{pr_number} after {record['repair_cycles']} "
+                       f"repair cycles",
+                title=f"{task['id']} PR #{pr_number}: repair limit reached",
+                body=f"{record['repair_cycles']} repair cycles without a pass.")
             return
 
         worker = f"{task['id'].lower()}-fixer-{record['repair_cycles'] + 1}"
@@ -400,11 +454,17 @@ class Supervisor:
         if failures >= self.cfg.max_repair_cycles:
             self.transition(doc, task["id"], "HUMAN_REQUIRED",
                             f"{role} dispatch failed {failures} times")
-            self.notify_out(
-                doc, notify.HUMAN_REQUIRED,
-                f"{task['id']} PR #{pr_number}: {role} dispatch keeps failing",
-                f"{failures} consecutive dispatch failures. Last reason: {reason}",
-            )
+            # The free-text failure reason stays in the notification body; the
+            # durable intervention reason is structural only.
+            self.request_intervention(
+                doc, type_="HUMAN_APPARATUS_AUTHORISATION",
+                condition_code="dispatch_failure_limit",
+                task_id=task["id"], pr_id=pr_number,
+                reason=f"{role} dispatch failed {failures} times for "
+                       f"{task['id']} PR #{pr_number}",
+                title=f"{task['id']} PR #{pr_number}: {role} dispatch keeps failing",
+                body=f"{failures} consecutive dispatch failures. "
+                     f"Last reason: {reason}")
 
     # ------------------------------------------------------------- transitions
 
@@ -504,10 +564,17 @@ class Supervisor:
                                              "Builder hit a provider limit."):
                 return
             if task["attempts"] >= self.cfg.max_repair_cycles:
+                # S3: the task stays FAILED - the intervention records the
+                # human obligation without rewriting the escalation state.
                 self.transition(doc, task["id"], "FAILED", "builder attempts exhausted")
-                self.notify_out(doc, notify.HUMAN_REQUIRED,
-                                f"{task['id']} failed after {task['attempts']} attempts",
-                                "Evidence-based recovery attempts are exhausted.")
+                self.request_intervention(
+                    doc, type_="HUMAN_PRODUCT_DECISION",
+                    condition_code="builder_attempts_exhausted",
+                    task_id=task["id"],
+                    reason=f"Builder attempts exhausted for {task['id']} "
+                           f"after {task['attempts']} attempts",
+                    title=f"{task['id']} failed after {task['attempts']} attempts",
+                    body="Evidence-based recovery attempts are exhausted.")
             else:
                 self.transition(doc, task["id"], "READY", "builder failed; will retry")
             return
@@ -532,9 +599,12 @@ class Supervisor:
                                              task, "Fixer hit a provider limit."):
                 return
             self.transition(doc, task["id"], "HUMAN_REQUIRED", "fixer failed")
-            self.notify_out(doc, notify.HUMAN_REQUIRED,
-                            f"{task['id']} PR #{pr_number}: fixer failed",
-                            "The fixer could not complete the listed findings.")
+            self.request_intervention(
+                doc, type_="HUMAN_PRODUCT_DECISION", condition_code="fixer_failed",
+                task_id=task["id"], pr_id=pr_number,
+                reason=f"Fixer failed for {task['id']} PR #{pr_number}",
+                title=f"{task['id']} PR #{pr_number}: fixer failed",
+                body="The fixer could not complete the listed findings.")
             return
         record = doc["prs"][str(pr_number)]
         record["approval_current"] = False
@@ -597,9 +667,15 @@ class Supervisor:
             if record["review_cycles"] >= self.cfg.max_repair_cycles:
                 self.transition(doc, task["id"], "HUMAN_REQUIRED",
                                 "reviewer output unusable")
-                self.notify_out(doc, notify.HUMAN_REQUIRED,
-                                f"{task['id']} PR #{pr_number}: review unusable",
-                                reason or "The reviewer did not return a valid verdict.")
+                # The parse-failure text stays in the notification body only.
+                self.request_intervention(
+                    doc, type_="HUMAN_APPARATUS_AUTHORISATION",
+                    condition_code="review_unusable",
+                    task_id=task["id"], pr_id=pr_number,
+                    reason=f"Review unusable for {task['id']} PR #{pr_number} "
+                           f"after {record['review_cycles']} review cycles",
+                    title=f"{task['id']} PR #{pr_number}: review unusable",
+                    body=reason or "The reviewer did not return a valid verdict.")
             else:
                 self.transition(doc, task["id"], "PR_OPEN", "review unusable; re-review")
             return
@@ -608,9 +684,14 @@ class Supervisor:
             record["review_verdict"] = routing.REVIEW_FAIL
             record["approval_current"] = False
             self.transition(doc, task["id"], "HUMAN_REQUIRED", "P0 finding")
-            self.notify_out(doc, notify.HUMAN_REQUIRED,
-                            f"{task['id']} PR #{pr_number}: P0 finding",
-                            "; ".join(f.get("summary", "")[:120] for f in review.critical))
+            # Reviewer prose (finding summaries) stays in the notification body.
+            self.request_intervention(
+                doc, type_="HUMAN_PRODUCT_DECISION", condition_code="p0_finding",
+                task_id=task["id"], pr_id=pr_number,
+                reason=f"P0 finding requires a human product decision for "
+                       f"{task['id']} PR #{pr_number}",
+                title=f"{task['id']} PR #{pr_number}: P0 finding",
+                body="; ".join(f.get("summary", "")[:120] for f in review.critical))
             return
 
         if review.verdict == routing.REVIEW_FAIL or review.blocking:
@@ -1110,16 +1191,27 @@ class Supervisor:
         summary = budget.summary(doc)
         self.log("BUDGET_THRESHOLD", outcome=name, activity_class="ORCHESTRATION",
                  metadata_redacted=summary)
-        severity = notify.HUMAN_REQUIRED if name == "HARD_STOP" else notify.ATTENTION
+        title = f"Budget threshold {name} ({summary['percent']}%)"
+        spend = (f"Metered OpenRouter spend ${summary['spent_usd']:.4f} of "
+                 f"${summary['total_usd']:.2f}. ")
+        if name == "HARD_STOP":
+            # S8: budget stays fail-closed. The intervention records the
+            # governance obligation; NO_ACTION is its only governed resolution
+            # and nothing here (or in human-resolve) clears budget.hard_stop.
+            self.request_intervention(
+                doc, type_="HUMAN_GOVERNANCE_DECISION",
+                condition_code="budget_hard_stop",
+                reason="Metered budget hard stop reached; further paid model "
+                       "calls require a human governance decision",
+                title=title,
+                body=spend + "Further paid model calls need explicit human "
+                             "approval; Jev falls back to deterministic "
+                             "behaviour and the experiment continues.")
+            return
         self.notify_out(
-            doc, severity, f"Budget threshold {name} ({summary['percent']}%)",
-            f"Metered OpenRouter spend ${summary['spent_usd']:.4f} of "
-            f"${summary['total_usd']:.2f}. "
-            + ("Further paid model calls need explicit human approval; Jev falls back to "
-               "deterministic behaviour and the experiment continues."
-               if name == "HARD_STOP" else
-               "Escalation policy tightened; the experiment continues."),
-            no_human_action_needed=name != "HARD_STOP",
+            doc, notify.ATTENTION, title,
+            spend + "Escalation policy tightened; the experiment continues.",
+            no_human_action_needed=True,
         )
 
     # --------------------------------------------------------------- observer

@@ -18,8 +18,8 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import clock, config, gh, ledger as ledger_mod, merge_invariant, notify
-from . import proc, reconcile
+from . import clock, config, gh, intervention, ledger as ledger_mod, merge_invariant
+from . import notify, proc, reconcile
 from . import state as state_mod
 
 CHECK_SECONDS = 30
@@ -93,6 +93,92 @@ def busy_with(tz: str) -> str | None:
     except ValueError:
         return None
     return None
+
+
+def _record_systemic_intervention(cfg, ledger, *, condition_code: str,
+                                  reason: str, store=None) -> tuple[dict | None, str]:
+    """C-08b.2 (S9/S10): best-effort durable obligation for a Watchdog
+    escalation. Returns (record, bookkeeping_code) where the code is one of
+    the finite values OK / STATE_ABSENT / STATE_WRITE_FAILED /
+    REQUESTED_EVENT_FAILED - never exception text. Every failure mode is
+    swallowed into that code, which the caller folds into the EXISTING
+    Watchdog failure event, so intervention bookkeeping can never suppress
+    the crash-loop/restart-failure alert."""
+    store = store or state_mod.Store(tz=cfg.timezone)
+    if not store.exists():
+        return None, "STATE_ABSENT"
+    try:
+        with store.transaction() as doc:
+            record, is_new = intervention.request(
+                doc, type_="HUMAN_APPARATUS_AUTHORISATION", scope="systemic",
+                task_id=None, reason=reason, condition_code=condition_code,
+                tz=cfg.timezone)
+            committed = dict(record)
+    except Exception:  # noqa: BLE001 - finite code instead, never the string
+        return None, "STATE_WRITE_FAILED"
+    if is_new:
+        try:
+            ledger.append(
+                "HUMAN_INTERVENTION_REQUESTED", outcome="REQUESTED",
+                activity_class="ESCALATION", human_intervention=True,
+                metadata_redacted={
+                    "intervention_id": committed["id"],
+                    "intervention_type": committed["type"],
+                    "scope": committed["scope"],
+                    "condition_code": committed["condition_code"],
+                    "requested_at": committed["requested_at"],
+                    "reason": committed["reason"],
+                    "reason_withheld": committed["reason_withheld"],
+                })
+        except Exception:  # noqa: BLE001 - the record is durable; only the
+            return committed, "REQUESTED_EVENT_FAILED"  # event evidence lags
+    return committed, "OK"
+
+
+def _suffix(record: dict | None) -> str:
+    return intervention.notification_suffix(record) if record else ""
+
+
+def escalate_crash_loop(cfg, ledger, notifier, restart_count: int,
+                        *, store=None) -> None:
+    """S9. Ordering is deliberate: durable intervention first (best effort),
+    the existing failure event second - now carrying the finite bookkeeping
+    outcome - the existing HUMAN_REQUIRED alert last and unconditionally:
+    dedup never rate-limits this safety alert."""
+    record, bookkeeping = _record_systemic_intervention(
+        cfg, ledger, store=store, condition_code="supervisor_crash_loop",
+        reason=f"Supervisor crash loop: {restart_count} restarts within "
+               f"{CRASH_LOOP_WINDOW_SECONDS} seconds requires human "
+               f"apparatus authorisation")
+    ledger.append("SUPERVISOR_CRASH_LOOP", outcome="HUMAN_REQUIRED",
+                  human_intervention=True, activity_class="ESCALATION",
+                  metadata_redacted={"restarts": restart_count,
+                                     "window_seconds": CRASH_LOOP_WINDOW_SECONDS,
+                                     "intervention_id": record["id"] if record else None,
+                                     "intervention_bookkeeping": bookkeeping})
+    notifier.send(notify.HUMAN_REQUIRED, "Supervisor is crash-looping",
+                  f"{restart_count} restarts within "
+                  f"{CRASH_LOOP_WINDOW_SECONDS // 60} minutes. The watchdog has "
+                  "stopped restarting it and needs a human." + _suffix(record))
+
+
+def escalate_restart_failed(cfg, ledger, notifier, incumbent: int | None,
+                            *, store=None) -> None:
+    """S10. Same guarded ordering as escalate_crash_loop."""
+    record, bookkeeping = _record_systemic_intervention(
+        cfg, ledger, store=store, condition_code="supervisor_restart_failed",
+        reason="Supervisor restart failed and no healthy supervisor is "
+               "present; human apparatus authorisation required")
+    ledger.append("SUPERVISOR_RESTART_FAILED", outcome="HUMAN_REQUIRED",
+                  human_intervention=True, activity_class="ESCALATION",
+                  metadata_redacted={"incumbent_pid": incumbent,
+                                     "incumbent_alive": alive(incumbent),
+                                     "intervention_id": record["id"] if record else None,
+                                     "intervention_bookkeeping": bookkeeping})
+    notifier.send(notify.HUMAN_REQUIRED, "Supervisor restart failed",
+                  "The watchdog could not bring the supervisor back and no "
+                  "healthy supervisor is present. The control plane is down "
+                  "and needs a human." + _suffix(record))
 
 
 def start_supervisor() -> int | None:
@@ -193,6 +279,16 @@ def reconcile_worker_state(cfg, ledger, notifier, *, store=None) -> None:
                 except state_mod.TransitionError:
                     continue
                 already_handled.add(finding.task_id)
+                # C-08b.2 (S12): the freeze and its human-verification
+                # obligation commit in this same state transaction. The reason
+                # is identity-only; check_id/worker/evidence stay in the
+                # STATE_INVARIANT_VIOLATION event.
+                int_record, int_is_new = intervention.request(
+                    doc, type_="HUMAN_VERIFICATION", scope="task",
+                    task_id=finding.task_id,
+                    reason=f"Worker state integrity requires human "
+                           f"verification for {finding.task_id}",
+                    condition_code="worker_state_invariant", tz=cfg.timezone)
                 ledger.append(
                     "STATE_INVARIANT_VIOLATION", task_id=finding.task_id,
                     state_before=state_before, state_after="FROZEN",
@@ -200,9 +296,24 @@ def reconcile_worker_state(cfg, ledger, notifier, *, store=None) -> None:
                     metadata_redacted={"check_id": finding.check_id, "worker": finding.worker,
                                        "evidence": finding.evidence},
                 )
+                if int_is_new:
+                    ledger.append(
+                        "HUMAN_INTERVENTION_REQUESTED", task_id=finding.task_id,
+                        outcome="REQUESTED", activity_class="ESCALATION",
+                        human_intervention=True,
+                        metadata_redacted={
+                            "intervention_id": int_record["id"],
+                            "intervention_type": int_record["type"],
+                            "scope": int_record["scope"],
+                            "condition_code": int_record["condition_code"],
+                            "requested_at": int_record["requested_at"],
+                            "reason": int_record["reason"],
+                            "reason_withheld": int_record["reason_withheld"],
+                        })
                 notifier.send(
                     notify.CRITICAL, f"{finding.task_id} frozen: state invariant violation",
-                    f"{finding.check_id}: {finding.evidence}",
+                    f"{finding.check_id}: {finding.evidence}"
+                    + intervention.notification_suffix(int_record),
                 )
     except Exception as exc:  # noqa: BLE001 - a bug here must not take down the watchdog's
         # primary supervisor-liveness duty; it must also never fail silently.
@@ -232,14 +343,7 @@ def main() -> int:
             now = time.monotonic()
             restarts = [t for t in restarts if now - t < CRASH_LOOP_WINDOW_SECONDS]
             if len(restarts) >= CRASH_LOOP_LIMIT:
-                ledger.append("SUPERVISOR_CRASH_LOOP", outcome="HUMAN_REQUIRED",
-                              human_intervention=True, activity_class="ESCALATION",
-                              metadata_redacted={"restarts": len(restarts),
-                                                 "window_seconds": CRASH_LOOP_WINDOW_SECONDS})
-                notifier.send(notify.HUMAN_REQUIRED, "Supervisor is crash-looping",
-                              f"{len(restarts)} restarts within "
-                              f"{CRASH_LOOP_WINDOW_SECONDS // 60} minutes. The watchdog has "
-                              "stopped restarting it and needs a human.")
+                escalate_crash_loop(cfg, ledger, notifier, len(restarts))
                 return 1
             restarts.append(now)
 
@@ -276,14 +380,7 @@ def main() -> int:
                                                          "watchdog protection continues"})
                 continue
 
-            ledger.append("SUPERVISOR_RESTART_FAILED", outcome="HUMAN_REQUIRED",
-                          human_intervention=True, activity_class="ESCALATION",
-                          metadata_redacted={"incumbent_pid": incumbent,
-                                             "incumbent_alive": alive(incumbent)})
-            notifier.send(notify.HUMAN_REQUIRED, "Supervisor restart failed",
-                          "The watchdog could not bring the supervisor back and no "
-                          "healthy supervisor is present. The control plane is down "
-                          "and needs a human.")
+            escalate_restart_failed(cfg, ledger, notifier, incumbent)
             return 1
 
         time.sleep(CHECK_SECONDS)

@@ -40,7 +40,7 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 
-from . import clock
+from . import clock, intervention
 from . import state as state_mod
 
 # ------------------------------------------------------------------ verdicts
@@ -424,11 +424,40 @@ def annunciate(*, doc, task, record, verdict, github, state_view, ledger_view,
         except state_mod.TransitionError:
             froze = False
 
+    # C-08b.2 (S11): the durable human-verification obligation, shared by both
+    # detectors through this one entry point. The reason is identity-only -
+    # verdict names, check IDs and evidence stay in the STATE_INVARIANT_VIOLATION
+    # event below. A re-annunciation on materially changed evidence reuses the
+    # still-open intervention: no second REQUESTED event, and the identity rides
+    # on the existing single notification rather than adding another.
+    int_record, int_is_new = intervention.request(
+        doc, type_="HUMAN_VERIFICATION", scope="task", task_id=verdict.task_id,
+        reason=f"Merge integrity requires human verification for "
+               f"{verdict.task_id} PR #{verdict.pr_number}",
+        condition_code="merge_invariant_violation", tz=tz)
+    if int_is_new:
+        ledger.append(
+            "HUMAN_INTERVENTION_REQUESTED",
+            task_id=verdict.task_id, pr_id=verdict.pr_number,
+            outcome="REQUESTED", activity_class="ESCALATION",
+            human_intervention=True,
+            metadata_redacted={
+                "intervention_id": int_record["id"],
+                "intervention_type": int_record["type"],
+                "scope": int_record["scope"],
+                "condition_code": int_record["condition_code"],
+                "requested_at": int_record["requested_at"],
+                "reason": int_record["reason"],
+                "reason_withheld": int_record["reason_withheld"],
+                "detector": detector,
+            })
+
     delivered, status_code = notification_status(notifier.send(
         "HUMAN_REQUIRED",
         f"{verdict.task_id} PR #{verdict.pr_number}: merge invariant violated",
         f"{verdict.verdict}. {verdict.summary}. Detected by the {detector}. "
-        "No automatic repair has been attempted.",
+        "No automatic repair has been attempted."
+        + intervention.notification_suffix(int_record),
     ))
 
     if record is not None:
