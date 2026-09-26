@@ -1369,7 +1369,11 @@ class TestCliSecretShapedInput(CliCase):
     def test_omitted_note_and_by_are_never_checked(self):
         iid = self.seed(status="OPEN")
         with mock.patch.object(cli.getpass, "getuser", return_value="serina"):
-            ack, _ = self.run_cli(["human-acknowledge", iid])
+            # Both lifecycle stamps must be frozen, not just the resolve: an
+            # acknowledgement taken from the wall clock drifts past the fixed
+            # resolve instant and makes the human duration negative.
+            with _clock_at(_moment(12, 0, 0)):
+                ack, _ = self.run_cli(["human-acknowledge", iid])
             with _clock_at(_moment(12, 1, 30)):
                 res, _ = self.run_cli(["human-resolve", iid, "--outcome", "FAIL"])
         self.assertEqual((ack, res), (0, 0))
