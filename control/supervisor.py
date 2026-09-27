@@ -279,10 +279,19 @@ class Supervisor:
                                              "worktree path not resolvable")
             return
 
+        port, port_why = workers.allocate_port(doc)
+        if port is None:
+            self.log("PORT_ALLOCATION_FAILED", task_id=task["id"], role="builder",
+                     activity_class="FAILED_WORK", outcome="FAILED",
+                     metadata_redacted={"why": port_why})
+            self.on_builder_dispatch_failure(doc, task, lock_newly_acquired,
+                                             f"no governed port: {port_why}")
+            return
+
         job = workers.write_job(
             worker, "builder", role_cfg.provider, role_cfg.model, task["id"], path,
             prompt_path, self.tz, hard_timeout_seconds=self.cfg.extra["timeouts"]["builder"],
-            fallback_model=role_cfg.escalation_model,
+            fallback_model=role_cfg.escalation_model, port=port,
         )
         started = workers.start_job(worker, job, path)
         if not started.ok:
@@ -301,7 +310,10 @@ class Supervisor:
         task["progress_marker"] = 0
         self.transition(doc, task["id"], "ASSIGNED", "builder dispatched")
         doc["workers"][worker] = state_mod.new_worker_record(
-            "builder", task["id"], branch, task["assigned_at"])
+            "builder", task["id"], branch, task["assigned_at"],
+            worktree=str(path), port=port,
+            lease_expires_at=self._lease_expires("builder"))
+        task.setdefault("retained_worktrees", {}).pop(str(path), None)
         self.log("TASK_DISPATCHED", task_id=task["id"], role="builder",
                  provider=role_cfg.provider, model=role_cfg.model, branch=branch,
                  agent_id=worker, activity_class="BUILD", outcome="DISPATCHED")
@@ -469,7 +481,10 @@ class Supervisor:
         record["review_verdict"] = None
         task["worker"] = worker
         doc["workers"][worker] = state_mod.new_worker_record(
-            "reviewer", task["id"], branch, clock.iso(self.now()), pr=pr_number)
+            "reviewer", task["id"], branch, clock.iso(self.now()), pr=pr_number,
+            worktree=str(path),
+            lease_expires_at=self._lease_expires("reviewer"))
+        task.setdefault("retained_worktrees", {}).pop(str(path), None)
         self.transition(doc, task["id"], "REVIEW", f"dispatched review cycle "
                                                    f"{record['review_cycles']}")
         self.log("REVIEW_DISPATCHED", task_id=task["id"], pr_id=pr_number, role="reviewer",
@@ -514,10 +529,16 @@ class Supervisor:
             self.on_dispatch_failure(doc, task, pr_number, "fixer", why)
             return
 
+        port, port_why = workers.allocate_port(doc)
+        if port is None:
+            self.on_dispatch_failure(doc, task, pr_number, "fixer",
+                                     f"no governed port: {port_why}")
+            return
+
         job = workers.write_job(
             worker, "fixer", role_cfg.provider, role_cfg.model, task["id"], path,
             prompt_path, self.tz, pr=pr_number,
-            hard_timeout_seconds=self.cfg.extra["timeouts"]["fixer"],
+            hard_timeout_seconds=self.cfg.extra["timeouts"]["fixer"], port=port,
         )
         started = workers.start_job(worker, job, path)
         if not started.ok:
@@ -529,7 +550,10 @@ class Supervisor:
         record["open_finding_ids"] = [f.get("id") for f in findings]
         task["worker"] = worker
         doc["workers"][worker] = state_mod.new_worker_record(
-            "fixer", task["id"], task["branch"], clock.iso(self.now()), pr=pr_number)
+            "fixer", task["id"], task["branch"], clock.iso(self.now()), pr=pr_number,
+            worktree=str(path), port=port,
+            lease_expires_at=self._lease_expires("fixer"))
+        task.setdefault("retained_worktrees", {}).pop(str(path), None)
         self.transition(doc, task["id"], "FIX_REQUIRED",
                         f"fix cycle {record['repair_cycles']}")
         self.log("FIX_DISPATCHED", task_id=task["id"], pr_id=pr_number, role="fixer",
@@ -589,6 +613,34 @@ class Supervisor:
 
     # ---------------------------------------------------------- worker reaping
 
+    def _lease_expires(self, role: str) -> str:
+        """C-09 lease: the worker's own enforced hard deadline plus the
+        governed grace (config timeouts.lease_grace_seconds) covering
+        dispatch->entry clock skew, the entry's kill-loop granularity and
+        kill->exit lag. A process alive past this instant is a violation."""
+        seconds = (self.cfg.extra["timeouts"][role]
+                   + int(self.cfg.extra["timeouts"]["lease_grace_seconds"]))
+        return clock.iso(self.now() + timedelta(seconds=seconds))
+
+    def _retain_worktree(self, doc: dict, meta: dict, why: str,
+                         *, all_roles: bool = False) -> None:
+        """C-09 ACTIVE -> RETAINED transfer: the physical worktree outlives
+        the worker record (workmux close keeps it), so ownership moves to
+        the task's retained_worktrees map in the same transaction that
+        drops the record. Reviewer worktrees are normally physically
+        removed instead (release_review_worktree), so they transfer only
+        in the freeze sweep, which closes rather than removes."""
+        if not meta.get("worktree"):
+            return
+        if not all_roles and meta.get("role") not in ("builder", "fixer"):
+            return
+        task = doc["tasks"].get(meta.get("task_id"))
+        if task is None:
+            return
+        task.setdefault("retained_worktrees", {})[meta["worktree"]] = {
+            "retained_at": clock.iso(self.now()), "why": why,
+        }
+
     def reap_workers(self, doc: dict) -> None:
         for worker, meta in list(doc["workers"].items()):
             status = workers.read_status(worker)
@@ -629,6 +681,21 @@ class Supervisor:
                 error=status.get("outcome") != "SUCCESS",
             )
 
+            if task and task["state"] == "HUMAN_REQUIRED":
+                # C-09: this task is parked pending a human decision (the
+                # only way a live record coexists with HUMAN_REQUIRED is
+                # lease expiry). The role handler's transitions would
+                # silently unpark it, so the record is reaped without
+                # routing - the human decision alone moves the task. All
+                # roles retain here: the skipped handler is also what would
+                # have removed a reviewer's worktree, so nothing removes
+                # any worktree on this path (same rationale as the freeze
+                # sweep).
+                self._retain_worktree(doc, meta, "TERMINAL_REAP",
+                                      all_roles=True)
+                doc["workers"].pop(worker, None)
+                continue
+            self._retain_worktree(doc, meta, "TERMINAL_REAP")
             handler = {
                 "builder": self.on_builder_finished,
                 "fixer": self.on_fixer_finished,
@@ -1243,6 +1310,58 @@ class Supervisor:
                 doc["workers"].pop(worker, None)
             self.transition(doc, task["id"], "READY", "recycled after stale detection")
 
+    LEASE_GOVERNED_STATES = frozenset({"ASSIGNED", "ACTIVE", "REVIEW",
+                                       "FIX_REQUIRED"})
+
+    def detect_lease_expiry(self, doc: dict) -> None:
+        """C-09: a worker process alive past its own enforced deadline plus
+        the governed grace means the enforcement mechanism itself failed.
+        Escalates to HUMAN_REQUIRED with a durable C-08b intervention -
+        never a kill, and ownership (record, worktree, port, any migration
+        lock) is retained for the human decision. A process already gone is
+        no obligation: the ordinary reap handles its terminal status.
+
+        Alive means: a worker-entry process carrying this worker's job path
+        in its cmdline, or the recorded agent identity-verified by
+        (agent_pid, agent_start_ticks). An ambiguous identity is NOT
+        treated as alive here - detection never over-claims; the governed
+        resolution preconditions fail closed separately (control/cli.py).
+        """
+        entries: dict | None = None
+        now = self.now()
+        for worker, meta in list(doc["workers"].items()):
+            task = doc["tasks"].get(meta.get("task_id"))
+            if not task or task["state"] not in self.LEASE_GOVERNED_STATES:
+                continue
+            lease = meta.get("lease_expires_at")
+            if not lease:
+                continue
+            try:
+                if now <= clock.parse(lease):
+                    continue
+            except ValueError:
+                continue  # malformed lease is our own bug; never guess
+            if entries is None:
+                entries = proc.worker_entry_processes(config.WORKER_LOG_DIR) or {}
+            status = workers.read_status(worker) or {}
+            alive = worker in entries or proc.verified_alive(
+                status.get("agent_pid"), status.get("agent_start_ticks")) is True
+            if not alive:
+                continue
+            self.transition(doc, task["id"], "HUMAN_REQUIRED",
+                            f"lease expired at {lease} with the worker "
+                            f"process still alive")
+            self.request_intervention(
+                doc, type_="HUMAN_APPARATUS_AUTHORISATION",
+                condition_code="lease_expired", task_id=task["id"],
+                reason=f"Lease expired for {task['id']} while worker "
+                       f"{worker} is still alive",
+                title=f"{task['id']}: worker lease expired while alive",
+                body=f"Worker {worker}'s lease expired at {lease} but its "
+                     "process is still running - its own hard-timeout "
+                     "enforcement did not terminate it. No automatic kill "
+                     "is performed; resolve via ctl human-resolve.")
+
     def consult_jev(self) -> None:
         """Advisory only, and deliberately outside the state transaction.
 
@@ -1426,6 +1545,10 @@ class Supervisor:
             json.dumps(snapshot, indent=2), encoding="utf-8"
         )
         for worker in list(doc["workers"]):
+            # close keeps the worktree, so ownership transfers to the task
+            # (C-09) - every role, since nothing removes worktrees here.
+            self._retain_worktree(doc, doc["workers"][worker], "RUN_FROZEN",
+                                  all_roles=True)
             workers.close_worker(worker)
         doc["workers"].clear()
         self.log("EXPERIMENT_FROZEN", outcome="FROZEN", activity_class="ORCHESTRATION",
@@ -1482,6 +1605,7 @@ class Supervisor:
             self.reap_workers(doc)
             merge_candidates = self.route_prs(doc, cs, open_prs)
             self.detect_stale(doc)
+            self.detect_lease_expiry(doc)
 
             for task in self.dispatchable(doc, cs):
                 self.dispatch_builder(doc, task)

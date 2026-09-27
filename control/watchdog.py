@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import subprocess
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import clock, config, gh, intervention, ledger as ledger_mod, merge_invariant
@@ -321,6 +323,189 @@ def reconcile_worker_state(cfg, ledger, notifier, *, store=None) -> None:
                       metadata_redacted={"error": str(exc)})
 
 
+# ------------------------------------------------------ C-09 annunciation
+#
+# Deterministic policy over reconcile.detect_orphans' facts. Detection is
+# not repair: nothing here (or anywhere) removes a worktree, kills a
+# process, or closes a listener. The lifecycle per occurrence is
+# OBSERVED -> ATTEMPTING -> DELIVERED with a durable pre-send fence:
+#
+#   * the occurrence (fingerprint, occurrence_id) and its ATTEMPTING fence
+#     commit BEFORE any external effect, so a crash at any point leaves an
+#     ambiguous attempt durably suppressed - at most one external send per
+#     durably authorised attempt;
+#   * delivery/failure evidence is an immediate occurrence-scoped ledger
+#     append, which survives any number of lost state commits - it, not
+#     the state flag, is what suppresses a resend after a success;
+#   * a new attempt exists only after a durably known failure
+#     (ORPHAN_ANNUNCIATION_FAILED for the current attempt);
+#   * clearing happens only on an affirmatively complete scan showing the
+#     resource absent - a failed scan never clears evidence;
+#   * genuine disappearance + recurrence mints a new occurrence_id, so the
+#     occurrence-scoped guards allow exactly one fresh notification.
+
+ORPHAN_CLASS = {
+    "ORPHAN_WORKTREE": "worktree",
+    "ORPHAN_WORKER_PROCESS": "process",
+    "ORPHAN_AGENT_PROCESS": "process",
+    "FOREIGN_OR_ORPHAN_LISTENER": "port",
+    "PORT_ASSIGNMENT_CONFLICT": "port",
+}
+
+
+def _orphan_event_exists(ledger, event_type: str, occurrence_id: str,
+                         attempt: int | None = None) -> bool:
+    path = getattr(ledger, "path", None)
+    if path is None or not Path(path).exists():
+        return False
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("event_type") != event_type:
+            continue
+        meta = event.get("metadata_redacted") or {}
+        if meta.get("occurrence_id") != occurrence_id:
+            continue
+        if attempt is not None and meta.get("attempt") != attempt:
+            continue
+        return True
+    return False
+
+
+def annunciate_orphans(cfg, ledger, notifier, *, store=None) -> None:
+    store = store or state_mod.Store(tz=cfg.timezone)
+    if not store.exists():
+        return
+    to_send: list[dict] = []
+    try:
+        with store.transaction() as doc:
+            entries = doc.setdefault("orphan_annunciations", {})
+
+            # Converge ATTEMPTING from durable ledger evidence: DELIVERED
+            # wins permanently; a durably known FAILED attempt makes the
+            # occurrence retryable; neither leaves it suppressed.
+            for entry in entries.values():
+                if entry.get("status") != "ATTEMPTING":
+                    continue
+                if _orphan_event_exists(ledger, "ORPHAN_ANNUNCIATION_DELIVERED",
+                                        entry["occurrence_id"]):
+                    entry["status"] = "DELIVERED"
+                elif _orphan_event_exists(ledger, "ORPHAN_ANNUNCIATION_FAILED",
+                                          entry["occurrence_id"],
+                                          attempt=entry.get("attempt")):
+                    entry["status"] = "OBSERVED"
+
+            findings, scan_ok = reconcile.detect_orphans(doc)
+            current: set[str] = set()
+            for finding in findings:
+                fingerprint = f"{finding.check_id}:{finding.resource_id}"
+                current.add(fingerprint)
+                entries.setdefault(fingerprint, {
+                    "occurrence_id": f"ORP-{secrets.token_hex(8)}",
+                    "status": "OBSERVED",
+                    "attempt": 0,
+                    "first_observed_at": clock.iso(clock.now(cfg.timezone)),
+                    "check_id": finding.check_id,
+                    "resource_id": finding.resource_id,
+                })
+
+            for fingerprint in list(entries):
+                cls = ORPHAN_CLASS.get(entries[fingerprint].get("check_id"))
+                if scan_ok.get(cls) and fingerprint not in current:
+                    entries.pop(fingerprint)  # affirmatively absent
+
+            # The durable pre-send fence: commit ATTEMPTING before any
+            # external effect may happen.
+            for fingerprint, entry in entries.items():
+                if entry["status"] == "OBSERVED":
+                    entry["status"] = "ATTEMPTING"
+                    entry["attempt"] += 1
+                    to_send.append(dict(entry, fingerprint=fingerprint))
+    except Exception:  # noqa: BLE001 - never take down the watchdog loop
+        # Truly finite structural metadata only: runtime exception prose can
+        # carry anything (paths, env fragments, secret-shaped material) and
+        # the static secret scan cannot vet it - not even a dynamic class
+        # name is persisted. The fixed pair below says everything the record
+        # needs to: the observation transaction failed, and, because to_send
+        # is only populated by a committed fence, no external notification
+        # came from it.
+        ledger.append("ORPHAN_ANNUNCIATION_ERROR", outcome="ERROR",
+                      activity_class="ORCHESTRATION",
+                      metadata_redacted={"phase": "OBSERVE_TRANSACTION",
+                                         "error_code": "OBSERVATION_FAILED"})
+        return
+
+    for entry in to_send:
+        send_started = False
+        try:
+            if not _orphan_event_exists(ledger, "ORPHAN_DETECTED",
+                                        entry["occurrence_id"]):
+                ledger.append(
+                    "ORPHAN_DETECTED", outcome="DETECTED",
+                    activity_class="ORCHESTRATION",
+                    metadata_redacted={
+                        "fingerprint": entry["fingerprint"],
+                        "occurrence_id": entry["occurrence_id"],
+                        "check_id": entry["check_id"],
+                        "resource_id": entry["resource_id"],
+                        "first_observed_at": entry["first_observed_at"],
+                    })
+            send_started = True
+            result = notifier.send(
+                notify.ATTENTION,
+                f"Orphan resource detected: {entry['check_id']}",
+                f"{entry['resource_id']} has no durable owner "
+                f"(occurrence {entry['occurrence_id']}). Detection only - "
+                "no automatic removal, kill, or repair is performed.",
+            )
+            if result and result.get("ok"):
+                ledger.append(
+                    "ORPHAN_ANNUNCIATION_DELIVERED", outcome="DELIVERED",
+                    activity_class="ORCHESTRATION",
+                    metadata_redacted={
+                        "fingerprint": entry["fingerprint"],
+                        "occurrence_id": entry["occurrence_id"],
+                    })
+            else:
+                ledger.append(
+                    "ORPHAN_ANNUNCIATION_FAILED", outcome="FAILED",
+                    activity_class="ORCHESTRATION",
+                    metadata_redacted={
+                        "fingerprint": entry["fingerprint"],
+                        "occurrence_id": entry["occurrence_id"],
+                        "attempt": entry["attempt"],
+                    })
+        except Exception:  # noqa: BLE001 - fail-closed handling below
+            if send_started:
+                # Ambiguous: the notification may have gone out. Remain
+                # ATTEMPTING - delivery happening twice is worse than stale
+                # bookkeeping, and the converge step repairs a durably
+                # known outcome on a later pass.
+                continue
+            # The failure happened BEFORE notifier.send was reached (the
+            # ORPHAN_DETECTED append), so no external effect exists and the
+            # occurrence may safely become retryable. If the append actually
+            # landed before raising, its existence guard prevents a
+            # duplicate on the retry. If this reset itself fails, the entry
+            # simply stays ATTEMPTING - fail closed against resend.
+            try:
+                with store.transaction() as doc:
+                    stored = doc.get("orphan_annunciations", {}).get(
+                        entry["fingerprint"])
+                    if stored and stored.get("status") == "ATTEMPTING" and \
+                            stored.get("occurrence_id") == entry["occurrence_id"]:
+                        stored["status"] = "OBSERVED"
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+
+
 def main() -> int:
     cfg = config.load()
     config.ensure_runtime_dirs()
@@ -336,6 +521,7 @@ def main() -> int:
     while True:
         proc.reap_children()
         reconcile_worker_state(cfg, ledger, notifier)
+        annunciate_orphans(cfg, ledger, notifier)
         pid = supervisor_pid()
         healthy = alive(pid) and heartbeat_fresh(cfg.timezone, cfg.heartbeat_stale_seconds)
 

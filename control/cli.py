@@ -33,6 +33,7 @@ from . import (
     migration_lock,
     notify,
     preflight as preflight_mod,
+    proc,
     providers,
     redact,
     state as state_mod,
@@ -443,6 +444,7 @@ CONDITION_OUTCOMES: dict[str, frozenset[str]] = {
     "supervisor_restart_failed": frozenset({"NO_ACTION"}),
     "merge_invariant_violation": frozenset({"FAIL", "NO_ACTION"}),
     "worker_state_invariant": frozenset({"FAIL", "NO_ACTION"}),
+    "lease_expired": frozenset({"RETRY", "FAIL", "NO_ACTION"}),
 }
 
 UNKNOWN_CONDITION_OUTCOMES = frozenset({"NO_ACTION"})
@@ -477,6 +479,95 @@ def _require_release_note(task_id: str, note: str | None) -> None:
             f"{task_id} owns the migration lock; a lock-releasing FAIL "
             f"requires a non-empty --note attesting the shared schema is "
             f"safe for subsequent schema-changing work")
+
+
+def _lease_governed_port(doc: dict, task_id: str, worker_id: str | None):
+    """The worker's governed dev-server port, from durable evidence.
+
+    Precedence: the live worker record; otherwise the durable
+    <worker>.job.json the port was assigned in before spawn (the record may
+    already be gone - the HUMAN_REQUIRED terminal reap pops it). No record
+    port and no job file means no assigned port. A job file that exists but
+    cannot be read is refused outright: the port it may own is unprovable,
+    and 'unprovable' must never silently become 'no port'."""
+    meta = (doc.get("workers") or {}).get(worker_id) or {}
+    if meta.get("port") is not None:
+        return meta["port"]
+    if not worker_id:
+        return None
+    job_path = config.WORKER_LOG_DIR / f"{worker_id}.job.json"
+    if not job_path.exists():
+        return None
+    try:
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise ResolutionRefused(
+            f"{task_id}: durable job file for {worker_id} exists but cannot "
+            f"be read; the governed port it may own is unprovable - failing "
+            f"closed")
+    return job.get("port")
+
+
+def _require_lease_worker_absent(doc: dict, task: dict, task_id: str) -> dict:
+    """C-09: RETRY/FAIL for lease_expired demand the governed processes and
+    the worker's assigned listener be mechanically absent, fail-closed.
+
+    Entry identity is the run-unique job path in the process's own cmdline;
+    agent identity is (agent_pid, agent_start_ticks) - a reused PID with
+    different start ticks is provably not the recorded agent and never
+    blocks resolution, while an unverifiable live PID always does. A known
+    surviving listener on the worker's governed port is never overridden by
+    the C-15 note: the note attests residual UNPROVABLE schema state after
+    the provable checks pass, it does not waive them.
+    """
+    worker_id = task.get("worker")
+    meta = (doc.get("workers") or {}).get(worker_id) or {}
+    entries = proc.worker_entry_processes(config.WORKER_LOG_DIR)
+    if entries is None:
+        raise ResolutionRefused(
+            f"{task_id}: /proc could not be scanned; cannot prove the "
+            f"worker-entry process is absent")
+    if worker_id in entries:
+        raise ResolutionRefused(
+            f"{task_id}: worker-entry for {worker_id} is still running "
+            f"(pid {entries[worker_id]}); terminate it before RETRY/FAIL")
+    status = workers.read_status(worker_id) or {} if worker_id else {}
+    alive = proc.verified_alive(status.get("agent_pid"),
+                                status.get("agent_start_ticks"))
+    if alive is True:
+        raise ResolutionRefused(
+            f"{task_id}: agent pid {status.get('agent_pid')} is still the "
+            f"recorded agent process; terminate it before RETRY/FAIL")
+    if alive is None:
+        raise ResolutionRefused(
+            f"{task_id}: agent pid {status.get('agent_pid')} is running but "
+            f"its identity cannot be verified against the recorded start "
+            f"ticks; failing closed")
+    port = _lease_governed_port(doc, task_id, worker_id)
+    if port is not None:
+        listening = proc.listening_ports(port, port)
+        if listening is None:
+            raise ResolutionRefused(
+                f"{task_id}: listener observation failed for port {port}; "
+                f"cannot prove the worker's listener is absent")
+        if port in listening:
+            raise ResolutionRefused(
+                f"{task_id}: the worker's governed port {port} is still "
+                f"listening; a surviving listener blocks RETRY/FAIL")
+    return meta
+
+
+def _release_lease_worker(doc: dict, cfg, task: dict) -> None:
+    """Drop the lease-expired worker record, transferring its worktree to
+    the task's retained_worktrees map (C-09 ACTIVE -> RETAINED) in this
+    same transaction."""
+    worker_id = task.get("worker")
+    meta = doc.get("workers", {}).pop(worker_id, None) or {}
+    if meta.get("worktree"):
+        task.setdefault("retained_worktrees", {})[meta["worktree"]] = {
+            "retained_at": clock.iso(clock.now(cfg.timezone)),
+            "why": "LEASE_RESOLUTION",
+        }
 
 
 def _fail_task(doc: dict, cfg, task: dict, record: dict,
@@ -550,6 +641,9 @@ def _apply_resolution_effects(doc: dict, cfg, record: dict,
         raise ResolutionRefused(f"task {task_id!r} not found in state")
     try:
         if outcome == "FAIL":
+            if condition == "lease_expired":
+                _require_lease_worker_absent(doc, task, task_id)
+                _release_lease_worker(doc, cfg, task)
             _fail_task(doc, cfg, task, record, note)
             return
         # outcome == "RETRY"
@@ -585,6 +679,31 @@ def _apply_resolution_effects(doc: dict, cfg, record: dict,
             # lock re-entrantly.
             state_mod.transition(doc, task_id, "READY",
                                  f"human RETRY of {iid}: redispatch the builder",
+                                 cfg.timezone)
+        elif condition == "lease_expired":
+            _require_lease_worker_absent(doc, task, task_id)
+            _release_lease_worker(doc, cfg, task)
+            # Ownership of any migration lock is retained: the next
+            # dispatch reacquires re-entrantly, exactly as C-15 governs.
+            #
+            # The target derives from durable task state, never the worker
+            # record (a HUMAN_REQUIRED terminal reap may have popped it
+            # already, taking the role with it). A task with an open pull
+            # request resolves to PR_OPEN - route_awaiting_dispatch's
+            # designed no-worker waiting state, which redispatches a fixer
+            # (REVIEW_FAIL verdict + pending findings) or a reviewer by the
+            # recorded verdict. A task without one resolves to READY for
+            # ordinary builder dispatch. Never FIX_REQUIRED: it is
+            # D2-reconcilable, so resolving into it with the record released
+            # would hand the Watchdog a stale task["worker"] contradiction
+            # (ORPHANED_TASK_WORKER_REF -> freeze) before redispatch. And
+            # never READY for a PR-bearing task: dispatchable() takes any
+            # READY task and would put a fresh BUILDER on a branch that
+            # already has an open PR.
+            target = "PR_OPEN" if task.get("pr") is not None else "READY"
+            state_mod.transition(doc, task_id, target,
+                                 f"human RETRY of {iid}: lease-expired "
+                                 f"worker proven absent; redispatch",
                                  cfg.timezone)
         elif condition in ("review_unusable", "p0_finding"):
             # Only the stale verdict is cleared - enough for routing to

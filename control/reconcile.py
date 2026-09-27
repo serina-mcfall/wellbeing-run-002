@@ -52,9 +52,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import config, gh, proc
+from . import config, gh, hostcheck, proc
 from . import workers as workers_mod
 
 RECONCILABLE_STATES = frozenset({"ASSIGNED", "ACTIVE", "REVIEW", "FIX_REQUIRED"})
@@ -245,3 +246,129 @@ def reconcile(doc: dict, *, repo_root=None, tz: str = "Pacific/Auckland") -> lis
                     ))
 
     return findings
+
+
+# ------------------------------------------------------------- C-09 orphans
+#
+# The reverse (reality -> state) half of resource reconciliation: physical
+# resources with no durable owner. Facts only, exactly like reconcile()
+# above - detection is not repair, and annunciation policy (dedup, ledger,
+# notification) is control/watchdog.py's job. Every scan reports its own
+# ok flag so a failed observation is never mistaken for "nothing there",
+# and a failed scan never justifies clearing previously observed evidence.
+
+
+@dataclass(frozen=True)
+class OrphanFinding:
+    check_id: str
+    resource_id: str
+    evidence: str
+
+
+def detect_orphans(doc: dict, *, repo_root=None) -> tuple[list[OrphanFinding],
+                                                          dict[str, bool]]:
+    repo_root = repo_root or config.REPO_ROOT
+    findings: list[OrphanFinding] = []
+    scan_ok = {"worktree": False, "process": False, "port": False}
+
+    # Worktrees: every git-registered worktree under the workmux-managed
+    # root (the sibling '<project>__worktrees' directory) must be claimed
+    # by a live worker record or a task's retained_worktrees map (ACTIVE /
+    # RETAINED / else orphan). The main checkout and any manual/unrelated
+    # worktree outside that root are not Run 002 resources and are never
+    # classified - detection must not over-claim.
+    ok, paths = registered_worktrees(repo_root)
+    if ok:
+        scan_ok["worktree"] = True
+        managed_root = workers_mod.managed_worktree_root(repo_root).resolve()
+        active = {meta.get("worktree")
+                  for meta in doc.get("workers", {}).values()
+                  if meta.get("worktree")}
+        retained: set[str] = set()
+        for task in doc.get("tasks", {}).values():
+            retained.update(task.get("retained_worktrees") or {})
+        for path in sorted(paths):
+            if path == str(repo_root):
+                continue
+            try:
+                if not Path(path).resolve().is_relative_to(managed_root):
+                    continue
+            except OSError:
+                continue  # unresolvable path is not provably Run 002-managed
+            if path in active or path in retained:
+                continue
+            findings.append(OrphanFinding(
+                "ORPHAN_WORKTREE", path,
+                f"registered worktree {path} has no live worker owner and "
+                f"no task retained_worktrees claim"))
+
+    # Processes. P1: a live worker-entry (identified by the run-unique job
+    # path in its own cmdline) with no worker record and a non-terminal
+    # status. P2: the entry is gone but the recorded agent survives,
+    # claimed ONLY under identity verification by (agent_pid, start ticks)
+    # - a reused PID or missing ticks is never claimed.
+    entries = proc.worker_entry_processes(config.WORKER_LOG_DIR)
+    if entries is not None:
+        try:
+            status_paths = sorted(config.WORKER_LOG_DIR.glob("*.status.json"))
+        except OSError:
+            status_paths = None
+        if status_paths is not None:
+            scan_ok["process"] = True
+            recorded = doc.get("workers", {})
+            for worker, pid in sorted(entries.items()):
+                if worker in recorded:
+                    continue
+                status = workers_mod.read_status(worker) or {}
+                if status.get("phase") in ("DONE", "FAILED", "TIMEOUT"):
+                    continue  # finished; the entry is exiting momentarily
+                findings.append(OrphanFinding(
+                    "ORPHAN_WORKER_PROCESS", worker,
+                    f"worker-entry pid {pid} runs job {worker} but no "
+                    f"doc[\"workers\"] record exists for it"))
+            for status_path in status_paths:
+                worker = status_path.name[: -len(".status.json")]
+                if worker in recorded or worker in entries:
+                    continue
+                status = workers_mod.read_status(worker)
+                if not status or status.get("phase") in ("DONE", "FAILED",
+                                                         "TIMEOUT"):
+                    continue
+                if proc.verified_alive(status.get("agent_pid"),
+                                       status.get("agent_start_ticks")) is True:
+                    findings.append(OrphanFinding(
+                        "ORPHAN_AGENT_PROCESS", worker,
+                        f"agent pid {status.get('agent_pid')} for {worker} is "
+                        f"identity-verified alive but its worker-entry and "
+                        f"worker record are both gone"))
+
+    # Ports: LISTEN sockets (IPv4 + IPv6 merged - a dual-stack [::]
+    # listener occupies the IPv4 wildcard) inside the run's declared
+    # exclusive candidate range, minus live worker ownership. Assignment
+    # invariants (duplicates) are also surfaced here.
+    try:
+        lo, hi = hostcheck.read_candidate_port_range()
+    except hostcheck.HostCheckError:
+        lo = hi = None
+    if lo is not None:
+        listening = proc.listening_ports(lo, hi)
+        if listening is not None:
+            scan_ok["port"] = True
+            owners: dict[int, list[str]] = {}
+            for worker, meta in doc.get("workers", {}).items():
+                port = meta.get("port")
+                if isinstance(port, int):
+                    owners.setdefault(port, []).append(worker)
+            for port, names in sorted(owners.items()):
+                if len(names) > 1:
+                    findings.append(OrphanFinding(
+                        "PORT_ASSIGNMENT_CONFLICT", str(port),
+                        f"port {port} is assigned to more than one live "
+                        f"worker record: {', '.join(sorted(names))}"))
+            for port in sorted(listening - set(owners)):
+                findings.append(OrphanFinding(
+                    "FOREIGN_OR_ORPHAN_LISTENER", str(port),
+                    f"port {port} is listening inside the declared candidate "
+                    f"range [{lo}, {hi}] but no live worker record owns it"))
+
+    return findings, scan_ok

@@ -21,7 +21,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from control import redact  # noqa: E402  - path must be set before this import
+from control import proc, redact  # noqa: E402  - path must be set before this import
 
 HEARTBEAT_SECONDS = 10
 
@@ -113,6 +113,11 @@ def main(job_path: str) -> int:
     env = dict(os.environ)
     env["RUN_001_ROLE"] = job["role"]
     env["RUN_001_TASK"] = str(job.get("task_id") or "")
+    if job.get("port") is not None:
+        # C-09: the governed dev-server port, durably assigned in the job
+        # file before this process existed. The environment is the real
+        # machine-readable interface - it inherits to the agent's children.
+        env["PORT"] = str(job["port"])
 
     with open(output_path, "wb") as sink:
         stdin_data = prompt_path.read_bytes() if job["role"] != "observer" else b""
@@ -125,6 +130,9 @@ def main(job_path: str) -> int:
             env=env,
         )
         status["agent_pid"] = process.pid
+        # C-09: (pid, start ticks) identifies THIS agent process for the
+        # boot's lifetime; a reused PID cannot fake the pair.
+        status["agent_start_ticks"] = proc.start_ticks(process.pid)
         status["phase"] = "RUNNING"
         flush()
 

@@ -85,7 +85,8 @@
   "timeouts": {
     "builder": 3600,
     "fixer": 2400,
-    "reviewer": 1800
+    "reviewer": 1800,
+    "lease_grace_seconds": 60
   },
 
   "supervisor": {

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import config, gh, proc, redact
+from . import config, gh, hostcheck, proc, redact
 
 HEARTBEAT_STALE_SECONDS = 90
 
@@ -216,6 +217,90 @@ def acquire_worktree(name: str, branch: str, base: str, session: str, prompt_pat
                   f"(create ok={created.ok}): {created.stderr[:200]}")
 
 
+def managed_worktree_root(repo_root: Path | None = None) -> Path:
+    """The directory workmux creates this repository's worktrees in.
+
+    workmux's default worktree_dir is the sibling directory
+    '<project>__worktrees' (verified via `workmux config reference`; the
+    global config sets no override and the repository carries none).
+    Reverse orphan detection scopes to this root so a manual or unrelated
+    git worktree of the repository is never classified as a Run 002 orphan.
+    """
+    root = Path(repo_root) if repo_root is not None else config.REPO_ROOT
+    return root.parent / f"{root.name}__worktrees"
+
+
+def _reserved_job_file_ports() -> set[int]:
+    """Ports durably promised in job files whose worker may still be using
+    them (C-09). The job file is written before spawn and is the port's
+    durable pre-commit owner, so a Supervisor crash between spawn and state
+    commit cannot orphan a port into reassignment. Fail-closed: a failed
+    /proc scan, or a live-but-unverifiable recorded agent, retains the port.
+    """
+    entries = proc.worker_entry_processes(config.WORKER_LOG_DIR)
+    reserved: set[int] = set()
+    for job_path in config.WORKER_LOG_DIR.glob("*.job.json"):
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue  # unreadable job file names no port to protect
+        port = job.get("port")
+        if not isinstance(port, int):
+            continue
+        worker = job_path.name[: -len(".job.json")]
+        if entries is None:  # /proc scan failed - cannot prove anything absent
+            reserved.add(port)
+            continue
+        if worker in entries:  # live worker-entry still owns the job
+            reserved.add(port)
+            continue
+        status_path = config.WORKER_LOG_DIR / f"{worker}.status.json"
+        if not status_path.exists():
+            # Entry dead before its first status flush: the agent is only
+            # spawned after that flush, so nothing can be using the port.
+            continue
+        status = read_status(worker)
+        if status is None:  # exists but unreadable - fail closed
+            reserved.add(port)
+            continue
+        if status.get("phase") in ("DONE", "FAILED", "TIMEOUT"):
+            continue
+        alive = proc.verified_alive(status.get("agent_pid"),
+                                    status.get("agent_start_ticks"))
+        if alive is not False:  # True, or ambiguous - fail closed
+            reserved.add(port)
+    return reserved
+
+
+def allocate_port(doc: dict, lo: int | None = None,
+                  hi: int | None = None) -> tuple[int | None, str]:
+    """One governed dev-server port, or an explicit reason (C-09).
+
+    Excluded: ports owned by committed worker records, ports reserved by a
+    job file whose worker-entry or recorded agent may still be live (see
+    _reserved_job_file_ports), and ports that fail a real 127.0.0.1 bind
+    right now. The bind-test-to-builder-bind TOCTOU window is unavoidable
+    without a reservation daemon; a foreign listener taking the port in
+    that window is surfaced by reverse listener detection.
+    """
+    if lo is None or hi is None:
+        lo, hi = hostcheck.read_candidate_port_range()
+    owned = {meta.get("port") for meta in doc.get("workers", {}).values()
+             if isinstance(meta.get("port"), int)}
+    reserved = _reserved_job_file_ports()
+    for port in range(lo, hi + 1):
+        if port in owned or port in reserved:
+            continue
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+        return port, ""
+    return None, (f"no bindable unowned port in [{lo}, {hi}] "
+                  f"(owned={len(owned)}, reserved={len(reserved)})")
+
+
 def remove_worker(name: str) -> gh.Result:
     return workmux(["remove", name, "--force"], timeout=120)
 
@@ -317,7 +402,8 @@ def readiness(worker: str, role: str, tz: str,
 def write_job(worker: str, role: str, provider: str, model: str | None, task_id: str | None,
               worktree: Path, prompt_path: Path, tz: str, *, pr: int | None = None,
               hard_timeout_seconds: int = 3600, effort: str | None = None,
-              fallback_model: str | None = None, max_turns: int | None = None) -> Path:
+              fallback_model: str | None = None, max_turns: int | None = None,
+              port: int | None = None) -> Path:
     config.WORKER_LOG_DIR.mkdir(parents=True, exist_ok=True)
     job = {
         "worker": worker,
@@ -335,6 +421,7 @@ def write_job(worker: str, role: str, provider: str, model: str | None, task_id:
         "last_message_path": str(config.WORKER_LOG_DIR / f"{worker}.last.txt"),
         "timezone": tz,
         "hard_timeout_seconds": hard_timeout_seconds,
+        "port": port,
     }
     if max_turns:
         job["max_turns"] = max_turns

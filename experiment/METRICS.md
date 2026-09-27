@@ -4,7 +4,8 @@ Canonical sources: `protocol/RUN-002-PROTOCOL-v2.0.md` §"Concurrency metrics",
 §"Human intervention taxonomy", §"Operational rules", and §"Preflight" (host
 resource headroom). `experiment/CONTRADICTION-AUDIT.md`, C-08 (OPEN /
 NOT_IMPLEMENTED, subsidiary decision C-08d RESOLVED) and C-09 (OPEN /
-NOT_IMPLEMENTED). Those are authoritative; this file is a status matrix and
+PARTIAL — core resource ownership implementation complete 2026-09-27; browser
+control-plane feed pending C-05). Those are authoritative; this file is a status matrix and
 must not invent capability they do not document as existing.
 
 Two independent dimensions are tracked for every row:
@@ -45,9 +46,9 @@ the Capability column.
 | RAM | NOT_IMPLEMENTED | NOT_APPLICABLE | No code reads `/proc/meminfo` or any memory signal. See C-08. |
 | Disk | NOT_IMPLEMENTED | NOT_APPLICABLE | No code calls `shutil.disk_usage` or any disk signal. See C-08. |
 | inotify usage | NOT_IMPLEMENTED | NOT_APPLICABLE | Zero occurrences anywhere in `control/*.py`. See C-08. |
-| Port contention (metric) | PARTIAL | NOT_APPLICABLE | `control/state.py::new_worker_record` carries a `port` field, but nothing assigns it a real value and no aggregate contention metric exists. The allocator/ownership mechanism itself is tracked separately as C-09. See C-08. |
-| Process count | PARTIAL | NOT_APPLICABLE | Per-worker PID liveness is tracked (`control/workers.py`, `control/proc.py`), but nothing aggregates this into a "process count" metric. See C-08. |
-| Worktree count | PARTIAL | NOT_APPLICABLE | `control/workers.py::list_worktrees()` exists as an operational helper; not surfaced as a tracked metric. See C-08. |
+| Port contention (metric) | PARTIAL | NOT_APPLICABLE | The C-09 allocator (`control/workers.py::allocate_port`) now deterministically assigns builder/fixer ports into worker records and durable job files, and `control/reconcile.py::detect_orphans` observes in-range IPv4+IPv6 listeners — but no aggregate contention *metric* exists yet; that remains C-08a work. See C-08. |
+| Process count | PARTIAL | NOT_APPLICABLE | Per-worker PID liveness plus C-09's run-scoped process observation — worker-entry cmdline identity and (agent_pid, agent_start_ticks) verification (`control/proc.py`) — now exist, but nothing aggregates a "process count" metric; that remains C-08a work. See C-08. |
+| Worktree count | PARTIAL | NOT_APPLICABLE | `control/workers.py::list_worktrees()` exists, and C-09 adds owned/retained worktree dispositions (worker records' `worktree` fields, task `retained_worktrees`, managed-root reverse detection) as underlying facts; still not surfaced as a tracked metric — that remains C-08a work. See C-08. |
 | Browser count | NOT_IMPLEMENTED | NOT_APPLICABLE | No coordination exists between the Python control plane and the Node/Playwright accessibility runner (`apparatus/accessibility/`) to report this. See C-08. |
 
 ## Human-intervention measurement — C-08b
@@ -102,23 +103,24 @@ Lifecycle stages: allocate → assign → track → lease → release → detect
 
 | Resource | Allocate | Assign | Track | Lease | Release | Detect orphan |
 |---|---|---|---|---|---|---|
-| Worktree | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED | NOT_IMPLEMENTED | IMPLEMENTED | NOT_IMPLEMENTED |
-| Process | IMPLEMENTED | PARTIAL (PID durable only in an ephemeral status file, not the durable state document) | IMPLEMENTED | NOT_IMPLEMENTED | IMPLEMENTED for the tmux-pane path; unverified for the detached-subprocess fallback | NOT_IMPLEMENTED |
-| Browser | NOT_IMPLEMENTED | NOT_IMPLEMENTED | NOT_IMPLEMENTED | NOT_IMPLEMENTED | NOT_IMPLEMENTED | NOT_IMPLEMENTED |
-| Port | NOT_IMPLEMENTED | NOT_IMPLEMENTED | NOT_IMPLEMENTED | NOT_IMPLEMENTED | NOT_IMPLEMENTED | NOT_IMPLEMENTED |
+| Worktree | IMPLEMENTED | IMPLEMENTED (worker records carry the canonical path) | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (ACTIVE ⇄ RETAINED task/evidence ownership) | IMPLEMENTED (managed-root-scoped, bidirectional) |
+| Process | IMPLEMENTED | IMPLEMENTED (durable pre-spawn job-file identity; agent (pid, start_ticks) in the status file) | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (both launch modes; identity-verified) | IMPLEMENTED (worker-entry cmdline scan + surviving-agent verification) |
+| Browser | RUNNER-LOCAL COMPLETE (one launch per invocation; close on success and thrown error) | PENDING C-05 | PENDING C-05 | PENDING C-05 | RUNNER-LOCAL COMPLETE (try/finally) | PENDING C-05 |
+| Port | IMPLEMENTED (deterministic allocator, builder + fixer only) | IMPLEMENTED (durable job-file assignment before spawn; PORT env interface) | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (record removal; job-file reservation until the owner is provably gone) | IMPLEMENTED (IPv4+IPv6 listeners; assignment conflicts) |
 
 Runtime data: NOT_APPLICABLE for every cell above — even the IMPLEMENTED
 stages (worktree/process allocate-assign-track-release) have no data to
 report before T+00; nothing has been dispatched yet.
 
-Evidence: `control/workers.py` (allocate/track/release primitives),
-`control/supervisor.py` (`release_review_worktree`, `complete_task`, the
-stale-task-recovery path, the T+24 freeze sweep — all four release call
-sites verified directly), `control/reconcile.py` (independent worktree/PID
-claim-verification — confirmed one-directional: checks that claimed
-resources exist, never checks whether existing resources are unclaimed,
-which is what orphan detection requires). Claim verification is not orphan
-detection. See C-09.
+Evidence: `control/workers.py` (allocator, managed worktree root, job-file
+reservation), `control/proc.py` (start-ticks identity, worker-entry cmdline
+scan, IPv4+IPv6 listener reader), `control/supervisor.py` (dispatch
+population, lease population/expiry, ACTIVE ⇄ RETAINED transfers, the
+HUMAN_REQUIRED reap guard), `control/reconcile.py::detect_orphans`
+(reality → state detection with per-class fail-closed scan flags),
+`control/watchdog.py::annunciate_orphans` (fenced annunciation) and
+`control/cli.py` (governed lease_expired resolution). Reverse detection now
+exists alongside the original claim-verification direction. See C-09.
 
 ## What this document is not
 
