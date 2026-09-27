@@ -21,7 +21,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import clock, config, gh, intervention, ledger as ledger_mod, merge_invariant
-from . import notify, proc, reconcile
+from . import metrics, notify, proc, reconcile
 from . import state as state_mod
 
 CHECK_SECONDS = 30
@@ -511,6 +511,52 @@ def annunciate_orphans(cfg, ledger, notifier, *, store=None) -> None:
             continue
 
 
+def record_resource_sample(cfg, ledger, last_monotonic, *, store=None):
+    """C-08a: append one RESOURCE_SAMPLE per governed interval.
+
+    Cadence (governed 2026-09-28): sample immediately when the loop starts
+    (last_monotonic None - a Watchdog restart therefore takes one extra
+    immediate sample, which is preferred over a fresh blind interval),
+    then no more often than every metrics.SAMPLE_INTERVAL_SECONDS. The
+    returned value is the caller's next cadence point. A failed sampling
+    attempt ALSO advances the cadence point, so a persistently broken
+    reader produces one durable METRICS_SAMPLE_ERROR per interval, not an
+    error storm on every 30-second pass. No state document yet means the
+    run's evidence sources do not exist: defer without advancing (same
+    early-return convention as the other Watchdog observers) rather than
+    fabricating a sample with nothing behind it. Measurement only - no
+    freeze, no threshold, no notification, no state mutation.
+    """
+    now = time.monotonic()
+    if last_monotonic is not None and \
+            now - last_monotonic < metrics.SAMPLE_INTERVAL_SECONDS:
+        return last_monotonic
+    store = store or state_mod.Store(tz=cfg.timezone)
+    if not store.exists():
+        return last_monotonic
+    try:
+        payload = metrics.sample(store.read())
+        ledger.append("RESOURCE_SAMPLE", outcome="OBSERVED",
+                      activity_class="OBSERVATION",
+                      metadata_redacted=payload)
+    except Exception:  # noqa: BLE001 - measurement must never take down the
+        # watchdog loop, and nothing exception-derived may persist: the
+        # fixed finite pair below is the entire durable record (same rule
+        # as RECONCILE_ERROR and ORPHAN_ANNUNCIATION_ERROR).
+        try:
+            ledger.append("METRICS_SAMPLE_ERROR", outcome="ERROR",
+                          activity_class="OBSERVATION",
+                          metadata_redacted={"phase": "RUNTIME_SAMPLE",
+                                             "error_code": "SAMPLE_FAILED"})
+        except Exception:  # noqa: BLE001 - the durable sink itself is down,
+            # so this interval's failure genuinely cannot be recorded, and
+            # nothing here may pretend otherwise or invent another sink.
+            # Measurement-only degradation: the watchdog's independent
+            # liveness duty continues regardless.
+            pass
+    return now
+
+
 def main() -> int:
     cfg = config.load()
     config.ensure_runtime_dirs()
@@ -522,9 +568,11 @@ def main() -> int:
                   metadata_redacted={"pid": os.getpid()})
 
     restarts: list[float] = []
+    last_sample = None  # C-08a cadence point; None samples immediately
 
     while True:
         proc.reap_children()
+        last_sample = record_resource_sample(cfg, ledger, last_sample)
         reconcile_worker_state(cfg, ledger, notifier)
         annunciate_orphans(cfg, ledger, notifier)
         pid = supervisor_pid()

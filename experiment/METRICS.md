@@ -40,16 +40,18 @@ the Capability column.
 
 ## Runtime/host metrics — C-08a
 
+C-08a runtime capture is implemented (2026-09-28): the Watchdog appends one append-only `RESOURCE_SAMPLE` ledger event per governed 300-second interval (immediate first sample on Watchdog start/restart; monotonic gating; a failed attempt advances the cadence point; missing state defers without advancing), carrying a fixed finite 28-key metadata schema in which an unavailable observation class is `null` plus `*_observed=false`, never zero. A top-level sampling failure appends the fixed finite `METRICS_SAMPLE_ERROR` phase/error_code pair, and total ledger unavailability is contained rather than killing the Watchdog. Peaks and averages are not stored; they are derivable later from the append-only samples. Runtime data remains NOT_APPLICABLE only because T+00 has not started.
+
 | Metric | Capability | Runtime data | Evidence |
 |---|---|---|---|
-| CPU | NOT_IMPLEMENTED | NOT_APPLICABLE | No code reads `/proc/loadavg` or any CPU signal. See C-08. |
-| RAM | NOT_IMPLEMENTED | NOT_APPLICABLE | No code reads `/proc/meminfo` or any memory signal. See C-08. |
-| Disk | NOT_IMPLEMENTED | NOT_APPLICABLE | No code calls `shutil.disk_usage` or any disk signal. See C-08. |
-| inotify usage | NOT_IMPLEMENTED | NOT_APPLICABLE | Zero occurrences anywhere in `control/*.py`. See C-08. |
-| Port contention (metric) | PARTIAL | NOT_APPLICABLE | The C-09 allocator (`control/workers.py::allocate_port`) now deterministically assigns builder/fixer ports into worker records and durable job files, and `control/reconcile.py::detect_orphans` observes in-range IPv4+IPv6 listeners — but no aggregate contention *metric* exists yet; that remains C-08a work. See C-08. |
-| Process count | PARTIAL | NOT_APPLICABLE | Per-worker PID liveness plus C-09's run-scoped process observation — worker-entry cmdline identity and (agent_pid, agent_start_ticks) verification (`control/proc.py`) — now exist, but nothing aggregates a "process count" metric; that remains C-08a work. See C-08. |
-| Worktree count | PARTIAL | NOT_APPLICABLE | `control/workers.py::list_worktrees()` exists, and C-09 adds owned/retained worktree dispositions (worker records' `worktree` fields, task `retained_worktrees`, managed-root reverse detection) as underlying facts; still not surfaced as a tracked metric — that remains C-08a work. See C-08. |
-| Browser count | NOT_IMPLEMENTED | NOT_APPLICABLE | No coordination exists between the Python control plane and the Node/Playwright accessibility runner (`apparatus/accessibility/`) to report this. See C-08. |
+| CPU | IMPLEMENTED | NOT_APPLICABLE | `control/metrics.py::sample` records system load1 (`/proc/loadavg` via the C-08c reader — a run-queue length, explicitly not a CPU-utilisation percentage) plus logical CPU count in every `RESOURCE_SAMPLE`. See C-08. |
+| RAM | IMPLEMENTED | NOT_APPLICABLE | MemAvailable bytes via the C-08c `/proc/meminfo` reader in every `RESOURCE_SAMPLE`. See C-08. |
+| Disk | IMPLEMENTED | NOT_APPLICABLE | Repository-filesystem free bytes via the C-08c `shutil.disk_usage` reader in every `RESOURCE_SAMPLE`. See C-08. |
+| inotify usage | IMPLEMENTED | NOT_APPLICABLE | Per-real-UID instances/watches used plus the governed ceilings, via the C-08c readers, in every `RESOURCE_SAMPLE`. See C-08. |
+| Port contention (metric) | IMPLEMENTED | NOT_APPLICABLE | The C-09 allocator (`control/workers.py::allocate_port`) now deterministically assigns builder/fixer ports into worker records and durable job files, and `control/reconcile.py::detect_orphans` observes in-range IPv4+IPv6 listeners — and `RESOURCE_SAMPLE` now records the levels — distinct worker-owned ports and LISTEN sockets inside the governed range via that same IPv4+IPv6 observation. Contention *occurrences* remain represented solely by the existing durable `PORT_ALLOCATION_FAILED` / `PORT_ASSIGNMENT_CONFLICT` / `FOREIGN_OR_ORPHAN_LISTENER` events — no second contention mechanism. See C-08. |
+| Process count | IMPLEMENTED | NOT_APPLICABLE | Per-worker PID liveness plus C-09's run-scoped process observation — worker-entry cmdline identity and (agent_pid, agent_start_ticks) verification (`control/proc.py`) — now feed `RESOURCE_SAMPLE`'s deliberately unsummed truthful triple: committed worker records, cmdline-identified live worker-entry processes, and identity-verified surviving agents — never summed into one synthetic number. See C-08. |
+| Worktree count | IMPLEMENTED | NOT_APPLICABLE | `control/workers.py::list_worktrees()` exists, and C-09 adds owned/retained worktree dispositions (worker records' `worktree` fields, task `retained_worktrees`, managed-root reverse detection) as underlying facts, and `RESOURCE_SAMPLE` now records the dispositions: registered-managed, ACTIVE, RETAINED and ORPHAN, with managed-root scoping identical to `detect_orphans`; a failed git observation leaves registered/orphan `null` rather than inferring a count. See C-08. |
+| Browser count | NOT_IMPLEMENTED — PENDING C-05 | NOT_APPLICABLE | `RESOURCE_SAMPLE` records `browser_count: null` with `browser_observed: false`; browsers are launched entirely by the Node accessibility runner (`apparatus/accessibility/`) and no control-plane visibility exists until C-05, so a count is never fabricated as zero. See C-08. |
 
 ## Human-intervention measurement — C-08b
 
