@@ -317,10 +317,15 @@ def reconcile_worker_state(cfg, ledger, notifier, *, store=None) -> None:
                     f"{finding.check_id}: {finding.evidence}"
                     + intervention.notification_suffix(int_record),
                 )
-    except Exception as exc:  # noqa: BLE001 - a bug here must not take down the watchdog's
+    except Exception:  # noqa: BLE001 - a bug here must not take down the watchdog's
         # primary supervisor-liveness duty; it must also never fail silently.
+        # Fixed finite structural metadata only (D2/C-14 amendment): runtime
+        # exception prose can carry path/document/env-derived material the
+        # static secret scan cannot vet, so nothing derived from the
+        # exception - not even its class name - is persisted.
         ledger.append("RECONCILE_ERROR", outcome="ERROR", activity_class="ORCHESTRATION",
-                      metadata_redacted={"error": str(exc)})
+                      metadata_redacted={"phase": "RECONCILE_TRANSACTION",
+                                         "error_code": "RECONCILIATION_FAILED"})
 
 
 # ------------------------------------------------------ C-09 annunciation

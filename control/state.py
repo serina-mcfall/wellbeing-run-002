@@ -126,11 +126,16 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     # Terminal for deterministic automation: only a human-driven escalation
     # out, never a direct recovery back to READY/ACTIVE/etc. Inbound edges
     # are deliberately limited to ASSIGNED/ACTIVE/REVIEW/FIX_REQUIRED - the
-    # only states where supervisor.py's own dispatch code guarantees a live
-    # doc["workers"] record exists for the task's entire time in that state
-    # (verified directly: task["worker"] is set and the worker record is
-    # created in the same operation that enters ASSIGNED/REVIEW/FIX_REQUIRED,
-    # and is never cleared afterward). Every other in-flight state (PR_OPEN,
+    # reconcilable states. They are not alike (D2/C-14 amendment,
+    # 2026-09-27): dispatch construction guarantees a live doc["workers"]
+    # record only for ASSIGNED and ACTIVE, so only there is a missing or
+    # dangling task["worker"] itself a freezable contradiction. REVIEW and
+    # FIX_REQUIRED are routing/waiting states that may legitimately have no
+    # live worker between Supervisor ticks (route_awaiting_dispatch
+    # redispatches next tick), so absence alone never freezes them - but
+    # when a worker record DOES exist there, reconciliation still validates
+    # its back-reference, status, PID, heartbeat and worktree, and any of
+    # those contradictions can freeze. Every other in-flight state (PR_OPEN,
     # WAITING_CI, WAITING_EVIDENCE, MERGE_READY) routinely has no live worker
     # record as NORMAL behaviour - the prior worker has already been reaped
     # and a new one not yet dispatched - so "no live worker" there is not a

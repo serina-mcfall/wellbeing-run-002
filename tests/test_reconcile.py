@@ -245,5 +245,86 @@ class TestDormantProgressCheck(unittest.TestCase):
         self.assertIn("PROGRESS_CLAIM_UNSUPPORTED_BY_OUTPUT_FILE", _ids(findings))
 
 
+class TestWaitingRoutingStates(unittest.TestCase):
+    """D2/C-14 hardening: REVIEW and FIX_REQUIRED may legitimately exist
+    between Supervisor ticks with no live worker record - routing's own
+    recovery rule (route_awaiting_dispatch) waits there and redispatches by
+    verdict, checking liveness from worker records, never task["worker"].
+    A stale task["worker"] there is historical identity, not an
+    active-ownership claim, so neither MISSING_TASK_WORKER_REF nor
+    ORPHANED_TASK_WORKER_REF may fire - a false dangerous finding would
+    freeze a healthy task, unrecoverably before C-14.3."""
+
+    REF_CHECKS = ("MISSING_TASK_WORKER_REF", "ORPHANED_TASK_WORKER_REF")
+
+    def ref_findings(self, findings):
+        return [f.check_id for f in findings if f.check_id in self.REF_CHECKS]
+
+    def test_waiting_with_stale_previous_worker_is_not_a_contradiction(self):
+        for state_name in ("FIX_REQUIRED", "REVIEW"):
+            with self.subTest(state=state_name):
+                doc = _doc(state_name, with_worker=False,
+                           task_worker_override="old-fixer")
+                findings = _run(doc, status=None)
+                self.assertEqual(self.ref_findings(findings), [])
+
+    def test_waiting_with_no_worker_reference_is_not_a_contradiction(self):
+        for state_name in ("FIX_REQUIRED", "REVIEW"):
+            with self.subTest(state=state_name):
+                doc = _doc(state_name, with_worker=False)
+                findings = _run(doc, status=None)
+                self.assertEqual(self.ref_findings(findings), [])
+
+    def test_assigned_and_active_still_fail_closed_on_both_checks(self):
+        for state_name in ("ASSIGNED", "ACTIVE"):
+            with self.subTest(state=state_name, check="missing"):
+                doc = _doc(state_name, with_worker=False)
+                findings = _run(doc, status=None)
+                self.assertEqual(self.ref_findings(findings),
+                                 ["MISSING_TASK_WORKER_REF"])
+                self.assertTrue(all(f.dangerous for f in findings))
+            with self.subTest(state=state_name, check="orphaned"):
+                doc = _doc(state_name, with_worker=False,
+                           task_worker_override="ghost-worker")
+                findings = _run(doc, status=None)
+                self.assertEqual(self.ref_findings(findings),
+                                 ["ORPHANED_TASK_WORKER_REF"])
+                self.assertTrue(all(f.dangerous for f in findings))
+
+    def test_record_present_integrity_checks_still_operate_while_waiting(self):
+        """The waiting-state allowance covers ONLY the absent-record case;
+        a record that does exist keeps every reality check."""
+        for state_name in ("FIX_REQUIRED", "REVIEW"):
+            with self.subTest(state=state_name, check="backref"):
+                doc = _doc(state_name)
+                doc["workers"]["task-001-builder"]["task_id"] = "TASK-999"
+                findings = _run(doc, status=_status())
+                self.assertIn("WORKER_TASK_BACKREF_MISMATCH", _ids(findings))
+            with self.subTest(state=state_name, check="missing_status"):
+                doc = _doc(state_name)
+                findings = _run(doc, status=None)
+                self.assertIn("MISSING_WORKER_STATUS", _ids(findings))
+            with self.subTest(state=state_name, check="dead_pid"):
+                doc = _doc(state_name)
+                findings = _run(doc, status=_status(), pid_alive=False)
+                self.assertIn("DEAD_PID_CLAIMED_ALIVE", _ids(findings))
+            with self.subTest(state=state_name, check="missing_heartbeat"):
+                doc = _doc(state_name)
+                findings = _run(doc, status=_status(heartbeat_at=None))
+                self.assertIn("MISSING_HEARTBEAT_WHILE_PID_ALIVE", _ids(findings))
+                self.assertTrue(all(
+                    f.dangerous for f in findings
+                    if f.check_id == "MISSING_HEARTBEAT_WHILE_PID_ALIVE"))
+            with self.subTest(state=state_name, check="stale_heartbeat"):
+                doc = _doc(state_name)
+                old = clock.iso(clock.now(TZ) - timedelta(seconds=600))
+                findings = _run(doc, status=_status(heartbeat_at=old))
+                self.assertIn("HEARTBEAT_STALE_WHILE_PID_ALIVE", _ids(findings))
+            with self.subTest(state=state_name, check="worktree"):
+                doc = _doc(state_name)
+                findings = _run(doc, status=_status(), git_worktrees=set())
+                self.assertIn("WORKTREE_NOT_REGISTERED", _ids(findings))
+
+
 if __name__ == "__main__":
     unittest.main()

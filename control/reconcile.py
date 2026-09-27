@@ -31,12 +31,19 @@ here, never itself treated as proof that a claimed worker is doing
 anything, and never used to infer a detailed worker phase.
 
 Reconciliation only evaluates tasks in ASSIGNED, ACTIVE, REVIEW or
-FIX_REQUIRED - the only states where supervisor.py's own dispatch code
-(verified directly, not assumed) guarantees a live doc["workers"] record
-exists for the task's entire time in that state. Every other in-flight
-state routinely has no live worker record as normal behaviour, so nothing
-is checked there; see control/state.py's FROZEN comment for the full
-per-state accounting.
+FIX_REQUIRED. The four are NOT alike (D2/C-14 amendment, 2026-09-27):
+dispatch construction guarantees a live doc["workers"] record only for
+ASSIGNED and ACTIVE, so only there is a missing/dangling task["worker"]
+itself a contradiction. REVIEW and FIX_REQUIRED are routing states -
+supervisor.py's route_awaiting_dispatch explicitly treats them with no
+live worker as "waiting to redispatch next tick" (human RETRY resolutions
+and dispatch failures legitimately commit that shape to disk between
+ticks), and routing checks liveness from worker records, never from
+task["worker"], whose stale value there is historical identity, not an
+active-ownership claim. When a record IS present, every reality check
+below still applies in all four states. Every other in-flight state
+routinely has no live worker record as normal behaviour, so nothing is
+checked there.
 
 Every check below fails CLOSED, not open. Missing or malformed evidence
 where evidence is expected - no task["worker"] in a reconcilable state,
@@ -59,6 +66,12 @@ from . import config, gh, hostcheck, proc
 from . import workers as workers_mod
 
 RECONCILABLE_STATES = frozenset({"ASSIGNED", "ACTIVE", "REVIEW", "FIX_REQUIRED"})
+
+# Only dispatch construction for ASSIGNED/ACTIVE guarantees a live worker
+# record; REVIEW/FIX_REQUIRED legitimately wait with none while routing
+# redispatches (see the module docstring). Missing/dangling task["worker"]
+# is a contradiction only here.
+ACTIVE_WORKER_REQUIRED_STATES = frozenset({"ASSIGNED", "ACTIVE"})
 
 # Bounded multiple of workers.HEARTBEAT_STALE_SECONDS, not the raw value,
 # so an ordinary tick-timing gap is never flagged as dangerous - only a
@@ -113,27 +126,33 @@ def reconcile(doc: dict, *, repo_root=None, tz: str = "Pacific/Auckland") -> lis
 
         worker_id = task.get("worker")
         if not worker_id:
-            # Dispatch construction guarantees task["worker"] is set the
-            # moment a task enters one of these states (verified against
-            # supervisor.py directly - see control/state.py's FROZEN
-            # comment). Its absence here is itself a contradiction, not
-            # an ordinary "nothing dispatched yet" case.
-            findings.append(Disagreement(
-                check_id="MISSING_TASK_WORKER_REF", worker=None, task_id=task_id,
-                dangerous=True,
-                evidence=(f'{task_id} is "{task["state"]}", which guarantees a worker was '
-                          "dispatched, but task[\"worker\"] is missing or empty."),
-            ))
-            continue  # no worker-specific observation is possible without a worker_id
+            # Dispatch construction guarantees task["worker"] is set for
+            # ASSIGNED/ACTIVE, so its absence there is a contradiction. In
+            # REVIEW/FIX_REQUIRED it is ordinary waiting-to-redispatch
+            # (see the module docstring) - no worker-specific observation
+            # is possible or owed.
+            if task["state"] in ACTIVE_WORKER_REQUIRED_STATES:
+                findings.append(Disagreement(
+                    check_id="MISSING_TASK_WORKER_REF", worker=None, task_id=task_id,
+                    dangerous=True,
+                    evidence=(f'{task_id} is "{task["state"]}", which guarantees a worker '
+                              "was dispatched, but task[\"worker\"] is missing or empty."),
+                ))
+            continue
 
         worker = doc.get("workers", {}).get(worker_id)
         if worker is None:
-            findings.append(Disagreement(
-                check_id="ORPHANED_TASK_WORKER_REF", worker=worker_id, task_id=task_id,
-                dangerous=True,
-                evidence=(f'{task_id} is "{task["state"]}" and claims worker "{worker_id}", '
-                          'but no such worker record exists in doc["workers"].'),
-            ))
+            # Same split: a dangling reference is a contradiction only
+            # where an active record is mandatory; in REVIEW/FIX_REQUIRED
+            # the stale name is historical identity while routing waits.
+            if task["state"] in ACTIVE_WORKER_REQUIRED_STATES:
+                findings.append(Disagreement(
+                    check_id="ORPHANED_TASK_WORKER_REF", worker=worker_id, task_id=task_id,
+                    dangerous=True,
+                    evidence=(f'{task_id} is "{task["state"]}" and claims worker '
+                              f'"{worker_id}", but no such worker record exists in '
+                              'doc["workers"].'),
+                ))
             continue  # nothing further is checkable without a worker record
 
         if worker.get("task_id") != task_id:

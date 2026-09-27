@@ -552,3 +552,45 @@ class TestS12InterventionIntegration(WatchdogReconcileCase):
         doc = self.store.read()
         self.assertEqual(len(doc["interventions"]), 1)
         self.assertEqual(len(self.requested_events()), 1)
+
+    # ---------------------------------------------- D2/C-14 hardening
+
+    def test_waiting_fix_required_task_is_never_falsely_frozen(self):
+        """REVIEW/FIX_REQUIRED legitimately wait with a stale previous
+        worker reference and no live record between Supervisor ticks
+        (route_awaiting_dispatch redispatches next tick); the Watchdog
+        must not freeze that healthy task."""
+        for state_name in ("FIX_REQUIRED", "REVIEW"):
+            with self.subTest(state=state_name):
+                with self.store.transaction() as doc:
+                    tid = f"TASK-{state_name}"
+                    task = state.add_task(doc, tid, "T", [], "feature",
+                                          False, TZ)
+                    task["state"] = state_name
+                    task["worker"] = "old-fixer"  # historical identity only
+                self.run_reconcile(pid_alive=False, status=None)
+                doc = self.store.read()
+                self.assertEqual(doc["tasks"][tid]["state"], state_name)
+                self.assertEqual(doc.get("interventions", {}), {})
+        self.notifier.send.assert_not_called()
+
+    def test_reconcile_error_never_persists_exception_prose(self):
+        """Runtime exception text can carry path/document/env-derived and
+        secret-shaped material the static scan cannot vet; the error event
+        must carry only fixed finite structural metadata."""
+        canary = "D2-SECRET-CANARY-DO-NOT-PERSIST"
+        with mock.patch.object(watchdog.reconcile, "reconcile",
+                               side_effect=RuntimeError(f"boom {canary}")):
+            watchdog.reconcile_worker_state(self.cfg, self.ledger,
+                                            self.notifier, store=self.store)
+        self.notifier.send.assert_not_called()
+        ledger_text = Path(self.ledger.path).read_text(encoding="utf-8")
+        self.assertNotIn(canary, ledger_text)
+        self.assertNotIn(canary,
+                         Path(self.store.path).read_text(encoding="utf-8"))
+        errors = [e for e in self._ledger_lines()
+                  if e.get("event_type") == "RECONCILE_ERROR"]
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0].get("metadata_redacted"),
+                         {"phase": "RECONCILE_TRANSACTION",
+                          "error_code": "RECONCILIATION_FAILED"})
