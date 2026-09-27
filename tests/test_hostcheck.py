@@ -371,7 +371,10 @@ class TestHeadroomCheckGateLevel(unittest.TestCase):
             result = hostcheck.headroom_check(isolation_path=missing_isolation)
             self.assertFalse(result.ok)
             self.assertIn("ports", result.detail)
-            self.assertIn("error", result.fields["ports"])
+            # C-16: the durable representation of an unreadable signal is
+            # the finite code, never exception prose.
+            self.assertEqual(result.fields["ports"],
+                             {"error_code": "OBSERVATION_FAILED"})
 
 
 if __name__ == "__main__":

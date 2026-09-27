@@ -489,8 +489,14 @@ class Preflight:
             started = time.monotonic()
             try:
                 gate = getattr(self, method)()
-            except Exception as exc:  # noqa: BLE001 - a broken gate is a failed gate
-                gate = Gate(name, True, False, f"gate raised: {redact.scrub(repr(exc))}")
+            except Exception:  # noqa: BLE001 - a broken gate is a failed gate.
+                # C-16: the gate's identity plus FAIL is the durable
+                # evidence; exception prose is never persisted to the
+                # ledger or preflight.json (finite code instead).
+                gate = Gate(name, True, False,
+                            "gate raised: GATE_EVALUATION_FAILED "
+                            "(exception content withheld from durable evidence)",
+                            {"error_code": "GATE_EVALUATION_FAILED"})
             duration_ms = round((time.monotonic() - started) * 1000, 1)
             self.results.append(gate)
             self.ledger.append("PREFLIGHT_GATE", outcome="PASS" if gate.ok else "FAIL",

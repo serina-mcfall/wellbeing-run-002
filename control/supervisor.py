@@ -1670,9 +1670,14 @@ class Supervisor:
         while not self.stopping:
             try:
                 self.tick()
-            except Exception as exc:  # noqa: BLE001 - the loop must survive its own bugs
+            except Exception:  # noqa: BLE001 - the loop must survive its own bugs.
+                # C-16: fixed finite structural metadata only. Runtime
+                # exception prose can carry paths, document fragments and
+                # env-derived text the static secret scan cannot vet, so
+                # nothing exception-derived is durable ledger evidence.
                 self.log("SUPERVISOR_ERROR", outcome="ERROR", activity_class="FAILED_WORK",
-                         metadata_redacted={"error": repr(exc)[:600]})
+                         metadata_redacted={"phase": "SUPERVISOR_TICK",
+                                            "error_code": "TICK_FAILED"})
             self._interruptible_sleep(self.cfg.poll_seconds)
         self.log("SUPERVISOR_STOPPED", outcome="STOPPED", activity_class="ORCHESTRATION")
         return 0

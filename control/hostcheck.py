@@ -333,6 +333,12 @@ def headroom_check(root: Path | None = None,
     """Evaluates all six signals. Fails closed per-signal on any
     HostCheckError and names every failing or unreadable signal - never
     stops at the first problem found.
+
+    C-16: an unreadable signal is recorded as the finite
+    OBSERVATION_FAILED code, never the exception text - this result
+    is persisted durably through PREFLIGHT_GATE / preflight.json.
+    Observation failure stays distinct from threshold failure, which
+    keeps its real measured values and ok=False.
     """
     root = root or config.REPO_ROOT
     problems: list[str] = []
@@ -346,9 +352,9 @@ def headroom_check(root: Path | None = None,
                          "threshold": CPU_LOAD_FACTOR * cpus, "ok": ok}
         if not ok:
             problems.append(f"cpu: load1 {load1} exceeds {CPU_LOAD_FACTOR} x {cpus} cpus")
-    except HostCheckError as exc:
-        problems.append(f"cpu: {exc}")
-        fields["cpu"] = {"error": str(exc)}
+    except HostCheckError:
+        problems.append("cpu: OBSERVATION_FAILED")
+        fields["cpu"] = {"error_code": "OBSERVATION_FAILED"}
 
     try:
         mem_available = read_mem_available_bytes()
@@ -357,9 +363,9 @@ def headroom_check(root: Path | None = None,
                          "threshold_bytes": RAM_MIN_BYTES, "ok": ok}
         if not ok:
             problems.append(f"ram: {mem_available} bytes available, below {RAM_MIN_BYTES}")
-    except HostCheckError as exc:
-        problems.append(f"ram: {exc}")
-        fields["ram"] = {"error": str(exc)}
+    except HostCheckError:
+        problems.append("ram: OBSERVATION_FAILED")
+        fields["ram"] = {"error_code": "OBSERVATION_FAILED"}
 
     try:
         free_bytes = read_disk_free_bytes(root)
@@ -367,9 +373,9 @@ def headroom_check(root: Path | None = None,
         fields["disk"] = {"free_bytes": free_bytes, "threshold_bytes": DISK_MIN_BYTES, "ok": ok}
         if not ok:
             problems.append(f"disk: {free_bytes} bytes free, below {DISK_MIN_BYTES}")
-    except HostCheckError as exc:
-        problems.append(f"disk: {exc}")
-        fields["disk"] = {"error": str(exc)}
+    except HostCheckError:
+        problems.append("disk: OBSERVATION_FAILED")
+        fields["disk"] = {"error_code": "OBSERVATION_FAILED"}
 
     try:
         allocated, legacy_free, max_handles = read_fd_capacity()
@@ -380,9 +386,9 @@ def headroom_check(root: Path | None = None,
                         "threshold": FD_MIN_REMAINING, "ok": ok}
         if not ok:
             problems.append(f"fd: {remaining} remaining, below {FD_MIN_REMAINING}")
-    except HostCheckError as exc:
-        problems.append(f"fd: {exc}")
-        fields["fd"] = {"error": str(exc)}
+    except HostCheckError:
+        problems.append("fd: OBSERVATION_FAILED")
+        fields["fd"] = {"error_code": "OBSERVATION_FAILED"}
 
     try:
         max_watches, max_instances = read_inotify_ceilings()
@@ -401,9 +407,9 @@ def headroom_check(root: Path | None = None,
             problems.append(
                 f"inotify: {instances_used} instances exceed 50% of {max_instances}"
             )
-    except HostCheckError as exc:
-        problems.append(f"inotify: {exc}")
-        fields["inotify"] = {"error": str(exc)}
+    except HostCheckError:
+        problems.append("inotify: OBSERVATION_FAILED")
+        fields["inotify"] = {"error_code": "OBSERVATION_FAILED"}
 
     try:
         lo, hi = read_candidate_port_range(isolation_path)
@@ -413,9 +419,9 @@ def headroom_check(root: Path | None = None,
                            "threshold": PORT_MIN_FREE, "ok": ok}
         if not ok:
             problems.append(f"ports: only {free_count} free in [{lo}, {hi}], need {PORT_MIN_FREE}")
-    except HostCheckError as exc:
-        problems.append(f"ports: {exc}")
-        fields["ports"] = {"error": str(exc)}
+    except HostCheckError:
+        problems.append("ports: OBSERVATION_FAILED")
+        fields["ports"] = {"error_code": "OBSERVATION_FAILED"}
 
     if problems:
         return CheckResult(False, "; ".join(problems), fields)
