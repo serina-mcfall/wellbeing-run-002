@@ -26,6 +26,7 @@ from . import (
     manifest,
     migration_lock,
     notify,
+    prompts,
     providers,
     redact,
     routing,
@@ -285,17 +286,62 @@ class Preflight:
                     {"verdict": review.verdict, "duration_ms": result["duration_ms"],
                      "tail": text[-400:]})
 
+    def _observer_evidence_snapshot(self) -> dict:
+        """Representative pre-T+00 evidence for the Observer gate.
+
+        Built to the same shape as Supervisor.observer_evidence so the
+        gate feeds the Observer what production feeds it; the two key
+        sets are test-pinned equal, so a field added to one and not the
+        other fails loudly rather than quietly degrading the gate. Uses
+        the real state document when one exists, and an initial document
+        otherwise - preflight legitimately runs before `ctl init`.
+        """
+        store = state_mod.Store(tz=self.tz)
+        doc = store.read() if store.exists() else state_mod.initial_document(
+            self.cfg.experiment_id, self.cfg.protocol_version)
+        return {
+            "clock": "T-pre",
+            "tasks": {t["id"]: {"state": t["state"], "attempts": t["attempts"],
+                                "pr": t.get("pr")} for t in doc["tasks"].values()},
+            "prs": {k: {"review_verdict": v.get("review_verdict"),
+                        "review_cycles": v.get("review_cycles"),
+                        "repair_cycles": v.get("repair_cycles"),
+                        "merged": v.get("merged")} for k, v in doc["prs"].items()},
+            "providers": {p: r["state"] for p, r in doc["providers"].items()},
+            "budget": budget.summary(doc),
+            "counters": doc["counters"],
+            "migration_lock": doc["migration_lock"],
+            "ledger_event_count": self.ledger.count(),
+        }
+
     def gate_grok_observer(self) -> Gate:
+        """C-17: exercise the REAL Observer path, not a substitute probe.
+
+        Protocol v2 §"Preflight" is "realistic, not synthetic". This gate
+        previously wrote its own trivial prompt ("State one FACT ... then
+        stop"), which completes in one or two turns - so it proved the
+        CLI, transport and timeout plumbing worked while saying nothing
+        about the Observer the run actually uses, whose prompt requires
+        several tool-using turns. It therefore PASSED in preflight while
+        the production Observer failed with "max turns reached" (observed
+        in Trial 0, Scenario C). The gate now renders exactly the prompt
+        production renders, against a representative evidence snapshot.
+
+        Fail-closed semantics are deliberately unchanged: a non-zero exit
+        FAILs and a timeout FAILs, and neither the Observer's prompt
+        content nor its timeout/turn bounds are relaxed here. If this
+        gate now fails, the correct response is to fix the Observer, not
+        to weaken the gate.
+        """
         spec = self.cfg.observer
-        prompt_path = config.OBSERVER_DIR / "preflight-prompt.md"
         config.OBSERVER_DIR.mkdir(parents=True, exist_ok=True)
-        prompt_path.write_text(
-            "Read-only bounded observation probe for Experiment Run 002.\n"
-            "Do not modify anything and do not use the web.\n"
-            "State one FACT about this repository from `git log -1 --oneline`, "
-            "then stop. Label it FACT.\n",
-            encoding="utf-8",
-        )
+        evidence_path = config.OBSERVER_DIR / "preflight-evidence.json"
+        evidence_path.write_text(
+            json.dumps(self._observer_evidence_snapshot(), indent=2),
+            encoding="utf-8")
+        prompt_path = config.OBSERVER_DIR / "preflight-prompt.md"
+        prompt_path.write_text(prompts.observer(str(evidence_path), "T-pre"),
+                               encoding="utf-8")
         command = ["grok", "--prompt-file", str(prompt_path), "--output-format", "json",
                    "--disable-web-search", "--max-turns", str(spec["max_turns"]),
                    "--cwd", str(config.REPO_ROOT)]

@@ -23,7 +23,7 @@
   "tmux_session": "run-002",
 
   "github": {
-    "repo": "UNASSIGNED",
+    "repo": "serina-mcfall/wellbeing-run-002",
     "main_branch": "main",
     "required_checks": ["ci"]
   },
@@ -75,9 +75,9 @@
 
   "observer": {
     "model": null,
-    "max_turns": 5,
+    "max_turns": 12,
     "soft_timeout_seconds": 120,
-    "hard_timeout_seconds": 180,
+    "hard_timeout_seconds": 330,
     "web_enabled": false,
     "retry_once_fresh": true
   },
