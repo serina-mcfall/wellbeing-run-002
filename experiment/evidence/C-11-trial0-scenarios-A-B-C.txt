@@ -1,0 +1,122 @@
+C-11 Trial 0 - live demonstrations, Scenarios B, A and C
+Captured 2026-09-28 from the disposable trial clone; real repo HEAD ca5d290f2afb911748189d0d095da12d2ec0683e.
+
+ISOLATION
+  Disposable git clone (not a worktree) outside the repository; every durable path in
+  control/config.py derives from REPO_ROOT, so the trial ledger/state/heartbeat/PID files
+  are wholly disjoint from the real .runtime/. Trial tmux_session renamed to 'trial0'.
+  All trial processes launched with OPENROUTER_API_KEY unset. ctl start was NEVER run;
+  no baseline.json and no manifest were produced in either tree. Real T+00 NOT_STARTED.
+
+DECLARED TRIAL DEVIATIONS (trial clone only, never the real configuration)
+  1. started_at was written directly into the trial state.json to start the trial clock.
+     Required because tick() returns at 'if cs is None' before reaching detect_stale.
+  2. concurrency.max_builders = 0; providers claude+codex = UNAVAILABLE;
+     budget.hard_stop = true. These neutralise dispatch and metered calls.
+  3. Scenario A agent processes were benign OS subprocesses (sleep), not real LLM/workmux
+     agents. detect_stale observes only PID liveness, so the exercised code path is
+     identical; this substitution is recorded rather than claimed as a full agent launch.
+
+SCENARIO B - dead Supervisor recovery (PASS)
+  old Supervisor pid 133254 -> SIGKILL at 10:38:45.807 -> new Supervisor pid 135908
+  detection 6.29 s (bound: watchdog CHECK_SECONDS 30) | total kill->RECOVERED 11.30 s
+  restarted Supervisor continued ticking: heartbeat advanced 10:39:24 -> 10:39:57 under pid 135908
+  exactly one SUPERVISOR_UNHEALTHY and one SUPERVISOR_RESTARTED; zero SUPERVISOR_CRASH_LOOP
+  NOT VERIFIED: the ATTENTION notification attempt - see the E1 finding in PREFLIGHT-FINDINGS.md
+
+SCENARIO A - stalled worker, died-silently path (PASS)
+  healthy TASK-001 / task-001-builder / agent pid 160563 (left alive)
+  faulted TASK-002 / task-002-builder / agent pid 160566 (SIGKILL at 10:55:42.714)
+  detection 14.31 s (bound: supervisor poll_seconds 30)
+  TASK-002 ACTIVE -> STALE -> READY; worker record task-002-builder removed
+  TASK-001 remained ACTIVE with its worker record unchanged; no false stale
+  no dispatch/provider/GitHub activity: BUILDER_DISPATCHED 0, WORKER_STARTED 0, PR_* 0,
+  MERGE* 0, trial worktrees 1 (checkout only), tmux sessions none.
+  The single JEV_DECISION is a fallback, not a provider call (source=fallback,
+  model=null, cost_source=none, all token/cost/duration fields null).
+
+RAW TRIAL LEDGER (verbatim, 15 events)
+  {"timestamp": "2026-09-28T10:37:44.545+13:00", "experiment_id": "run-002", "event_type": "CONTROL_PLANE_INITIALISED", "activity_class": "ORCHESTRATION", "outcome": "OK", "metadata_redacted": {"tasks": ["TASK-001", "TASK-002", "TASK-003", "TASK-004", "TASK-005", "TASK-006", "TASK-007", "TASK-008", "TASK-009"], "budget_usd": 25.0}}
+  {"timestamp": "2026-09-28T10:37:55.768+13:00", "experiment_id": "run-002", "event_type": "SUPERVISOR_STARTED", "activity_class": "ORCHESTRATION", "outcome": "RUNNING", "metadata_redacted": {"pid": 133254}}
+  {"timestamp": "2026-09-28T10:38:19.491+13:00", "experiment_id": "run-002", "event_type": "WATCHDOG_STARTED", "activity_class": "ORCHESTRATION", "outcome": "RUNNING", "metadata_redacted": {"pid": 134770}}
+  {"timestamp": "2026-09-28T10:38:19.533+13:00", "experiment_id": "run-002", "event_type": "RESOURCE_SAMPLE", "activity_class": "OBSERVATION", "outcome": "OBSERVED", "metadata_redacted": {"load1": 0.95, "logical_cpus": 16, "cpu_observed": true, "mem_available_bytes": 43373748224, "ram_observed": true, "disk_free_bytes": 493109186560, "disk_observed": true, "inotify_instances_used": 52, "inotify_watches_used": 5610, "inotify_max_instances": 128, "inotify_max_watches": 524288, "inotify_observed": true, "ports_owned": 0, "port_range_lo": 3200, "port_range_hi": 3299, "ports_listening_in_range": 0, "ports_observed": true, "worker_records": 0, "live_worker_entries": 0, "verified_agents": 0, "processes_observed": true, "worktrees_active": 0, "worktrees_retained": 0, "worktrees_registered_managed": 0, "worktrees_orphan": 0, "worktrees_observed": true, "browser_count": null, "browser_observed": false}}
+  {"timestamp": "2026-09-28T10:38:52.101+13:00", "experiment_id": "run-002", "event_type": "SUPERVISOR_UNHEALTHY", "activity_class": "ORCHESTRATION", "outcome": "RESTARTING", "metadata_redacted": {"pid": 133254, "alive": false}}
+  {"timestamp": "2026-09-28T10:38:52.186+13:00", "experiment_id": "run-002", "event_type": "SUPERVISOR_STARTED", "activity_class": "ORCHESTRATION", "outcome": "RUNNING", "metadata_redacted": {"pid": 135908}}
+  {"timestamp": "2026-09-28T10:38:57.110+13:00", "experiment_id": "run-002", "event_type": "SUPERVISOR_RESTARTED", "activity_class": "ORCHESTRATION", "outcome": "RECOVERED", "metadata_redacted": {"pid": 135908}}
+  {"timestamp": "2026-09-28T10:40:33.396+13:00", "experiment_id": "run-002", "event_type": "SUPERVISOR_STOPPED", "activity_class": "ORCHESTRATION", "outcome": "STOPPED"}
+  {"timestamp": "2026-09-28T10:55:24.335+13:00", "experiment_id": "run-002", "event_type": "SUPERVISOR_STARTED", "activity_class": "ORCHESTRATION", "outcome": "RUNNING", "metadata_redacted": {"pid": 160980}}
+  {"timestamp": "2026-09-28T10:55:24.462+13:00", "experiment_id": "run-002", "event_type": "JEV_DECISION", "activity_class": "ORCHESTRATION", "provider": "openrouter", "model": null, "task_id": "TASK-001", "input_tokens": null, "output_tokens": null, "actual_cost_usd": null, "cost_source": "none", "duration_ms": null, "outcome": "HEALTHY", "metadata_redacted": {"source": "fallback", "kind": "worker_health", "confidence": null, "reason": "jev disabled, unconfigured, or budget-blocked", "error": null}}
+  {"timestamp": "2026-09-28T10:55:57.015+13:00", "experiment_id": "run-002", "event_type": "TASK_STATE_CHANGE", "activity_class": "ORCHESTRATION", "task_id": "TASK-002", "state_before": "ACTIVE", "state_after": "STALE", "outcome": "STALE", "metadata_redacted": {"reason": "agent process vanished without reporting an outcome"}}
+  {"timestamp": "2026-09-28T10:55:57.024+13:00", "experiment_id": "run-002", "event_type": "STALE_DETECTED", "activity_class": "FAILED_WORK", "task_id": "TASK-002", "outcome": "STALE", "metadata_redacted": {"reason": "agent process vanished without reporting an outcome", "phase": "RUNNING"}}
+  {"timestamp": "2026-09-28T10:55:57.030+13:00", "experiment_id": "run-002", "event_type": "NOTIFICATION", "activity_class": "ORCHESTRATION", "outcome": "FAILED", "human_intervention": false, "metadata_redacted": {"severity": "ATTENTION", "title": "TASK-002 is stale", "delivery": {"ok": false, "reason": "DISCORD_WEBHOOK_URL_NOT_SET"}}}
+  {"timestamp": "2026-09-28T10:55:57.060+13:00", "experiment_id": "run-002", "event_type": "TASK_STATE_CHANGE", "activity_class": "ORCHESTRATION", "task_id": "TASK-002", "state_before": "STALE", "state_after": "READY", "outcome": "READY", "metadata_redacted": {"reason": "recycled after stale detection"}}
+  {"timestamp": "2026-09-28T10:56:54.057+13:00", "experiment_id": "run-002", "event_type": "SUPERVISOR_STOPPED", "activity_class": "ORCHESTRATION", "outcome": "STOPPED"}
+
+FINAL TRIAL STATE (tasks and worker records of interest)
+  TASK-001: state=ACTIVE worker=task-001-builder attempts=0
+  TASK-002: state=READY worker=task-002-builder attempts=0
+  doc['workers'] keys: ['task-001-builder']
+  doc['started_at'] (trial clock): 2026-09-28T10:55:03+13:00
+
+FINAL TRIAL HEARTBEAT
+  pid=160980 at=2026-09-28T10:56:29+13:00 phase=NORMAL elapsed_hours=0.024
+
+SCENARIO C - long Observer must not cause false Supervisor death (PASS)
+  Run 2026-09-28 in the same disposable trial clone, same declared deviations, same
+  neutralisation (max_builders=0, claude+codex UNAVAILABLE, budget.hard_stop,
+  OPENROUTER_API_KEY unset, ctl start never run). may(observation) is True by design -
+  both paused providers' policies allow observation - so the Observer was not blocked.
+  The REAL Observer path was used: tick() -> run_declared('observer', 420, run_observer)
+  -> grok CLI subprocess. The real 30-minute OBSERVER_INTERVAL_SECONDS was waited out;
+  production timing was NOT patched.
+
+  Observer start (busy declared) : 2026-09-28T11:53:17+13:00
+  Observer end (OBSERVATION)     : 2026-09-28T11:56:24.924+13:00
+  busy_with                      : observer
+  busy_until (declared window)   : 2026-09-28T12:00:17+13:00  (420 s = hard 180 x 2 + 60 margin)
+  elapsed busy span              : ~187 s, finishing ~233 s inside the declared bound
+  heartbeat froze at             : 2026-09-28T11:53:17+13:00 (no heartbeat while busy, by design)
+  MAX heartbeat age while busy   : 184 s  vs heartbeat_stale_seconds = 120 s
+  busy samples observed          : 35 consecutive
+  SUPERVISOR_UNHEALTHY in window : 0
+  SUPERVISOR_RESTARTED in window : 0
+  Supervisor pid throughout      : 190513 (unchanged before, during and after)
+  Watchdog demonstrably looping  : 7 RESOURCE_SAMPLE events inside the window
+  normal heartbeat resumed       : 2026-09-28T11:56:24 (age 2 s, busy_with=None, busy_until=None)
+
+  C-11 FALSE-DEATH DEMONSTRATION: PASS. The Watchdog observed a heartbeat 184 s stale -
+  64 s beyond the ordinary threshold - and correctly declined to restart, because the
+  Supervisor had declared a bounded reason still in force.
+
+  SEPARATE DEFECT, NOT PART OF THE FALSE-DEATH RESULT: the Observer itself returned
+  outcome=FAILED. The grok CLI ran twice (retry_once_fresh) for ~86 s each, produced
+  3175 bytes of stdout, and exited 1 with stderr 'Error: max turns reached'.
+  timed_out=False soft_timeout_exceeded=False duration_ms=86376.7 (final attempt).
+  It executed within bounds but produced no usable observation. Classified separately;
+  it does not affect the false-death property demonstrated above.
+
+  SCENARIO C LEDGER SLICE (verbatim)
+    {"timestamp": "2026-09-28T11:21:06.281+13:00", "experiment_id": "run-002", "event_type": "SUPERVISOR_STARTED", "activity_class": "ORCHESTRATION", "outcome": "RUNNING", "metadata_redacted": {"pid": 190513}}
+    {"timestamp": "2026-09-28T11:21:06.395+13:00", "experiment_id": "run-002", "event_type": "TASK_STATE_CHANGE", "activity_class": "ORCHESTRATION", "task_id": "TASK-001", "state_before": "ACTIVE", "state_after": "STALE", "outcome": "STALE", "metadata_redacted": {"reason": "agent process vanished without reporting an outcome"}}
+    {"timestamp": "2026-09-28T11:21:06.403+13:00", "experiment_id": "run-002", "event_type": "STALE_DETECTED", "activity_class": "FAILED_WORK", "task_id": "TASK-001", "outcome": "STALE", "metadata_redacted": {"reason": "agent process vanished without reporting an outcome", "phase": "RUNNING"}}
+    {"timestamp": "2026-09-28T11:21:06.410+13:00", "experiment_id": "run-002", "event_type": "NOTIFICATION", "activity_class": "ORCHESTRATION", "outcome": "FAILED", "human_intervention": false, "metadata_redacted": {"severity": "ATTENTION", "title": "TASK-001 is stale", "delivery": {"ok": false, "reason": "DISCORD_WEBHOOK_URL_NOT_SET"}}}
+    {"timestamp": "2026-09-28T11:21:06.438+13:00", "experiment_id": "run-002", "event_type": "TASK_STATE_CHANGE", "activity_class": "ORCHESTRATION", "task_id": "TASK-001", "state_before": "STALE", "state_after": "READY", "outcome": "READY", "metadata_redacted": {"reason": "recycled after stale detection"}}
+    {"timestamp": "2026-09-28T11:21:09.290+13:00", "experiment_id": "run-002", "event_type": "WATCHDOG_STARTED", "activity_class": "ORCHESTRATION", "outcome": "RUNNING", "metadata_redacted": {"pid": 190675}}
+    {"timestamp": "2026-09-28T11:21:09.353+13:00", "experiment_id": "run-002", "event_type": "RESOURCE_SAMPLE", "activity_class": "OBSERVATION", "outcome": "OBSERVED", "metadata_redacted": {"load1": 1.47, "logical_cpus": 16, "cpu_observed": true, "mem_available_bytes": 43002568704, "ram_observed": true, "disk_free_bytes": 492856430592, "disk_observed": true, "inotify_instances_used": 52, "inotify_watches_used": 19312, "inotify_max_instances": 128, "inotify_max_watches": 524288, "inotify_observed": true, "ports_owned": 0, "port_range_lo": 3200, "port_range_hi": 3299, "ports_listening_in_range": 0, "ports_observed": true, "worker_records": 0, "live_worker_entries": 0, "verified_agents": 0, "processes_observed": true, "worktrees_active": 0, "worktrees_retained": 0, "worktrees_registered_managed": 0, "worktrees_orphan": 0, "worktrees_observed": true, "browser_count": null, "browser_observed": false}}
+    {"timestamp": "2026-09-28T11:26:33.379+13:00", "experiment_id": "run-002", "event_type": "RESOURCE_SAMPLE", "activity_class": "OBSERVATION", "outcome": "OBSERVED", "metadata_redacted": {"load1": 0.12, "logical_cpus": 16, "cpu_observed": true, "mem_available_bytes": 42951077888, "ram_observed": true, "disk_free_bytes": 492859043840, "disk_observed": true, "inotify_instances_used": 52, "inotify_watches_used": 19312, "inotify_max_instances": 128, "inotify_max_watches": 524288, "inotify_observed": true, "ports_owned": 0, "port_range_lo": 3200, "port_range_hi": 3299, "ports_listening_in_range": 0, "ports_observed": true, "worker_records": 0, "live_worker_entries": 0, "verified_agents": 0, "processes_observed": true, "worktrees_active": 0, "worktrees_retained": 0, "worktrees_registered_managed": 0, "worktrees_orphan": 0, "worktrees_observed": true, "browser_count": null, "browser_observed": false}}
+    {"timestamp": "2026-09-28T11:31:57.574+13:00", "experiment_id": "run-002", "event_type": "RESOURCE_SAMPLE", "activity_class": "OBSERVATION", "outcome": "OBSERVED", "metadata_redacted": {"load1": 0.3, "logical_cpus": 16, "cpu_observed": true, "mem_available_bytes": 42929463296, "ram_observed": true, "disk_free_bytes": 492858957824, "disk_observed": true, "inotify_instances_used": 52, "inotify_watches_used": 19312, "inotify_max_instances": 128, "inotify_max_watches": 524288, "inotify_observed": true, "ports_owned": 0, "port_range_lo": 3200, "port_range_hi": 3299, "ports_listening_in_range": 0, "ports_observed": true, "worker_records": 0, "live_worker_entries": 0, "verified_agents": 0, "processes_observed": true, "worktrees_active": 0, "worktrees_retained": 0, "worktrees_registered_managed": 0, "worktrees_orphan": 0, "worktrees_observed": true, "browser_count": null, "browser_observed": false}}
+    {"timestamp": "2026-09-28T11:37:21.937+13:00", "experiment_id": "run-002", "event_type": "RESOURCE_SAMPLE", "activity_class": "OBSERVATION", "outcome": "OBSERVED", "metadata_redacted": {"load1": 0.04, "logical_cpus": 16, "cpu_observed": true, "mem_available_bytes": 42925572096, "ram_observed": true, "disk_free_bytes": 492859322368, "disk_observed": true, "inotify_instances_used": 52, "inotify_watches_used": 19312, "inotify_max_instances": 128, "inotify_max_watches": 524288, "inotify_observed": true, "ports_owned": 0, "port_range_lo": 3200, "port_range_hi": 3299, "ports_listening_in_range": 0, "ports_observed": true, "worker_records": 0, "live_worker_entries": 0, "verified_agents": 0, "processes_observed": true, "worktrees_active": 0, "worktrees_retained": 0, "worktrees_registered_managed": 0, "worktrees_orphan": 0, "worktrees_observed": true, "browser_count": null, "browser_observed": false}}
+    {"timestamp": "2026-09-28T11:42:42.117+13:00", "experiment_id": "run-002", "event_type": "RESOURCE_SAMPLE", "activity_class": "OBSERVATION", "outcome": "OBSERVED", "metadata_redacted": {"load1": 0.22, "logical_cpus": 16, "cpu_observed": true, "mem_available_bytes": 42947039232, "ram_observed": true, "disk_free_bytes": 492859158528, "disk_observed": true, "inotify_instances_used": 52, "inotify_watches_used": 19312, "inotify_max_instances": 128, "inotify_max_watches": 524288, "inotify_observed": true, "ports_owned": 0, "port_range_lo": 3200, "port_range_hi": 3299, "ports_listening_in_range": 0, "ports_observed": true, "worker_records": 0, "live_worker_entries": 0, "verified_agents": 0, "processes_observed": true, "worktrees_active": 0, "worktrees_retained": 0, "worktrees_registered_managed": 0, "worktrees_orphan": 0, "worktrees_observed": true, "browser_count": null, "browser_observed": false}}
+    {"timestamp": "2026-09-28T11:47:59.173+13:00", "experiment_id": "run-002", "event_type": "RESOURCE_SAMPLE", "activity_class": "OBSERVATION", "outcome": "OBSERVED", "metadata_redacted": {"load1": 0.91, "logical_cpus": 16, "cpu_observed": true, "mem_available_bytes": 42927554560, "ram_observed": true, "disk_free_bytes": 492859056128, "disk_observed": true, "inotify_instances_used": 52, "inotify_watches_used": 19312, "inotify_max_instances": 128, "inotify_max_watches": 524288, "inotify_observed": true, "ports_owned": 0, "port_range_lo": 3200, "port_range_hi": 3299, "ports_listening_in_range": 0, "ports_observed": true, "worker_records": 0, "live_worker_entries": 0, "verified_agents": 0, "processes_observed": true, "worktrees_active": 0, "worktrees_retained": 0, "worktrees_registered_managed": 0, "worktrees_orphan": 0, "worktrees_observed": true, "browser_count": null, "browser_observed": false}}
+    {"timestamp": "2026-09-28T11:53:15.710+13:00", "experiment_id": "run-002", "event_type": "RESOURCE_SAMPLE", "activity_class": "OBSERVATION", "outcome": "OBSERVED", "metadata_redacted": {"load1": 0.88, "logical_cpus": 16, "cpu_observed": true, "mem_available_bytes": 42877612032, "ram_observed": true, "disk_free_bytes": 492858683392, "disk_observed": true, "inotify_instances_used": 52, "inotify_watches_used": 19312, "inotify_max_instances": 128, "inotify_max_watches": 524288, "inotify_observed": true, "ports_owned": 0, "port_range_lo": 3200, "port_range_hi": 3299, "ports_listening_in_range": 0, "ports_observed": true, "worker_records": 0, "live_worker_entries": 0, "verified_agents": 0, "processes_observed": true, "worktrees_active": 0, "worktrees_retained": 0, "worktrees_registered_managed": 0, "worktrees_orphan": 0, "worktrees_observed": true, "browser_count": null, "browser_observed": false}}
+    {"timestamp": "2026-09-28T11:56:24.924+13:00", "experiment_id": "run-002", "event_type": "OBSERVATION", "activity_class": "OBSERVATION", "role": "observer", "provider": "grok", "model": null, "duration_ms": 86376.7, "outcome": "FAILED", "metadata_redacted": {"timed_out": false, "soft_timeout_exceeded": false, "report": "/tmp/claude-1000/-home-serina-wellbeing-agent-experiment-agent-run-002/f1f61663-aa3d-479f-98d1-d67ba4d69238/scratchpad/trial0/agent-run-002/.runtime/observer/report-1790549784.json"}}
+    {"timestamp": "2026-09-28T11:57:50.045+13:00", "experiment_id": "run-002", "event_type": "SUPERVISOR_STOPPED", "activity_class": "ORCHESTRATION", "outcome": "STOPPED"}
+
+  HEARTBEAT SAMPLES - first busy / peak age / first after (verbatim)
+    2026-09-28T11:53:18 pid=190513 hb_at=2026-09-28T11:53:17+13:00 hb_age_s=1 busy_with=observer busy_until=2026-09-28T12:00:17+13:00
+    2026-09-28T11:56:21 pid=190513 hb_at=2026-09-28T11:53:17+13:00 hb_age_s=184 busy_with=observer busy_until=2026-09-28T12:00:17+13:00
+    2026-09-28T11:56:26 pid=190513 hb_at=2026-09-28T11:56:24+13:00 hb_age_s=2 busy_with=None busy_until=None
+
+OUTSTANDING: the 25-minute no-progress variant of Scenario A not run. The Observer
+functionality defect above (max turns reached) is open and classified separately.
+C-11 therefore remains OPEN / PARTIAL pending review.
