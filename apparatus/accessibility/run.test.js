@@ -4,7 +4,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const { chromium } = require('playwright');
-const { runAccessibilityChecks, walkTabOrder } = require('./run');
+const { runAccessibilityChecks, walkTabOrder, startTicks, browserPid } = require('./run');
 
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
@@ -208,4 +208,112 @@ test('walkTabOrder: A->B->A before the expected count is reached is still a genu
   } finally {
     await browser.close();
   }
+});
+
+// ---------------------------------------------------------------- C-05.1
+// Durable per-attempt evidence and browser lifecycle. These exercise the
+// REAL browser deliberately: the control-plane suite (tests/
+// test_c05_evidence_persistence.py) runs in CI where apparatus/
+// node_modules is absent, so the real-Chromium proofs belong here.
+
+const C05_ROOT = path.join(__dirname, 'artifacts', 'c05-attempts');
+
+function attemptDir(name) {
+  const dir = path.join(C05_ROOT, name, 'accessibility');
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+test('--out-json writes the COMPLETE result, details included, to the given path', async () => {
+  const outDir = attemptDir('attempt-0001');
+  const outJson = path.join(outDir, 'result.json');
+  await runAccessibilityChecks({ url: VIOLATIONS_URL, sha: SHA_B, outDir, outJson });
+
+  const persisted = JSON.parse(fs.readFileSync(outJson, 'utf8'));
+  assert.equal(persisted.checks.length, 9);
+  // details is the part that only ever existed in memory before C-05.1.
+  assert.ok(persisted.details.AXE_SCAN.violations.length > 0);
+  assert.ok(Array.isArray(persisted.details.TOUCH_TARGETS.offenders));
+  for (const c of persisted.checks) assert.equal(c.sha, SHA_B);
+});
+
+test('screenshots stay inside the per-attempt directory and two attempts at the same SHA keep both', async () => {
+  const first = attemptDir('attempt-0002');
+  const second = attemptDir('attempt-0003');
+  await runAccessibilityChecks({ url: CLEAN_URL, sha: SHA_A, outDir: first });
+  const firstShot = path.join(first, `${SHA_A}-fullpage.png`);
+  const firstBytes = fs.readFileSync(firstShot);
+
+  await runAccessibilityChecks({ url: VIOLATIONS_URL, sha: SHA_A, outDir: second });
+  const secondShot = path.join(second, `${SHA_A}-fullpage.png`);
+
+  // Same SHA, same filename — only the attempt directory keeps them apart.
+  assert.ok(fs.existsSync(firstShot), 'the first attempt screenshot must survive');
+  assert.ok(fs.existsSync(secondShot));
+  assert.deepEqual(fs.readFileSync(firstShot), firstBytes, 'attempt 1 must be untouched');
+  assert.notDeepEqual(fs.readFileSync(secondShot), firstBytes, 'attempts must be distinct');
+});
+
+test('browser sidecar carries pid + start_ticks and is CLOSED after a normal run', async () => {
+  const outDir = attemptDir('attempt-0004');
+  await runAccessibilityChecks({ url: CLEAN_URL, sha: SHA_A, outDir });
+
+  const sidecar = JSON.parse(fs.readFileSync(path.join(outDir, 'browser.json'), 'utf8'));
+  assert.equal(typeof sidecar.pid, 'number');
+  assert.ok(sidecar.pid > 0);
+  // (pid, start_ticks) is C-09's identity: a reused pid cannot fake it.
+  assert.equal(typeof sidecar.start_ticks, 'number');
+  assert.equal(sidecar.state, 'CLOSED');
+  assert.equal(typeof sidecar.opened_at, 'string');
+  assert.equal(typeof sidecar.closed_at, 'string');
+});
+
+test('startTicks derives exactly what control/proc.py::start_ticks reads', async () => {
+  // Proven against this very process, so the assertion is deterministic
+  // and needs no browser: field 22 of /proc/<pid>/stat, taken after the
+  // LAST ')'. If these two derivations ever diverge, C-09's
+  // proc.verified_alive(pid, start_ticks) would silently stop matching.
+  const stat = fs.readFileSync(`/proc/${process.pid}/stat`, 'utf8');
+  const expected = parseInt(stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/)[19], 10);
+  assert.ok(Number.isInteger(expected));
+  assert.equal(startTicks(process.pid), expected);
+});
+
+test('startTicks refuses to guess for an absent or invalid pid', async () => {
+  assert.equal(startTicks(null), null);
+  assert.equal(startTicks(0), null);
+  assert.equal(startTicks(-1), null);
+  assert.equal(startTicks(2147483646), null); // no such process
+});
+
+test('browserPid finds the launched browser, and the sidecar never holds half an identity', async () => {
+  const outDir = attemptDir('attempt-0005');
+  const browser = await chromium.launch();
+  try {
+    const pid = browserPid();
+    assert.ok(Number.isInteger(pid) && pid > 0, 'the direct child browser must be found');
+    assert.match(fs.readFileSync(`/proc/${pid}/comm`, 'utf8'), /chrome|chromium|headless/i);
+  } finally {
+    await browser.close();
+  }
+
+  await runAccessibilityChecks({ url: CLEAN_URL, sha: SHA_A, outDir });
+  const sidecar = JSON.parse(fs.readFileSync(path.join(outDir, 'browser.json'), 'utf8'));
+  // Either a full (pid, start_ticks) identity or an honest unknown —
+  // never a pid without the start time that makes it unforgeable.
+  const bothKnown = Number.isInteger(sidecar.pid) && Number.isInteger(sidecar.start_ticks);
+  const bothUnknown = sidecar.pid === null && sidecar.start_ticks === null;
+  assert.ok(bothKnown || bothUnknown, JSON.stringify(sidecar));
+});
+
+test('an unwritable outDir does not crash the run — the sidecar simply is not there', async (t) => {
+  const blocked = path.join(C05_ROOT, 'blocked-sidecar');
+  fs.mkdirSync(blocked, { recursive: true });
+  fs.chmodSync(blocked, 0o500);
+  t.after(() => fs.chmodSync(blocked, 0o700));
+  const outDir = path.join(blocked, 'nested');
+
+  const { checks } = await runAccessibilityChecks({ url: CLEAN_URL, sha: SHA_A, outDir });
+  assert.equal(resultFor(checks, 'SCREENSHOTS_ARTIFACTS').result, 'FAIL');
+  assert.equal(fs.existsSync(path.join(outDir, 'browser.json')), false);
 });

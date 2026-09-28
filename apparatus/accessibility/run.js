@@ -29,8 +29,89 @@ const RAPID_CYCLE_MAX_SECONDS = 1; // see checkReducedMotion's limitation note
 const INTERACTIVE_SELECTOR =
   'a[href], button, input:not([type=hidden]), select, textarea, [role="button"], [role="link"], [tabindex]:not([tabindex="-1"])';
 
-async function withPage(url, fn) {
+// C-09 identifies a process by (pid, start_ticks), never by pid alone -
+// a reused pid cannot fake the start time. This is the same value
+// control/proc.py::start_ticks reads: field 22 of /proc/<pid>/stat, taken
+// after the LAST ')' because comm (field 2) may itself contain spaces and
+// parentheses. Null when unreadable - never a guess.
+function startTicks(pid) {
+  if (!pid || pid <= 0) return null;
+  try {
+    const text = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = text.slice(text.lastIndexOf(')') + 1).trim().split(/\s+/);
+    const ticks = parseInt(fields[19], 10);
+    return Number.isNaN(ticks) ? null : ticks;
+  } catch (err) {
+    return null;
+  }
+}
+
+// Written via a temp file and renamed, so a kill mid-write can never leave
+// a torn sidecar that the control plane would misread as "no browser here".
+//
+// An unwritable outDir must not crash the run - checkScreenshots already
+// reports that condition as a FAIL, and turning it into a throw would
+// lose every other check result. It returns false instead, and the
+// control plane records the sidecar's ABSENCE explicitly: a missing
+// sidecar means "unknown", never "no browser was launched".
+function writeSidecar(sidecarPath, record) {
+  try {
+    fs.mkdirSync(path.dirname(sidecarPath), { recursive: true });
+    const tmp = sidecarPath + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(record, null, 2) + '\n');
+    fs.renameSync(tmp, sidecarPath);
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+// The sidecar is written OPEN immediately after launch and only marked
+// CLOSED after browser.close() has actually returned. If this process is
+// killed at any point in between - a hard timeout, a crash - the file
+// stays OPEN and still carries the identity needed to find the browser
+// that was left behind.
+// Playwright's Browser exposes no process handle (only BrowserServer does,
+// and launching a server would bind a websocket port that C-09's listener
+// reconciliation would then have to account for). chromium.launch() spawns
+// the browser as a DIRECT CHILD of this process, so /proc/self/task/*/
+// children names it in one read - no process table scan, no port.
+//
+// Ambiguity is never resolved by guessing: zero or more than one candidate
+// returns null, and the sidecar then records an honestly unknown identity
+// rather than a plausible wrong pid.
+function browserPid() {
+  const kids = [];
+  for (const tid of fs.readdirSync('/proc/self/task')) {
+    try {
+      kids.push(...fs.readFileSync(`/proc/self/task/${tid}/children`, 'utf8')
+        .trim().split(/\s+/).filter(Boolean).map(Number));
+    } catch (err) {
+      // a thread that exited between readdir and read names no children
+    }
+  }
+  const browsers = kids.filter((pid) => {
+    try {
+      return /chrome|chromium|headless/i.test(
+        fs.readFileSync(`/proc/${pid}/comm`, 'utf8'));
+    } catch (err) {
+      return false;
+    }
+  });
+  return browsers.length === 1 ? browsers[0] : null;
+}
+
+async function withPage(url, sidecarPath, fn) {
   const browser = await chromium.launch();
+  const pid = browserPid();
+  const record = {
+    pid,
+    start_ticks: startTicks(pid),
+    state: 'OPEN',
+    opened_at: new Date().toISOString(),
+    closed_at: null,
+  };
+  writeSidecar(sidecarPath, record);
   try {
     const context = await browser.newContext({ viewport: VIEWPORT });
     const page = await context.newPage();
@@ -45,6 +126,9 @@ async function withPage(url, fn) {
     return await fn(page, { response, pageErrors });
   } finally {
     await browser.close();
+    writeSidecar(sidecarPath, {
+      ...record, state: 'CLOSED', closed_at: new Date().toISOString(),
+    });
   }
 }
 
@@ -354,7 +438,7 @@ async function checkScreenshots(page, sha, outDir) {
 
 const SHA_RE = /^[0-9a-f]{40}$/;
 
-async function runAccessibilityChecks({ url, sha, outDir }) {
+async function runAccessibilityChecks({ url, sha, outDir, outJson }) {
   if (typeof url !== 'string' || url.trim().length === 0) {
     throw new Error('url is required');
   }
@@ -365,7 +449,7 @@ async function runAccessibilityChecks({ url, sha, outDir }) {
     throw new Error('outDir is required');
   }
 
-  return withPage(url, async (page, ctx) => {
+  return withPage(url, path.join(outDir, 'browser.json'), async (page, ctx) => {
     const results = {};
     results.RESPONSIVE_375PX = await checkResponsive375(page, ctx);
     results.NO_OVERFLOW_CLIPPING_OVERLAP = await checkOverflow(page);
@@ -385,13 +469,23 @@ async function runAccessibilityChecks({ url, sha, outDir }) {
       artifact_reference: r.artifact_reference || genericArtifact,
     }));
     const details = Object.fromEntries(Object.entries(results).map(([k, r]) => [k, r.detail]));
-    return { checks, details };
+    const payload = { checks, details };
+    // Complete result to a file, not to stdout: the control plane's
+    // bounded runner keeps only a ledger-sized scrubbed tail of stdout,
+    // and a truncated tail is not evidence.
+    if (typeof outJson === 'string' && outJson.trim().length > 0) {
+      fs.mkdirSync(path.dirname(outJson), { recursive: true });
+      fs.writeFileSync(outJson, JSON.stringify(payload, null, 2) + '\n');
+    }
+    return payload;
   });
 }
 
 module.exports = {
   runAccessibilityChecks,
   walkTabOrder,
+  startTicks,
+  browserPid,
   MIN_TOUCH_TARGET_PX,
   RAPID_CYCLE_MAX_SECONDS,
   VIEWPORT,
@@ -399,9 +493,12 @@ module.exports = {
 };
 
 if (require.main === module) {
-  const [, , url, sha, outDirArg] = process.argv;
+  const argv = process.argv.slice(2);
+  const flagAt = argv.indexOf('--out-json');
+  const outJson = flagAt === -1 ? undefined : argv[flagAt + 1];
+  const [url, sha, outDirArg] = flagAt === -1 ? argv : argv.slice(0, flagAt);
   const outDir = outDirArg || path.join(__dirname, 'artifacts');
-  runAccessibilityChecks({ url, sha, outDir })
+  runAccessibilityChecks({ url, sha, outDir, outJson })
     .then((result) => {
       process.stdout.write(JSON.stringify(result, null, 2) + '\n');
     })

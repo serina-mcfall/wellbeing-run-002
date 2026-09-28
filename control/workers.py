@@ -440,38 +440,87 @@ def worker_output(worker: str, limit: int = 4000) -> str:
         return ""
 
 
+def _tail(path: Path | None, limit: int) -> str:
+    try:
+        return redact.scrub(path.read_text(encoding="utf-8", errors="replace"))[-limit:]
+    except OSError:
+        return ""
+
+
 def run_bounded(command: list[str], cwd: str, soft_timeout: int, hard_timeout: int,
-                stdin_text: str = "") -> dict:
+                stdin_text: str = "", stdout_path: Path | None = None,
+                stderr_path: Path | None = None) -> dict:
     """Run a disposable bounded job - used for the Grok Observer.
 
     Soft timeout is recorded; hard timeout kills. Observer failure never blocks
     development, so this reports rather than raises.
+
+    The returned "stdout"/"stderr" are a SCRUBBED TAIL sized for the ledger and
+    a prompt - never complete output, and never raw. When a caller needs the
+    complete output as evidence (C-05), it supplies stdout_path/stderr_path and
+    the child writes straight through to those files: nothing is truncated, and
+    whatever the child managed to emit before a hard-timeout kill is already on
+    disk rather than lost with the killed pipe. Timeout behaviour is unchanged.
     """
+    # Both sinks or neither. One alone would send half the output to disk
+    # and leave the other half as a scrubbed tail, so a caller reading the
+    # attempt directory would find one complete stream sitting next to one
+    # silently truncated one, with nothing marking the difference. Refused
+    # at the call site rather than half-honoured.
+    if (stdout_path is None) != (stderr_path is None):
+        raise ValueError(
+            "run_bounded requires both stdout_path and stderr_path, or neither")
+
     started = time.monotonic()
+    sinks = stdout_path is not None
+    out_fh = err_fh = None
     try:
-        proc = subprocess.run(
-            command, cwd=cwd, input=stdin_text, capture_output=True, text=True,
-            timeout=hard_timeout, check=False,
-        )
-        elapsed = time.monotonic() - started
-        return {
-            "ok": proc.returncode == 0,
-            "exit_code": proc.returncode,
-            "stdout": redact.scrub(proc.stdout)[-8000:],
-            "stderr": redact.scrub(proc.stderr)[-2000:],
-            "duration_ms": round(elapsed * 1000, 1),
-            "soft_timeout_exceeded": elapsed > soft_timeout,
-            "timed_out": False,
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "ok": False, "exit_code": 124, "stdout": "", "stderr": "hard timeout",
-            "duration_ms": hard_timeout * 1000, "soft_timeout_exceeded": True,
-            "timed_out": True,
-        }
-    except FileNotFoundError as exc:
-        return {"ok": False, "exit_code": 127, "stdout": "", "stderr": str(exc),
-                "duration_ms": 0, "soft_timeout_exceeded": False, "timed_out": False}
+        if sinks:
+            stdout_path.parent.mkdir(parents=True, exist_ok=True)
+            stderr_path.parent.mkdir(parents=True, exist_ok=True)
+            out_fh = open(stdout_path, "w", encoding="utf-8")
+            err_fh = open(stderr_path, "w", encoding="utf-8")
+        try:
+            proc = subprocess.run(
+                command, cwd=cwd, input=stdin_text, text=True,
+                stdout=out_fh if sinks else subprocess.PIPE,
+                stderr=err_fh if sinks else subprocess.PIPE,
+                timeout=hard_timeout, check=False,
+            )
+            elapsed = time.monotonic() - started
+            return {
+                "ok": proc.returncode == 0,
+                "exit_code": proc.returncode,
+                "stdout": (_tail(stdout_path, 8000) if sinks
+                           else redact.scrub(proc.stdout)[-8000:]),
+                "stderr": (_tail(stderr_path, 2000) if sinks
+                           else redact.scrub(proc.stderr)[-2000:]),
+                "duration_ms": round(elapsed * 1000, 1),
+                "soft_timeout_exceeded": elapsed > soft_timeout,
+                "timed_out": False,
+                "stdout_path": str(stdout_path) if sinks else None,
+                "stderr_path": str(stderr_path) if sinks else None,
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False, "exit_code": 124,
+                "stdout": _tail(stdout_path, 8000) if sinks else "",
+                "stderr": (_tail(stderr_path, 2000) if sinks else "") + "hard timeout",
+                "duration_ms": hard_timeout * 1000, "soft_timeout_exceeded": True,
+                "timed_out": True,
+                "stdout_path": str(stdout_path) if sinks else None,
+                "stderr_path": str(stderr_path) if sinks else None,
+            }
+        except FileNotFoundError as exc:
+            return {"ok": False, "exit_code": 127, "stdout": "", "stderr": str(exc),
+                    "duration_ms": 0, "soft_timeout_exceeded": False,
+                    "timed_out": False,
+                    "stdout_path": str(stdout_path) if sinks else None,
+                    "stderr_path": str(stderr_path) if sinks else None}
+    finally:
+        for handle in (out_fh, err_fh):
+            if handle is not None:
+                handle.close()
 
 
 def tooling_present() -> dict[str, bool]:

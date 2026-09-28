@@ -32,6 +32,9 @@ SUPERVISOR_LOG = RUNTIME_DIR / "supervisor.log"
 WATCHDOG_LOG = RUNTIME_DIR / "watchdog.log"
 WORKER_LOG_DIR = RUNTIME_DIR / "workers"
 OBSERVER_DIR = RUNTIME_DIR / "observer"
+# C-05: durable per-attempt accessibility/security evidence. Local only -
+# no external publishing in C-05.
+EVIDENCE_DIR = RUNTIME_DIR / "evidence"
 
 PROMPTS_DIR = REPO_ROOT / "prompts"
 WORKTREE_ROOT = REPO_ROOT.parent / "worktrees"
