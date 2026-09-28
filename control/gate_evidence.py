@@ -25,11 +25,19 @@ Two rules shape everything here:
    not clean.
 
 Evidence is local, under .runtime/evidence. C-05 publishes nothing.
+
+C-05.2 adds the read side: an attempt lifecycle marker, and a scanner
+that parses the browser sidecars run.js leaves behind. This module owns
+the evidence LAYOUT and its PARSING only - it reads no /proc, resolves no
+PID, and decides nothing about liveness or orphanhood. Those are
+judgements about the running host, and they belong with the host
+observation code (control/proc.py) and its callers.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +46,38 @@ from . import config, workers
 
 COMPLETED = "COMPLETED"
 FAILED = "FAILED"
+
+# Attempt lifecycle (C-05.2): two presence-only files, never one file
+# rewritten. They bound the window in which a browser is expected to
+# exist, and nothing more - they are one input to a classification, not
+# the classification:
+#
+#   * while the attempt is RUNNING, an OPEN sidecar whose browser is
+#     verified alive may be entirely legitimate - the apparatus working;
+#   * once the attempt is TERMINAL, that same OPEN sidecar is a leak only
+#     if its (pid, start_ticks) is independently verified alive;
+#   * verified-dead is a stale sidecar, not a leak, in either window;
+#   * unverifiable identity stays unknown in either window, and unknown
+#     is never resolved into either answer.
+#
+# Existence is the entire datum. Both are empty and created O_CREAT|
+# O_EXCL, so a zero-length marker is valid by definition, no partial
+# write can be misread, and each is write-once.
+#
+# Absence proves neither state: a kill between the two leaves exactly
+# what a genuinely in-flight attempt leaves, so "no TERMINAL marker" is
+# never promoted to "finished".
+RUNNING = "RUNNING"
+TERMINAL = "TERMINAL"
+
+RUNNING_MARKER = "attempt-running.marker"
+TERMINAL_MARKER = "attempt-terminal.marker"
+
+# Sidecar states written by apparatus/accessibility/run.js. Any other
+# value is unrecognised evidence, which reads as unknown - never as
+# CLOSED, and never as "no browser was launched".
+OPEN = "OPEN"
+CLOSED = "CLOSED"
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -60,22 +100,153 @@ class AttemptContext:
     stdout_path: Path
     stderr_path: Path
     sidecar_path: Path
+    running_marker_path: Path
+    terminal_marker_path: Path
     sha: str
     url: str
 
 
 def context(attempt_dir: Path, sha: str, url: str) -> AttemptContext:
-    out_dir = Path(attempt_dir) / "accessibility"
+    attempt_dir = Path(attempt_dir)
+    out_dir = attempt_dir / "accessibility"
     return AttemptContext(
-        attempt_dir=Path(attempt_dir),
+        attempt_dir=attempt_dir,
         out_dir=out_dir,
         result_path=out_dir / "result.json",
         stdout_path=out_dir / "stdout.txt",
         stderr_path=out_dir / "stderr.txt",
         sidecar_path=out_dir / "browser.json",
+        # Lifecycle markers sit at the attempt root, not inside
+        # accessibility/: they describe the whole attempt, not one
+        # artifact directory within it.
+        running_marker_path=attempt_dir / RUNNING_MARKER,
+        terminal_marker_path=attempt_dir / TERMINAL_MARKER,
         sha=sha,
         url=url,
     )
+
+
+class LifecycleMarkerError(RuntimeError):
+    """A marker's durability could not be established AND the marker
+    could not be withdrawn again.
+
+    This is the one lifecycle condition that cannot be reported as a
+    return value. False means "no transition happened", but a marker left
+    on disk says the opposite to every later reader, and the two cannot
+    both be published. Raising keeps the contradiction from being
+    swallowed by a caller that would otherwise carry on."""
+
+
+def _fsync_path(path: Path, flags: int) -> bool:
+    try:
+        fd = os.open(str(path), flags)
+    except OSError:
+        return False
+    ok = True
+    try:
+        os.fsync(fd)
+    except OSError:
+        ok = False
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            ok = False
+    return ok
+
+
+def _discard_marker(path: Path) -> bool:
+    """Withdraw a marker whose durability was never established.
+
+    True means no reader can take it for a lifecycle fact: it was
+    unlinked and the removal was committed, or it was already absent.
+    """
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return _fsync_path(path.parent, os.O_RDONLY)
+
+
+def _create_marker(path: Path) -> bool:
+    """Create one presence-only lifecycle marker, exclusively and durably.
+
+    O_EXCL establishes that the marker is ours and was not already
+    claimed; it does not establish that it survives a crash. An empty
+    file that is only in page cache is exactly the marker that would go
+    missing in the power loss it exists to be read after - so the fd is
+    fsynced, and then the CONTAINING DIRECTORY is fsynced too, because
+    the datum here is a directory entry rather than file content, and a
+    synced inode with an unsynced entry is still an absent marker.
+
+    A marker only counts once every step has succeeded. If any step after
+    creation fails the file is withdrawn again, because presence is the
+    entire datum readers use and a half-established marker would publish
+    exactly the claim this return value denies.
+
+    False means no lifecycle transition was established, for any reason -
+    already claimed, unwritable, or a failed sync - and the caller must
+    not proceed as though it happened. If the withdrawal ALSO fails,
+    LifecycleMarkerError is raised rather than returned: see its note.
+    """
+    path = Path(path)
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except OSError:
+        return False
+    synced = True
+    try:
+        os.fsync(fd)
+    except OSError:
+        synced = False
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            synced = False
+    if synced and _fsync_path(path.parent, os.O_RDONLY):
+        return True
+    if not _discard_marker(path):
+        raise LifecycleMarkerError(
+            f"{path} could not be durably established and could not be "
+            "withdrawn; its presence now asserts a lifecycle transition "
+            "that did not durably happen")
+    return False
+
+
+def mark_running(ctx: AttemptContext) -> bool:
+    return _create_marker(ctx.running_marker_path)
+
+
+def mark_terminal(ctx: AttemptContext) -> bool:
+    return _create_marker(ctx.terminal_marker_path)
+
+
+def lifecycle(attempt_dir: Path) -> str | None:
+    """TERMINAL, RUNNING, or None - from marker PRESENCE alone.
+
+    Presence means some process created the marker and did not withdraw
+    it. _create_marker withdraws the ones whose durability it could not
+    establish, and hard-fails when it cannot withdraw one, so a marker
+    surviving a completed call was durably established - but a process
+    killed between the create and the sync can still leave one behind,
+    and this cannot tell that apart. TERMINAL wins over RUNNING because
+    the markers accumulate rather than replace each other.
+
+    None means no marker exists, or the directory could not be read:
+    unknown, which is never either state.
+    """
+    attempt_dir = Path(attempt_dir)
+    try:
+        if (attempt_dir / TERMINAL_MARKER).is_file():
+            return TERMINAL
+        if (attempt_dir / RUNNING_MARKER).is_file():
+            return RUNNING
+    except OSError:
+        return None
+    return None
 
 
 def node_command(ctx: AttemptContext) -> list[str]:
