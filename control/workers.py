@@ -512,7 +512,12 @@ def run_bounded(command: list[str], cwd: str, soft_timeout: int, hard_timeout: i
                 "stderr_path": str(stderr_path) if sinks else None,
             }
         except FileNotFoundError as exc:
-            return {"ok": False, "exit_code": 127, "stdout": "", "stderr": str(exc),
+            # Scrubbed and bounded like every other branch: the field is
+            # named stderr_tail_scrubbed, and this one used to hand back
+            # raw str(exc) - which names the executable path and reaches
+            # durable evidence once C-05 persists the attempt outcome.
+            return {"ok": False, "exit_code": 127, "stdout": "",
+                    "stderr": redact.scrub(str(exc))[-2000:],
                     "duration_ms": 0, "soft_timeout_exceeded": False,
                     "timed_out": False,
                     "stdout_path": str(stdout_path) if sinks else None,

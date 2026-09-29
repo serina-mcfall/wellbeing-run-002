@@ -5,8 +5,12 @@ Canonical sources: `protocol/RUN-002-PROTOCOL-v2.0.md` §"Concurrency metrics",
 resource headroom). `experiment/CONTRADICTION-AUDIT.md`, C-08 (OPEN /
 NOT_IMPLEMENTED, subsidiary decision C-08d RESOLVED) and C-09 (OPEN /
 PARTIAL — core resource ownership implementation complete 2026-09-27; browser
-control-plane feed pending C-05). Those are authoritative; this file is a status matrix and
-must not invent capability they do not document as existing.
+control-plane feed implementation complete 2026-09-30 via C-05.2). Those are authoritative;
+this file is a status matrix and must not invent capability they do not document as existing.
+
+Implementation status is not runtime evidence. T+00 remains **NOT_STARTED**, so every
+row below describes mechanisms that exist and are tested, never measurements taken
+during a live run.
 
 Two independent dimensions are tracked for every row:
 
@@ -51,7 +55,7 @@ C-08a runtime capture is implemented (2026-09-28): the Watchdog appends one appe
 | Port contention (metric) | IMPLEMENTED | NOT_APPLICABLE | The C-09 allocator (`control/workers.py::allocate_port`) now deterministically assigns builder/fixer ports into worker records and durable job files, and `control/reconcile.py::detect_orphans` observes in-range IPv4+IPv6 listeners — and `RESOURCE_SAMPLE` now records the levels — distinct worker-owned ports and LISTEN sockets inside the governed range via that same IPv4+IPv6 observation. Contention *occurrences* remain represented solely by the existing durable `PORT_ALLOCATION_FAILED` / `PORT_ASSIGNMENT_CONFLICT` / `FOREIGN_OR_ORPHAN_LISTENER` events — no second contention mechanism. See C-08. |
 | Process count | IMPLEMENTED | NOT_APPLICABLE | Per-worker PID liveness plus C-09's run-scoped process observation — worker-entry cmdline identity and (agent_pid, agent_start_ticks) verification (`control/proc.py`) — now feed `RESOURCE_SAMPLE`'s deliberately unsummed truthful triple: committed worker records, cmdline-identified live worker-entry processes, and identity-verified surviving agents — never summed into one synthetic number. See C-08. |
 | Worktree count | IMPLEMENTED | NOT_APPLICABLE | `control/workers.py::list_worktrees()` exists, and C-09 adds owned/retained worktree dispositions (worker records' `worktree` fields, task `retained_worktrees`, managed-root reverse detection) as underlying facts, and `RESOURCE_SAMPLE` now records the dispositions: registered-managed, ACTIVE, RETAINED and ORPHAN, with managed-root scoping identical to `detect_orphans`; a failed git observation leaves registered/orphan `null` rather than inferring a count. See C-08. |
-| Browser count | NOT_IMPLEMENTED — PENDING C-05 | NOT_APPLICABLE | `RESOURCE_SAMPLE` records `browser_count: null` with `browser_observed: false`; browsers are launched entirely by the Node accessibility runner (`apparatus/accessibility/`) and no control-plane visibility exists until C-05, so a count is never fabricated as zero. See C-08. |
+| Browser count | IMPLEMENTED (C-05.2, 2026-09-30) | NOT_APPLICABLE | `RESOURCE_SAMPLE` now records a real `browser_count` derived from persisted C-05 evidence: `control/gate_evidence.py::scan_sidecars` walks the attempt tree and `control/metrics.py::_browser_levels` counts browsers whose `(pid, start_ticks)` identity `control/proc.py::verified_alive` confirms alive. Browsers are still launched entirely by the Node runner (`apparatus/accessibility/`); the control plane observes them, and never kills or closes one. The sample is **all-or-nothing and fail-closed**: an incomplete evidence walk, any sidecar that is MISSING/UNREADABLE/INVALID, an OPEN sidecar carrying no usable identity, or any identity `verified_alive` cannot settle, each collapses the whole sample to `browser_count: null` with `browser_observed: false` — a verified-live subset is an unknown count with some known members, not a smaller true count. Distinct identities are deduplicated, so duplicate evidence for one process cannot inflate the count. A CLOSED sidecar contributes zero and needs no identity check. A count of `0` is therefore only ever a complete observation, never a fabrication. See C-08. |
 
 ## Human-intervention measurement — C-08b
 
@@ -107,7 +111,7 @@ Lifecycle stages: allocate → assign → track → lease → release → detect
 |---|---|---|---|---|---|---|
 | Worktree | IMPLEMENTED | IMPLEMENTED (worker records carry the canonical path) | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (ACTIVE ⇄ RETAINED task/evidence ownership) | IMPLEMENTED (managed-root-scoped, bidirectional) |
 | Process | IMPLEMENTED | IMPLEMENTED (durable pre-spawn job-file identity; agent (pid, start_ticks) in the status file) | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (both launch modes; identity-verified) | IMPLEMENTED (worker-entry cmdline scan + surviving-agent verification) |
-| Browser | RUNNER-LOCAL COMPLETE (one launch per invocation; close on success and thrown error) | PENDING C-05 | PENDING C-05 | PENDING C-05 | RUNNER-LOCAL COMPLETE (try/finally) | PENDING C-05 |
+| Browser | RUNNER-LOCAL COMPLETE (one launch per invocation; close on success and thrown error) | IMPLEMENTED (C-05.1 sidecar binds `(pid, start_ticks)` to one attempt, and the attempt to a task + SHA) | IMPLEMENTED (C-05.2 `scan_sidecars` + `RESOURCE_SAMPLE`) | PARTIAL (C-05.2 RUNNING/TERMINAL markers bound the window in which a browser may exist; there is no renewal or expiry, so this is an attempt-scoped bound rather than a lease) | RUNNER-LOCAL COMPLETE (try/finally) | IMPLEMENTED (C-05.2 `detect_orphans`; detection and annunciation only — no kill, close or cleanup) |
 | Port | IMPLEMENTED (deterministic allocator, builder + fixer only) | IMPLEMENTED (durable job-file assignment before spawn; PORT env interface) | IMPLEMENTED | IMPLEMENTED | IMPLEMENTED (record removal; job-file reservation until the owner is provably gone) | IMPLEMENTED (IPv4+IPv6 listeners; assignment conflicts) |
 
 Runtime data: NOT_APPLICABLE for every cell above — even the IMPLEMENTED

@@ -22,10 +22,13 @@ hand still mechanically supports them. load1 is the system 1-minute load
 average from /proc/loadavg - a run-queue length, NOT a CPU-utilisation
 percentage; per-process CPU is not measured anywhere and not claimed.
 
-browser_count is null with browser_observed=false until C-05 gives the
-control plane actual browser visibility: browsers are launched entirely
-by the Node accessibility runner today, so any number here would be
-fabricated. Never record 0.
+browser_count comes from the C-05 evidence tree: persisted sidecars plus
+(pid, start_ticks) verification. It is all-or-nothing - null with
+browser_observed=false unless EVERY attempt was observable - because a
+verified-live subset is not a smaller true count, it is an unknown count
+with some known members, and publishing it would understate real browser
+pressure exactly when observation is degraded. Never record a fabricated
+zero; an observed zero is only ever a complete one.
 
 Peaks and averages are deliberately absent: the Protocol says "track",
 and min/max/mean are computable at report time from the append-only
@@ -39,7 +42,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import config, hostcheck, proc, reconcile
+from . import config, gate_evidence, hostcheck, proc, reconcile
 from . import workers as workers_mod
 
 # Governed for Run 002 (human decision, 2026-09-28): sample immediately on
@@ -63,6 +66,59 @@ METADATA_KEYS = frozenset({
     "worktrees_retained", "worktrees_orphan", "worktrees_observed",
     "browser_count", "browser_observed",
 })
+
+
+def _browser_levels() -> tuple[int | None, bool]:
+    """(browser_count, browser_observed) from the persisted C-05 evidence.
+
+    Browsers are launched entirely by the Node accessibility runner, so
+    this is an INFERENCE - sidecars plus identity verification - and it is
+    published only when every step of that inference held. Anything
+    unknown collapses the whole sample, never a partial count.
+
+    The count is of BROWSER PROCESSES, not of sidecar records. One browser
+    can be described by more than one OPEN sidecar - a rerun that observed
+    the same child, evidence copied between attempts - so identities are
+    deduplicated by the exact (pid, start_ticks) pair C-09 uses. Counting
+    records instead would inflate browser pressure out of bookkeeping
+    rather than out of anything actually running.
+
+    CLOSED is the one benign case: run.js writes it only after
+    browser.close() has returned, so it is positive evidence of no live
+    browser. It contributes zero, needs no identity, and poisons nothing.
+
+    Terminality is deliberately not consulted. Whether an OPEN sidecar
+    under a finished attempt is a LEAK is orphan classification, which
+    belongs to reconcile.py; this is simply how many browsers are
+    verifiably alive right now.
+
+    No exception containment here on purpose: every reader in this chain
+    is already total, and watchdog.record_resource_sample owns the
+    top-level containment that turns any surprise into the finite
+    METRICS_SAMPLE_ERROR pair. Catching here would hide it from that.
+    """
+    records, walk_ok = gate_evidence.scan_sidecars()
+    if not walk_ok:
+        return None, False
+    live = 0
+    seen: set[tuple[int, int]] = set()
+    for record in records:
+        if record["sidecar_status"] != gate_evidence.SIDECAR_OK:
+            return None, False   # absent, unreachable or garbled: unknown
+        if record["state"] == gate_evidence.CLOSED:
+            continue             # proven shut; no identity needed
+        if record["pid"] is None or record["start_ticks"] is None:
+            return None, False   # OPEN with nothing to verify against
+        identity = (record["pid"], record["start_ticks"])
+        if identity in seen:
+            continue             # one process, however many records name it
+        alive = proc.verified_alive(*identity)
+        if alive is None:
+            return None, False   # running but unverifiable - never claimed
+        seen.add(identity)
+        if alive:
+            live += 1            # False is provably gone, and counts zero
+    return live, True
 
 
 def sample(doc: dict, *, repo_root=None) -> dict:
@@ -182,6 +238,7 @@ def sample(doc: dict, *, repo_root=None) -> dict:
         out.update(worktrees_registered_managed=None, worktrees_orphan=None,
                    worktrees_observed=False)
 
-    out["browser_count"] = None
-    out["browser_observed"] = False
+    # Browsers (C-05.2). See _browser_levels: all-or-nothing by design, and
+    # counted by distinct (pid, start_ticks) identity rather than by record.
+    out["browser_count"], out["browser_observed"] = _browser_levels()
     return out

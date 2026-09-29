@@ -512,6 +512,12 @@ class DetectOrphansCase(unittest.TestCase):
         # workmux's default worktree_dir: the sibling '<project>__worktrees'
         # (verified via `workmux config reference`; no override configured).
         self.managed = "/repo__worktrees"
+        # C-05.2: detect_orphans now also scans the accessibility evidence
+        # tree. Without this these cases would read the host's real
+        # .runtime/evidence and every one of them would pick up a browser
+        # finding that has nothing to do with what it is testing.
+        self.evidence = self.log_dir / "evidence"
+        self.evidence.mkdir()
 
     def doc(self):
         d = state.initial_document("run-002", "v2.0")
@@ -530,7 +536,9 @@ class DetectOrphansCase(unittest.TestCase):
                 mock.patch.object(reconcile.proc, "listening_ports",
                                   return_value=set(listening) if ports_ok else None), \
                 mock.patch.object(reconcile.hostcheck, "read_candidate_port_range",
-                                  return_value=(3200, 3299)):
+                                  return_value=(3200, 3299)), \
+                mock.patch.object(reconcile.config, "EVIDENCE_DIR",
+                                  self.evidence):
             return reconcile.detect_orphans(doc, repo_root=self.repo_root)
 
     def ids(self, findings):
@@ -650,7 +658,9 @@ class AnnunciationCase(unittest.TestCase):
         self.cfg = SimpleNamespace(timezone=TZ)
         self.finding = reconcile.OrphanFinding(
             "ORPHAN_WORKTREE", "/wt/orphan", "unclaimed")
-        self.all_ok = {"worktree": True, "process": True, "port": True}
+        # All four production resource classes (C-05.2 added "browser").
+        self.all_ok = {"worktree": True, "process": True, "port": True,
+                       "browser": True}
 
     def run_pass(self, findings, scan_ok=None):
         with mock.patch.object(watchdog.reconcile, "detect_orphans",
@@ -732,7 +742,7 @@ class AnnunciationCase(unittest.TestCase):
     def test_scan_failure_never_clears_occurrence_state(self):
         self.run_pass([self.finding])
         self.run_pass([], scan_ok={"worktree": False, "process": True,
-                                   "port": True})
+                                   "port": True, "browser": True})
         self.assertIsNotNone(self.entry())
 
     def failing_append(self, event_type: str):

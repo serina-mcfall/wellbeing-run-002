@@ -62,7 +62,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import config, gh, hostcheck, proc
+from . import config, gate_evidence, gh, hostcheck, proc, state
 from . import workers as workers_mod
 
 RECONCILABLE_STATES = frozenset({"ASSIGNED", "ACTIVE", "REVIEW", "FIX_REQUIRED"})
@@ -284,11 +284,42 @@ class OrphanFinding:
     evidence: str
 
 
+def _attempt_terminal(record: dict, doc: dict) -> bool | None:
+    """Has the attempt that launched this browser finished?
+
+    True, False, or None for "cannot tell" - and None is never promoted
+    into either answer, because both directions are wrong in a way that
+    matters: a false True invents a leak, a false False hides one.
+
+    The RUNNING marker is authoritative and is never overridden by task
+    state. A task can be COMPLETE while its last attempt's browser is
+    still winding down, and preferring the task there would turn a
+    perfectly ordinary in-flight browser into a reported orphan.
+
+    Task state is consulted ONLY as a fallback when no marker exists at
+    all, and only in the direction that can prove termination. An absent
+    task proves nothing - evidence outliving its task is exactly where
+    guessing is least safe - and a merely non-terminal task does not
+    prove its attempt is still running either.
+    """
+    if record["lifecycle"] == gate_evidence.TERMINAL:
+        return True
+    if record["lifecycle"] == gate_evidence.RUNNING:
+        return False
+    task = doc.get("tasks", {}).get(record["task_id"])
+    if not isinstance(task, dict):
+        return None
+    if task.get("state") in state.TERMINAL_STATES:
+        return True
+    return None
+
+
 def detect_orphans(doc: dict, *, repo_root=None) -> tuple[list[OrphanFinding],
                                                           dict[str, bool]]:
     repo_root = repo_root or config.REPO_ROOT
     findings: list[OrphanFinding] = []
-    scan_ok = {"worktree": False, "process": False, "port": False}
+    scan_ok = {"worktree": False, "process": False, "port": False,
+               "browser": False}
 
     # Worktrees: every git-registered worktree under the workmux-managed
     # root (the sibling '<project>__worktrees' directory) must be claimed
@@ -389,5 +420,107 @@ def detect_orphans(doc: dict, *, repo_root=None) -> tuple[list[OrphanFinding],
                     "FOREIGN_OR_ORPHAN_LISTENER", str(port),
                     f"port {port} is listening inside the declared candidate "
                     f"range [{lo}, {hi}] but no live worker record owns it"))
+
+    # Browsers (C-05.2). Reality -> state, like the classes above: a
+    # browser verifiably alive after every attempt that named it has
+    # verifiably finished has no durable owner. Detection only - nothing
+    # here kills a process, closes a browser or unlinks evidence.
+    #
+    # scan_ok["browser"] is what lets the Watchdog CLEAR a previously
+    # observed browser finding, so it may only stand when the walk
+    # finished, every sidecar parsed, every OPEN identity is usable, every
+    # liveness answer was definite, and every live browser's ownership was
+    # settled. CLOSED records need none of it - run.js writes CLOSED only
+    # after browser.close() returned.
+    records, browser_ok = gate_evidence.scan_sidecars()
+    # Two distinct questions, and conflating them is how a leak gets
+    # reported that is not one. browser_ok asks "is anything about the
+    # browsers uncertain?". identity_coverage asks the narrower, harsher
+    # question "could an attempt exist whose browser IDENTITY we never
+    # learned?" - because orphanhood is a claim about the ABSENCE of an
+    # owner, and absence cannot be proven from a partial roll-call.
+    identity_coverage = browser_ok
+    if not browser_ok:
+        findings.append(OrphanFinding(
+            "BROWSER_EVIDENCE_UNREADABLE", str(config.EVIDENCE_DIR),
+            "the accessibility evidence tree could not be fully walked, so "
+            "whether any browser was left behind is unknown"))
+
+    # Grouped by identity BEFORE anything is decided. One process can be
+    # named by several attempts - a rerun that observed the same child,
+    # evidence copied between attempts - and those records can disagree
+    # about whether their attempt finished. Deciding per record would let
+    # directory sort order pick the answer: RUNNING first would silence a
+    # leak, TERMINAL first would report one, from identical evidence.
+    candidates: dict[tuple[int, int], list[dict]] = {}
+    for record in records:
+        attempt = record["attempt_dir"]
+        if record["sidecar_status"] != gate_evidence.SIDECAR_OK:
+            browser_ok = identity_coverage = False
+            findings.append(OrphanFinding(
+                "BROWSER_EVIDENCE_UNREADABLE", attempt,
+                f"browser sidecar for {attempt} is "
+                f"{record['sidecar_status']}, so whether that attempt left a "
+                f"browser running cannot be determined"))
+            continue
+        if record["state"] == gate_evidence.CLOSED:
+            continue
+        pid, ticks = record["pid"], record["start_ticks"]
+        if pid is None or ticks is None:
+            browser_ok = identity_coverage = False
+            findings.append(OrphanFinding(
+                "BROWSER_IDENTITY_UNVERIFIABLE", attempt,
+                f"OPEN browser sidecar for {attempt} records no usable "
+                f"(pid, start_ticks), so no process can be identified"))
+            continue
+        candidates.setdefault((pid, ticks), []).append(record)
+
+    for (pid, ticks), naming in sorted(candidates.items()):
+        alive = proc.verified_alive(pid, ticks)
+        if alive is None:
+            browser_ok = False  # the identity is KNOWN; it hides nobody else
+            findings.append(OrphanFinding(
+                "BROWSER_IDENTITY_UNVERIFIABLE", f"{pid}:{ticks}",
+                f"OPEN browser pid {pid} is running but could not be "
+                f"identity-verified against its recorded start ticks"))
+            continue
+        if not alive:
+            # Benign stale evidence: the process this sidecar names is
+            # provably gone. Nothing leaked, nothing to annunciate, and
+            # nothing here makes the scan less complete. Deliberately NOT
+            # a finding - every finding reaches a human as an orphan
+            # alert, and a leftover file is not a resource problem.
+            continue
+        # Ownership, aggregated over every record naming this ONE process,
+        # most conservative answer first. any() over the whole list, never
+        # a per-record short-circuit, so order cannot reach the decision.
+        terminality = [_attempt_terminal(r, doc) for r in naming]
+        if any(t is False for t in terminality):
+            continue  # an attempt is still in flight and owns it
+        if any(t is None for t in terminality):
+            browser_ok = False  # known identity, unsettled ownership
+            findings.append(OrphanFinding(
+                "BROWSER_TERMINALITY_UNKNOWN", f"{pid}:{ticks}",
+                f"browser pid {pid} is identity-verified alive but whether "
+                f"every attempt naming it has finished could not be "
+                f"established, so it is neither claimed nor cleared"))
+            continue
+        if not identity_coverage:
+            # Every attempt we COULD read is terminal - but an attempt we
+            # could not read, or one whose sidecar named no process, may
+            # be a current owner of this exact browser. "No attempt owns
+            # it" is then unproven, and this is the one claim that must
+            # never be made on incomplete evidence: a false orphan sends a
+            # human hunting a process that is doing its job. The coverage
+            # failure already has its own finding and browser_ok is
+            # already False, so nothing is added here - the uncertainty is
+            # recorded once, where it was observed.
+            continue
+        findings.append(OrphanFinding(
+            "ORPHAN_BROWSER_PROCESS", f"{pid}:{ticks}",
+            f"browser pid {pid} is identity-verified alive and every attempt "
+            f"naming it is proven terminal (first: "
+            f"{min(r['attempt_dir'] for r in naming)}); no attempt owns it"))
+    scan_ok["browser"] = browser_ok
 
     return findings, scan_ok

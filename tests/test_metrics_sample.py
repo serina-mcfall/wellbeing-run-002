@@ -77,6 +77,12 @@ class SampleFixtureCase(unittest.TestCase):
         self.managed.mkdir()
         self.job_dir = self.root / "workers"
         self.job_dir.mkdir()
+        # C-05 evidence root. Created but empty by default, so the fixture
+        # case is hermetic - before C-05.2 these tests read the real
+        # .runtime/evidence - and the default browser answer is a truthful
+        # complete zero rather than an accident of the host.
+        self.evidence = self.root / "evidence"
+        self.evidence.mkdir()
 
         # Real fixture files for the readers that accept path constants.
         self.loadavg = self.root / "loadavg"
@@ -98,19 +104,29 @@ class SampleFixtureCase(unittest.TestCase):
     def run_sample(self, doc, *, listening=frozenset({4210, 4211}),
                    entries={"task-001-builder": 111},
                    alive_pairs=frozenset({(2222, 777)}),
+                   unverifiable=frozenset(), evidence=None,
                    registered=None, fail=frozenset()):
         """Run metrics.sample with every observation deterministic.
 
         `fail` names observation classes whose readers break for the test:
         cpu, ram, disk, inotify, ports, processes, worktrees.
+
+        `unverifiable` names (pid, ticks) pairs for which verified_alive
+        answers None - running, but identity unconfirmable. That third
+        answer is distinct from False and the browser sample treats it as
+        such, so the fixture has to be able to produce it.
         """
         if registered is None:
             registered = (True, set())
+        self.verified_calls = []
 
         def _raise(*_a, **_k):
             raise hostcheck.HostCheckError("fixture: reader unavailable")
 
         def _verified(pid, ticks):
+            self.verified_calls.append((pid, ticks))
+            if (pid, ticks) in unverifiable:
+                return None
             return (pid, ticks) in alive_pairs
 
         patches = [
@@ -140,6 +156,11 @@ class SampleFixtureCase(unittest.TestCase):
                 lambda job_dir: None if "processes" in fail else dict(entries)),
             mock.patch.object(metrics.proc, "verified_alive", _verified),
             mock.patch.object(metrics.config, "WORKER_LOG_DIR", self.job_dir),
+            # gate_evidence.scan_sidecars reads config.EVIDENCE_DIR from the
+            # same module object, so this one patch scopes the browser
+            # observation without metrics growing a parameter for it.
+            mock.patch.object(metrics.config, "EVIDENCE_DIR",
+                              self.evidence if evidence is None else evidence),
             mock.patch.object(
                 metrics.reconcile, "registered_worktrees",
                 lambda repo_root: (False, set()) if "worktrees" in fail
@@ -290,11 +311,204 @@ class SampleFixtureCase(unittest.TestCase):
         self.assertEqual(result["worktrees_retained"], 0)
 
     # ---------------------------------------------------------- browser
+    #
+    # browser_count is an INFERENCE over persisted C-05 evidence: sidecars
+    # plus (pid, start_ticks) verification. The rule under test throughout
+    # is all-or-nothing - a verified-live subset is not a smaller true
+    # count, it is an unknown count with some known members, and reporting
+    # it would understate real browser pressure exactly when observation
+    # is degraded.
 
-    def test_browser_count_is_null_and_unobserved_pending_c05(self):
+    def _attempt(self, task="TASK001", sha="a" * 40, ordinal=1, *,
+                 sidecar=None, marker=None, root=None):
+        """One evidence attempt; `sidecar` is raw text so a test can write
+        a torn or unrecognised one."""
+        base = self.evidence if root is None else root
+        path = base / task / sha / f"attempt-{ordinal:04d}"
+        (path / "accessibility").mkdir(parents=True)
+        if sidecar is not None:
+            (path / "accessibility" / "browser.json").write_text(
+                sidecar, encoding="utf-8")
+        if marker is not None:
+            (path / marker).write_text("", encoding="utf-8")
+        return path
+
+    @staticmethod
+    def _open(pid=2222, ticks=777, state="OPEN"):
+        return json.dumps({"pid": pid, "start_ticks": ticks, "state": state,
+                           "opened_at": "2026-09-29T00:00:00Z",
+                           "closed_at": None})
+
+    def test_absent_evidence_root_is_unknown_not_zero(self):
+        # The scanner cannot see WHY the root is absent - never allocated,
+        # or deleted underneath it - and only one of those means no browser.
+        result = self.run_sample(_doc(), evidence=self.root / "nope")
+        self.assertIsNone(result["browser_count"])
+        self.assertIs(result["browser_observed"], False)
+
+    def test_present_empty_evidence_root_is_a_complete_zero(self):
+        result = self.run_sample(_doc())
+        self.assertEqual(result["browser_count"], 0)
+        self.assertIs(result["browser_observed"], True)
+
+    def test_one_verified_live_open_browser_counts_one(self):
+        self._attempt(sidecar=self._open())
+        result = self.run_sample(_doc())
+        self.assertEqual(result["browser_count"], 1)
+        self.assertIs(result["browser_observed"], True)
+
+    def test_two_live_browsers_in_different_tasks_count_two(self):
+        self._attempt(task="TASK001", sidecar=self._open(2222, 777))
+        self._attempt(task="TASK002", sidecar=self._open(3333, 888))
+        result = self.run_sample(_doc(),
+                                 alive_pairs={(2222, 777), (3333, 888)})
+        self.assertEqual(result["browser_count"], 2)
+        self.assertIs(result["browser_observed"], True)
+
+    def test_duplicate_open_records_of_one_identity_count_one_browser(self):
+        # Two sidecars can describe the SAME child - a rerun that observed
+        # it, evidence copied between attempts. The count is of browser
+        # processes, so the identical (pid, start_ticks) is one browser,
+        # never two, or bookkeeping would invent browser pressure.
+        self._attempt(ordinal=1, sidecar=self._open(2222, 777))
+        self._attempt(ordinal=2, sidecar=self._open(2222, 777))
+        result = self.run_sample(_doc())
+        self.assertEqual(result["browser_count"], 1)
+        self.assertNotEqual(result["browser_count"], 2)
+        self.assertIs(result["browser_observed"], True)
+
+    def test_verified_dead_open_browser_counts_zero_and_stays_observed(self):
+        self._attempt(sidecar=self._open(9999, 1))
+        result = self.run_sample(_doc(), alive_pairs=frozenset())
+        self.assertEqual(result["browser_count"], 0)
+        self.assertIs(result["browser_observed"], True)
+
+    def test_closed_sidecar_counts_zero_without_verifying_identity(self):
+        # run.js writes CLOSED only after browser.close() RETURNED, so it
+        # is positive evidence of no live browser - no /proc lookup needed.
+        self._attempt(sidecar=self._open(2222, 777, state="CLOSED"))
+        result = self.run_sample(_doc())
+        self.assertEqual(result["browser_count"], 0)
+        self.assertIs(result["browser_observed"], True)
+        self.assertNotIn((2222, 777), self.verified_calls)
+
+    def test_closed_sidecar_does_not_poison_a_live_sibling(self):
+        self._attempt(ordinal=1, sidecar=self._open(2222, 777, state="CLOSED"))
+        self._attempt(ordinal=2, sidecar=self._open(3333, 888))
+        result = self.run_sample(_doc(), alive_pairs={(3333, 888)})
+        self.assertEqual(result["browser_count"], 1)
+        self.assertIs(result["browser_observed"], True)
+
+    def test_attempt_with_no_sidecar_makes_the_whole_sample_unknown(self):
+        self._attempt(ordinal=1, sidecar=self._open())
+        self._attempt(ordinal=2)  # MISSING - a browser may exist unrecorded
         result = self.run_sample(_doc())
         self.assertIsNone(result["browser_count"])
         self.assertIs(result["browser_observed"], False)
+
+    def test_unreadable_sidecar_makes_the_whole_sample_unknown(self):
+        path = self._attempt(sidecar=self._open())
+        target = path / "accessibility" / "browser.json"
+        target.unlink()
+        target.mkdir()  # UNREADABLE, with no dependence on privilege
+        result = self.run_sample(_doc())
+        self.assertIsNone(result["browser_count"])
+        self.assertIs(result["browser_observed"], False)
+
+    def test_malformed_sidecar_makes_the_whole_sample_unknown(self):
+        self._attempt(sidecar='{"state": "OPEN", "pid": 22')
+        result = self.run_sample(_doc())
+        self.assertIsNone(result["browser_count"])
+        self.assertIs(result["browser_observed"], False)
+
+    def test_open_sidecar_without_a_pid_makes_the_sample_unknown(self):
+        # run.js writes pid null whenever the browser child is ambiguous.
+        self._attempt(sidecar=self._open(pid=None))
+        result = self.run_sample(_doc())
+        self.assertIsNone(result["browser_count"])
+        self.assertIs(result["browser_observed"], False)
+
+    def test_open_sidecar_without_start_ticks_makes_the_sample_unknown(self):
+        self._attempt(sidecar=self._open(ticks=None))
+        result = self.run_sample(_doc())
+        self.assertIsNone(result["browser_count"])
+        self.assertIs(result["browser_observed"], False)
+
+    def test_a_non_ok_status_is_unknown_even_when_it_carries_an_identity(self):
+        # read_sidecar happens to blank pid/start_ticks whenever the status
+        # is not OK, so every fixture above would ALSO be caught by the
+        # identity guard - which means those tests do not actually pin this
+        # rule. metrics must not lean on another module's invariant: the
+        # STATUS alone decides, and a synthetic record proves it does.
+        for status in ("MISSING", "UNREADABLE", "INVALID"):
+            with self.subTest(status=status):
+                record = {"sidecar_status": status, "state": "OPEN",
+                          "pid": 2222, "start_ticks": 777,
+                          "attempt_dir": str(self.evidence / "x"),
+                          "sidecar_path": str(self.evidence / "x" / "b.json"),
+                          "lifecycle": None}
+                with mock.patch.object(metrics.gate_evidence, "scan_sidecars",
+                                       lambda root=None: ([record], True)):
+                    result = self.run_sample(_doc())
+                self.assertIsNone(result["browser_count"])
+                self.assertIs(result["browser_observed"], False)
+
+    def test_unverifiable_open_identity_makes_the_sample_unknown(self):
+        self._attempt(sidecar=self._open(4444, 555))
+        result = self.run_sample(_doc(), unverifiable={(4444, 555)})
+        self.assertIsNone(result["browser_count"])
+        self.assertIs(result["browser_observed"], False)
+
+    def test_a_verified_live_subset_is_never_reported_as_the_count(self):
+        # The one that matters. One browser IS known live; the other is
+        # running but unverifiable. Reporting 1 would read as "one browser
+        # on this host" when the truth is "at least one, possibly two".
+        self._attempt(ordinal=1, sidecar=self._open(2222, 777))
+        self._attempt(ordinal=2, sidecar=self._open(4444, 555))
+        result = self.run_sample(_doc(), unverifiable={(4444, 555)})
+        self.assertIsNone(result["browser_count"])
+        self.assertNotEqual(result["browser_count"], 1)
+        self.assertIs(result["browser_observed"], False)
+
+    def test_incomplete_walk_outranks_an_observed_live_browser(self):
+        # A symlinked task directory is refused rather than traversed, so
+        # the walk is incomplete however readable the rest was. No chmod:
+        # this must hold identically for root and non-root.
+        self._attempt(task="TASK001", sidecar=self._open())
+        (self.evidence / "TASK002").symlink_to(self.evidence / "TASK001")
+        result = self.run_sample(_doc())
+        self.assertIsNone(result["browser_count"])
+        self.assertIs(result["browser_observed"], False)
+
+    def test_terminal_lifecycle_does_not_change_the_live_count(self):
+        # Whether an OPEN sidecar under a finished attempt is a LEAK is
+        # orphan classification's question, not this metric's. The count
+        # is simply how many browsers are verifiably alive right now.
+        self._attempt(sidecar=self._open(),
+                      marker="attempt-terminal.marker")
+        result = self.run_sample(_doc())
+        self.assertEqual(result["browser_count"], 1)
+        self.assertIs(result["browser_observed"], True)
+
+    def test_no_unknown_browser_sample_is_ever_reported_as_zero(self):
+        unknowns = [
+            ("absent root", lambda: None, {"evidence": self.root / "gone"}),
+            ("missing sidecar", lambda: self._attempt(ordinal=2), {}),
+            ("malformed sidecar",
+             lambda: self._attempt(ordinal=3, sidecar="{"), {}),
+            ("no identity",
+             lambda: self._attempt(ordinal=4, sidecar=self._open(pid=None)),
+             {}),
+        ]
+        for label, build, kwargs in unknowns:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as fresh:
+                    self.evidence = Path(fresh)
+                    build()
+                    result = self.run_sample(_doc(), **kwargs)
+                    self.assertIsNone(result["browser_count"], label)
+                    self.assertNotEqual(result["browser_count"], 0, label)
+                    self.assertIs(result["browser_observed"], False, label)
 
     # --------------------------------------------- failure independence
 
@@ -505,8 +719,17 @@ class LiveReaderSanityCase(unittest.TestCase):
             self.assertGreaterEqual(result["logical_cpus"], 1)
         if result["ram_observed"]:
             self.assertGreater(result["mem_available_bytes"], 0)
-        self.assertIsNone(result["browser_count"])
-        self.assertIs(result["browser_observed"], False)
+        # The browser sample is asserted as an INVARIANT, not as fixed
+        # values: .runtime/evidence may or may not exist on a given host,
+        # and pinning one answer would make this go red for a reason that
+        # has nothing to do with the code. Observed implies a real count;
+        # unobserved implies null, never a zero.
+        self.assertIsInstance(result["browser_observed"], bool)
+        if result["browser_observed"]:
+            self.assertIsInstance(result["browser_count"], int)
+            self.assertGreaterEqual(result["browser_count"], 0)
+        else:
+            self.assertIsNone(result["browser_count"])
 
 
 if __name__ == "__main__":

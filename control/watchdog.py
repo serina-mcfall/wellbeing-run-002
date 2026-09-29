@@ -355,7 +355,56 @@ ORPHAN_CLASS = {
     "ORPHAN_AGENT_PROCESS": "process",
     "FOREIGN_OR_ORPHAN_LISTENER": "port",
     "PORT_ASSIGNMENT_CONFLICT": "port",
+    # C-05.2. All four browser findings share one class, because clearing
+    # is governed by whether the BROWSER OBSERVATION was complete -
+    # scan_ok["browser"] - and that one flag is what reconcile computes.
+    # An unmapped check_id can never clear (ORPHAN_CLASS.get returns None
+    # and scan_ok.get(None) is falsy), so leaving any of these out would
+    # retain a resolved finding for the rest of the run.
+    "BROWSER_EVIDENCE_UNREADABLE": "browser",
+    "BROWSER_IDENTITY_UNVERIFIABLE": "browser",
+    "BROWSER_TERMINALITY_UNKNOWN": "browser",
+    "ORPHAN_BROWSER_PROCESS": "browser",
 }
+
+
+# Which findings assert that a resource HAS NO OWNER, as against ones
+# that assert only that ownership could not be DETERMINED. Both deserve a
+# human's attention and both are annunciated - but telling someone an
+# unreadable sidecar is an orphan sends them hunting a leak that may not
+# exist, and a detector that cries wolf gets muted, after which the real
+# orphan goes unread too.
+#
+# An ALLOW-LIST, deliberately. A check_id added later and not listed here
+# reads as an observation rather than an orphan - understating a claim,
+# never overstating one. A deny-list would fail the other way.
+ORPHAN_CLAIM_CHECKS = frozenset({
+    "ORPHAN_WORKTREE", "ORPHAN_WORKER_PROCESS", "ORPHAN_AGENT_PROCESS",
+    "FOREIGN_OR_ORPHAN_LISTENER", "PORT_ASSIGNMENT_CONFLICT",
+    "ORPHAN_BROWSER_PROCESS",
+})
+
+
+def _annunciation(entry: dict) -> tuple[str, str]:
+    """(subject, body) for one finding, truthful about which claim it is.
+
+    Both forms are fixed control-plane text plus bounded identifiers - a
+    check_id from a finite set, a resource_id, a hex occurrence - so
+    nothing exception-derived can reach a notification.
+    """
+    if entry["check_id"] in ORPHAN_CLAIM_CHECKS:
+        return (
+            f"Orphan resource detected: {entry['check_id']}",
+            f"{entry['resource_id']} has no durable owner "
+            f"(occurrence {entry['occurrence_id']}). Detection only - "
+            "no automatic removal, kill, or repair is performed.")
+    return (
+        f"Resource reconciliation finding: {entry['check_id']}",
+        f"{entry['resource_id']} could not be reconciled "
+        f"(occurrence {entry['occurrence_id']}). Ownership is UNKNOWN, not "
+        "disproven - this is a gap in observation, not a confirmed leak. "
+        "Detection only - no automatic removal, kill, or repair is "
+        "performed.")
 
 
 def _orphan_event_exists(ledger, event_type: str, occurrence_id: str,
@@ -461,14 +510,9 @@ def annunciate_orphans(cfg, ledger, notifier, *, store=None) -> None:
                         "resource_id": entry["resource_id"],
                         "first_observed_at": entry["first_observed_at"],
                     })
+            subject, body = _annunciation(entry)
             send_started = True
-            result = notifier.send(
-                notify.ATTENTION,
-                f"Orphan resource detected: {entry['check_id']}",
-                f"{entry['resource_id']} has no durable owner "
-                f"(occurrence {entry['occurrence_id']}). Detection only - "
-                "no automatic removal, kill, or repair is performed.",
-            )
+            result = notifier.send(notify.ATTENTION, subject, body)
             if result and result.get("ok"):
                 ledger.append(
                     "ORPHAN_ANNUNCIATION_DELIVERED", outcome="DELIVERED",
