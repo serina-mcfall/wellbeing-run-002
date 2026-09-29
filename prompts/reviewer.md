@@ -83,13 +83,13 @@ A single fenced JSON block, exactly this shape:
     "SECURITY": "PASS",
     "PRIVACY": "PASS",
     "ARCHITECTURE": "PASS",
-    "OVERENGINEERING": "PASS"
+    "OVERENGINEERING": "FAIL"
   },
   "findings": [
     {
       "id": "F1",
-      "severity": "P1",
-      "category": "ACCESSIBILITY",
+      "severity": "P2",
+      "category": "OVERENGINEERING",
       "file": "app/checkin/page.tsx",
       "summary": "one sentence naming the defect",
       "evidence": "what in the diff proves it",

@@ -88,7 +88,7 @@ A single fenced JSON block, exactly this shape:
   "findings": [
     {
       "id": "S1",
-      "severity": "P1",
+      "severity": "P2",
       "surface": "SECRETS",
       "file": "app/api/route.ts",
       "summary": "one sentence naming the defect",
@@ -100,6 +100,15 @@ A single fenced JSON block, exactly this shape:
 }
 ```
 
+`severity` is mandatory on every finding and must be exactly `P0`, `P1`, `P2`
+or `P3`. `surface` is mandatory and must exactly name one of the twelve
+surfaces listed above. Every surface you grade must be exactly `PASS`, `FAIL`
+or `NOT_RELEVANT`. A finding missing either field, or naming a surface that
+does not exist, invalidates the whole review — it is not read as a lesser
+finding.
+
 Use `"verdict": "SECURITY_FAIL"` with the findings listed when it does not
-pass. An empty `findings` array is required for a pass. Do not write the fix
-yourself.
+pass; a `SECURITY_FAIL` must carry at least one P0 or P1 finding. Report every
+P2 and P3 finding you found, including on a pass — they are recorded as
+non-blocking security debt, not discarded. Only P0 and P1 findings prevent a
+pass. Do not write the fix yourself.
