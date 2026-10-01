@@ -19,8 +19,17 @@ What it proves:
   D. Every GitHub call site the proposal attributes a permission to still
      exists in the code at the cited location — so the permission set cannot
      silently drift away from what the code calls (findings F1-F4).
-  E. Findings F7 (nothing posts a commit status) and §4.3a (required_checks is
-     still exactly ["ci"]) still hold.
+  E. F7's REMAINING half (no code constructs a commit-status API call) and
+     §4.3a (required_checks is still exactly ["ci"]) still hold.
+
+     F7's OTHER half is now CLOSED and this check no longer speaks to it.
+     F7 was "the permission at the centre of the proposal exists to serve
+     code nobody has written"; control/publisher.py is that code, and it
+     exists. What this check still proves is narrower and still worth
+     proving: publisher.py reaches GitHub only through an injected
+     `poster`, so no module in this repository builds the `statuses/` REST
+     path. The day one does, the transport is real and the "it cannot call
+     out by accident" argument needs re-making rather than assuming.
 """
 
 import json
@@ -177,9 +186,10 @@ grep = subprocess.run(
 # that broke it.
 hits = [l for l in grep.stdout.splitlines()
         if not l.startswith("experiment/") and "node_modules" not in l]
-check(not hits, "E. F7 still true — no code anywhere posts a commit status",
+check(not hits, "E. no code constructs a commit-status API call",
       f"{len(hits)} hit(s): {hits[0]}" if hits
-      else "the publisher is still unwritten")
+      else "control/publisher.py posts only through an injected `poster`; "
+           "no module builds the statuses/ path itself")
 
 required = json.loads((ROOT / "config" / "experiment.json").read_text())["github"]["required_checks"]
 check(required == ["ci"],

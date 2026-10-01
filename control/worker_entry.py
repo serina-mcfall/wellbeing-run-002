@@ -25,6 +25,61 @@ from control import proc, redact  # noqa: E402  - path must be set before this i
 
 HEARTBEAT_SECONDS = 10
 
+# C-22 / approval-package action 6 — BUILT AND TESTED, DELIBERATELY NOT WIRED.
+#
+# `main` below still builds the child environment with `dict(os.environ)`,
+# which hands every worker the Supervisor's entire environment. Once the three
+# GitHub App principals exist, that pass-through is what defeats the boundary
+# no matter what the file modes say: a worker would inherit the supervisor's
+# `GH_TOKEN` and the private-key PATHS, and could act as the identity that
+# merges. The approval package says the GitHub side cannot substitute for this.
+#
+# WHY THIS IS A FUNCTION AND NOT A CHANGE TO THE SPAWN. Replacing the
+# pass-through is action 6 of the twelve actions that need the operator's
+# approval, and it is the one change here that alters how a live worker starts.
+# No worker has ever run - T+00 is NOT_STARTED - so which names a real `claude`
+# or `codex` child genuinely needs cannot be verified locally. Switching it on
+# blind risks a launch-day failure in the dispatch path; leaving the derivation
+# unwritten risks approving an OS split that still leaks the credential. So the
+# derivation is written and tested, and flipping it on is one line at the call
+# site, to be taken with the rest of action 6 and verified during the rehearsal.
+#
+# The names come from experiment/github-app/env-var-names.md §3. Everything in
+# that document's §2 - every RUN002_*_APP_* id, installation and key PATH - is
+# absent by construction, because this is an allow-list and not a deny-list: a
+# name added to §2 tomorrow is dropped without anyone remembering to drop it.
+WORKER_ENV_ALLOWED: frozenset[str] = frozenset({
+    # Enough shell for a child process to run at all.
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "TZ",
+    # The worker's OWN gh identity - a 1-hour installation token minted for
+    # `run-002-worker`, never the supervisor's and never a private key.
+    "GH_TOKEN", "GH_CONFIG_DIR",
+})
+
+
+def worker_child_env(parent: dict, job: dict, *, secrets: tuple = ()) -> dict:
+    """The environment ONE worker child may see. Allow-list, not deny-list.
+
+    `parent` is the environment to filter (os.environ at the call site).
+    `secrets` names the product secrets this role genuinely needs; the caller
+    passes them explicitly rather than this function reaching for
+    config.REQUIRED_SECRETS, because "which secrets does a worker need" is a
+    policy question and policy does not belong in a filter.
+
+    The three per-job names are SET here, never inherited, so a parent that
+    happens to carry a stale RUN_001_TASK cannot leak one job's identity into
+    another's.
+    """
+    env = {name: parent[name] for name in WORKER_ENV_ALLOWED if name in parent}
+    for name in secrets:
+        if name in parent:
+            env[name] = parent[name]
+    env["RUN_001_ROLE"] = job["role"]
+    env["RUN_001_TASK"] = str(job.get("task_id") or "")
+    if job.get("port") is not None:
+        env["PORT"] = str(job["port"])
+    return env
+
 
 def _now(tz: str) -> str:
     return datetime.now(ZoneInfo(tz)).isoformat(timespec="seconds")
