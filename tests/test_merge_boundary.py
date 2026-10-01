@@ -39,6 +39,9 @@ TZ = "Pacific/Auckland"
 BRANCH_FMT = "task/{0}"
 DIFF_HASH = "h" * 40
 MERGED_SHA = "abc123def456abc123def456abc123def456abcd"
+# The head the reviewer was dispatched against, and the head the pull request
+# still carries. evaluate_merge requires the two to be equal.
+REVIEWED_HEAD = "0" * 40
 
 
 class InjectedFailure(RuntimeError):
@@ -54,6 +57,9 @@ def _open_pr(number: int, branch: str) -> dict:
         "state": "OPEN",
         "isDraft": False,
         "headRefName": branch,
+        # evaluate_merge compares this against record["reviewed_head"], which
+        # every record fixture below sets to the same value.
+        "headRefOid": REVIEWED_HEAD,
         "mergeable": "MERGEABLE",
         "mergeStateStatus": "CLEAN",
         "statusCheckRollup": [
@@ -116,7 +122,7 @@ class MergeBoundaryCase(unittest.TestCase):
             record.update({"review_verdict": routing.REVIEW_PASS,
                            "approval_current": True,
                            "reviewed_diff_hash": DIFF_HASH,
-                           "reviewed_head": "0" * 40,
+                           "reviewed_head": REVIEWED_HEAD,
                            "review_cycles": 1})
             if accepted:
                 record["accepted_findings"] = [_accepted_finding()]
@@ -380,6 +386,7 @@ class TestDeterministicOrdering(MergeBoundaryCase):
             record.update({"review_verdict": routing.REVIEW_PASS,
                            "approval_current": True,
                            "reviewed_diff_hash": DIFF_HASH,
+                           "reviewed_head": REVIEWED_HEAD,
                            "review_cycles": 1, "accepted_findings": []})
             doc["prs"][str(number)] = record
         self.store._write(doc)
@@ -471,6 +478,7 @@ class InvariantDetectionCase(MergeBoundaryCase):
         record = routing.blank_pr_record(100, "TASK-001", "task/task-001")
         record.update({"review_verdict": routing.REVIEW_PASS, "approval_current": True,
                        "reviewed_diff_hash": DIFF_HASH, "merged": merged,
+                       "reviewed_head": REVIEWED_HEAD,
                        "review_cycles": 1})
         record["last_review_at"] = (clock.iso(clock.now(TZ) - timedelta(hours=1))
                                     if last_review_at is mock.sentinel.default

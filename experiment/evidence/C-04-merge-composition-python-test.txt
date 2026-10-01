@@ -1,0 +1,17 @@
+........................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................../usr/lib/python3.12/unittest/mock.py:767: ResourceWarning: unclosed file <_io.FileIO name='/tmp/tmp33pmxyl7/supervisor.lock' mode='ab+' closefd=True>
+  def __setattr__(self, name, value):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/usr/lib/python3.12/unittest/mock.py:767: ResourceWarning: unclosed file <_io.FileIO name='/tmp/tmprl_zo51j/supervisor.lock' mode='ab+' closefd=True>
+  def __setattr__(self, name, value):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/usr/lib/python3.12/unittest/mock.py:767: ResourceWarning: unclosed file <_io.FileIO name='/tmp/tmp1zojmgpl/supervisor.lock' mode='ab+' closefd=True>
+  def __setattr__(self, name, value):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+........................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+----------------------------------------------------------------------
+Ran 1682 tests in 58.821s
+
+OK
+[FAIL] c16_probe: gate raised: GATE_EVALUATION_FAILED (exception content withheld from durable evidence)
+[FAIL] c16_probe: gate raised: GATE_EVALUATION_FAILED (exception content withheld from durable evidence)
+[FAIL] c16_probe: gate raised: GATE_EVALUATION_FAILED (exception content withheld from durable evidence)

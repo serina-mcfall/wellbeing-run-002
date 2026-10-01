@@ -183,10 +183,12 @@ class TestIndependenceAndMergeGateUnchanged(unittest.TestCase):
 
     def setUp(self):
         self.pr = {"number": 3, "state": "OPEN", "isDraft": False,
+                   "headRefOid": "a" * 40,
                    "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
                    "statusCheckRollup": [{"name": "ci", "status": "COMPLETED",
                                           "conclusion": "SUCCESS"}]}
         self.record = routing.blank_pr_record(3, "TASK-001", "task/task-001")
+        self.record["reviewed_head"] = "a" * 40
 
     def test_evidence_alone_cannot_merge_without_a_codex_pass(self):
         self.record.update({"review_verdict": None, "approval_current": False,

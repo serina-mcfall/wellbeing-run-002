@@ -5286,3 +5286,387 @@ in the meantime.
   `config/experiment.json`, any frozen source, or any existing function in
   `control/routing.py`.
 - T+00 remains **NOT_STARTED**.
+
+## 34. C-04 live merge-gate composition layer — IMPLEMENTED (2026-10-01)
+
+Branch `wip/c04-merge-composition`, cut from `wip/c05-1-persistence` @ `8425e32`,
+worked in an isolated worktree. Scope was the composition layer, the
+merge-eligibility path in `control/routing.py`, and end-to-end SHA-bound
+provenance. Nothing under `product/`, `tasks/`, `protocol/` or
+`config/tasks.json` was touched. `Supervisor.dispatch_reviewer`,
+`dispatch_fixer`, `on_dispatch_failure`, `control/merge_invariant.py` and
+`tests/test_c18_stage3_port_split.py` were not modified — other agents own them.
+
+**Document-provenance note.** This section was appended only inside this
+worktree's copy of this file, per the integration owner's instruction. This
+branch's copy is a point-in-time snapshot and is not authoritative for sections
+1–33.
+
+### 34.1 What was built
+
+**`apparatus/pr-evidence/live-gate.js`** (new) — the composition entry point.
+Before it, nothing in the repository imported two adapters together, so no code
+anywhere computed a live merge decision; §28.5 recorded that gap explicitly.
+
+```js
+evaluateLiveMergeEligibility(request, adapters) -> {
+  decision: 'ELIGIBLE' | 'DENIED',
+  trustedHeadSha: string | null,
+  draftState: 'READY' | 'DRAFT' | 'UNKNOWN',
+  blockedOnlyByDraft: boolean,
+  reasons: [ { code, determination, detail } ],
+  adapters: { headSha, ci, task, reviewer, reviewProvenance,
+              evidenceShaBinding, offlinePolicy },
+}
+```
+
+`request` — `{ identity, prNumber, pkg, prView, ledgerEvents }`.
+`adapters` — `{ resolveHeadSha(identity), resolveCi(headSha),
+resolveTask(taskId), resolveReviewer(claim) }`, **all four required and all
+injected**. Nothing is defaulted to a real entrypoint, so this module cannot
+reach git, `gh` or `.runtime/` even by accident, and a caller must say
+explicitly where each fact comes from. Every test injects stubs.
+
+**The anchor is the trusted head SHA, never the package.** `git-head.js`
+resolves the current commit for the task identity. CI, the task record, the
+reviewer identity, the review provenance and every evidence block are then
+checked against *that* value. `pkg.head_sha` is never an input to any adapter;
+it is only ever compared to the trusted head and must equal it. This is the
+whole point of C-04: a model's claimed SHA is a claim, and a claim can be
+written by the thing being judged.
+
+**DEFAULT DENY, with a backstop.** The decision starts `DENIED` and is raised
+to `ELIGIBLE` by one explicit positive assertion at the bottom that re-reads
+every adapter's own `ok` flag, the trusted SHA's shape and the draft state.
+Deleting a denial above is therefore not enough to open the gate — proved by
+mutation M5 (§34.8), where the CI adapter's result was replaced wholesale and
+the suite still went red.
+
+Every unknown denies. An unobservable head, an absent `isDraft`, a missing
+`mergeStateStatus`, an unreadable ledger and any adapter returning
+`COULD_NOT_VERIFY` are all denials. `COULD_NOT_VERIFY` is not weak evidence of
+health; it is the absence of evidence.
+
+### 34.2 The ledger contract this gate requires
+
+A parallel agent is adding the head SHA to the review ledger events. This is
+the exact contract `live-gate.js` codes against, and it is implemented against
+fixtures so neither agent blocks the other.
+
+> `REVIEW_DISPATCHED` and `REVIEW_RESULT`, for `role: "reviewer"`, MUST each
+> carry the full 40-character lowercase-hex head SHA the reviewer worker was
+> dispatched against, at **`metadata_redacted.head_sha`**.
+
+Mechanically, in `control/supervisor.py::dispatch_reviewer` and the
+`REVIEW_RESULT` emission in `ingest_review`, that is:
+
+```python
+self.log("REVIEW_DISPATCHED", ..., head_sha=head)
+self.log("REVIEW_RESULT", ..., head_sha=record["reviewed_head"],
+         metadata_redacted=review.as_dict())
+```
+
+`control/ledger.py`'s `FIELDS` tuple has no `head_sha`, and `Ledger.append`
+merges every unrecognised kwarg into `metadata_redacted` (`ledger.py:97-103`),
+so the two calls above land the value in the right place with no change to
+`ledger.py` at all.
+
+Three properties the composition relies on, in order of how it reads them:
+
+1. **Both events must carry it.** `REVIEW_RESULT` alone is not enough: the
+   dispatch is what binds the *request* to a commit, the result binds the
+   *answer*. A result bound to commit B whose dispatch names commit A is
+   refused (`REVIEW_PROVENANCE_SHA_MISMATCH`).
+2. **Either spelling is read, and disagreement is fatal.** If `head_sha` is
+   later promoted into `FIELDS` it will appear at the top level instead. Both
+   are read, so the promotion does not break this module. When **both** are
+   present they must be identical — two disagreeing provenances are worse than
+   one, because nothing may choose between them
+   (`REVIEW_PROVENANCE_CONFLICT`).
+3. **The SHA-bound `REVIEW_RESULT` must name the worker reviewer-identity
+   already verified.** Otherwise a correctly-SHA-bound event from one dispatch
+   could vouch for a verdict produced by another
+   (`REVIEW_PROVENANCE_WORKER_MISMATCH`).
+
+**Why this is separate from `reviewer-identity.js`'s own SHA check, rather than
+a duplicate of it.** That adapter's only SHA source is
+`prs[n].reviewed_head` in `.runtime/state.json` — **mutable** state that the
+next review cycle overwrites and that anyone who can write the file can edit;
+its own header says so, and §28.5 records it as the adapter's central
+limitation. The ledger is append-only and fsynced per event. So the two checks
+answer different questions, and the ledger one is the stronger: a verdict for
+commit B must be carried by events that themselves name commit B. An older
+cycle's `REVIEW_PASS` can no longer be re-presented against a newer commit,
+which §28.3 item 2 and §28.5 both recorded as unclosable without exactly this
+change. **That closes defect 1 of §28.3 for the code reviewer** — the
+asymmetry with the SHA-bound security worker name.
+
+Until the parallel agent lands the field, every real `REVIEW_RESULT` will fail
+`REVIEW_PROVENANCE_UNBOUND` with determination `COULD_NOT_VERIFY`. That is the
+correct behaviour, not a regression: no live merge is authorised today anyway,
+and failing closed on absent provenance is the requirement.
+
+### 34.3 Every evidence class is bound, not just two
+
+`checkOfflinePolicy` compares only `ci.sha` and `review.sha` to `head_sha`
+(`validate.js:94-99`). Accessibility and security evidence produced against a
+**different commit** therefore passes the offline policy untouched — a hole the
+fixture-harness stream found independently and which this branch closes rather
+than inherits.
+
+`verifyEvidenceShaBinding` requires every SHA-bearing path in the package to
+equal the trusted head:
+
+| Path | Schema-required | Treated as |
+|---|---|---|
+| `{ci,review}.sha` | yes | absence denies |
+| `{ci,review,accessibility,security}.provenance.sha` | yes | absence denies |
+| `{accessibility,security}.checks[n].sha` | yes | absence denies |
+| `{accessibility,security}.sha` | **no** | checked when present; absence is a schema gap (§34.5), not a forgery |
+
+Binding belongs in the composition rather than in `checkOfflinePolicy` for a
+reason beyond file ownership: the offline checker can only compare these values
+to `head_sha`, which the submitter also wrote, so agreement there proves
+internal consistency and nothing else. Here each is compared to the head git
+itself resolved. A test asserts the control — `checkOfflinePolicy` returns
+`policyValid: true` for a package with accessibility evidence from another
+commit — so the composition is demonstrably doing work nothing else does.
+
+### 34.4 `control/routing.py::evaluate_merge` — two defects fixed
+
+**(a) Approval invalidation keyed on the diff, not the SHA.** `evaluate_merge`
+compared `reviewed_diff_hash` to `current_diff_hash` and never once compared
+`reviewed_head`, which `dispatch_reviewer` has recorded all along
+(`supervisor.py:1478`). Protocol v2 "Evidence provenance" says *"new SHA =>
+regenerate required automated evidence"*
+(`protocol/RUN-002-PROTOCOL-v2.0.md:223`) — the head SHA is the thing that rule
+names. **A force-push producing a byte-identical diff from a different commit
+passed the gate**, merging a commit no reviewer had seen while every piece of
+SHA-bound evidence belonged to a commit that was no longer the head.
+
+The head comparison now runs **before** the diff check. Both remain: a
+reconciliation merge moves the head legitimately, and a changed diff under an
+unchanged head is a different fault. Absence is a denial, not an exemption —
+`None != None` is `False`, so without an explicit guard "nothing to compare"
+would have read as "nothing changed". Both denials set
+`invalidate_approval=True`, or the next tick would re-evaluate the same stale
+approval against the new head.
+
+**(b) A draft and a closed pull request shared one refusal sentence.** `state
+!= "OPEN" or pr.get("isDraft")` returned `"PR #N is not an open, ready pull
+request"` for both, so `MERGE_BLOCKED` could not distinguish them and a draft
+could stall a task with nothing in durable evidence saying a draft did it. They
+are now two branches with two reasons and two finite condition codes.
+
+**(c) A finite condition vocabulary.** `MergeDecision` gains
+`condition: str` — one of fourteen `routing.MERGE_*` codes — and
+`attempt_merge` writes it into the `MERGE_BLOCKED` event's
+`metadata_redacted.condition` alongside the existing prose. Durable evidence no
+longer has to be parsed as English.
+
+`blank_pr_record` gains `"reviewed_head": None`, declared as explicit absence
+like its sibling optional fields.
+
+### 34.5 Draft-to-ready — GAP RECORDED, NOTHING IMPLEMENTED
+
+**Determination: marking a drafted PR ready is NOT governed.** Evidence,
+checked rather than assumed:
+
+- The word "draft" does not appear in `protocol/RUN-002-PROTOCOL-v2.0.md` at
+  all. "Definition of done" lists eleven conditions and names no draft state;
+  "Merge execution" and "PR contract" say nothing about it.
+- No governed state exists for it. The task lifecycle is `QUEUED → READY →
+  ASSIGNED → ACTIVE → PR_OPEN → REVIEW → FIX_REQUIRED → MERGE_READY → MERGED →
+  COMPLETE` (protocol line 159-161). `READY` there is a *task* state meaning
+  dependencies are met; it has nothing to do with a pull request's draft flag.
+- Nothing in the control plane creates a draft pull request: `--draft` appears
+  nowhere in `control/`, `scripts/`, `bin/` or `guardrails/`, and nothing calls
+  `gh pr ready`. `isDraft` is read in exactly two places — `gh.py:65` (a
+  requested field) and the gate.
+- Every existing test fixture hard-codes `isDraft: False`, so the draft path
+  had **never been exercised**. `tests/test_c04_merge_eligibility.py` now
+  exercises it.
+
+So nothing was implemented for draft-to-ready, and no eligibility predicate was
+reused to justify one. Inventing the action would amend a frozen specification
+by implication. A test (`test_nothing_in_routing_marks_a_pull_request_ready`)
+pins that absence, so a future addition has to be deliberate.
+
+**The smallest explicit amendment proposed**, for the operator to accept or
+refuse — one sentence, added to "Merge execution" in
+`protocol/RUN-002-PROTOCOL-v2.0.md`:
+
+> *"A pull request opened in draft may be marked ready for review by the
+> Supervisor, and only by the Supervisor, when every condition of the
+> deterministic merge gate other than the draft flag itself is satisfied. The
+> transition is recorded as `PR_MARKED_READY` and is reversible by a human at
+> any time."*
+
+Two properties make it the smallest safe form: it reuses the *existing* gate
+rather than introducing a second, weaker predicate, and it names one actor, so
+no worker can take its own pull request out of draft. If accepted, the
+implementation is a single call sited exactly where `MERGE_PR_IS_DRAFT` is
+reported today, behind `blockedOnlyByDraft`.
+
+**Meanwhile, a draft is never a silent stall.** `blockedOnlyByDraft` is true
+exactly when the draft flag is the *only* thing standing between the pull
+request and eligibility — a reportable "this would merge if a human took it out
+of draft", distinguishable from every other refusal.
+
+**Other gaps found and NOT papered over:**
+
+1. **The PR-evidence schema carries no `pr_number`.** Confirmed again: the
+   top-level required set is `task_id, head_sha, ci, review, accessibility,
+   security`. The reviewer-identity adapter and the review-provenance check
+   both need a PR number, so `evaluateLiveMergeEligibility` takes it out of
+   band as `request.prNumber`. `protocol/PR-EVIDENCE-V2.schema.json` is a
+   frozen imported source and was not edited. Same gap as §28.3 item 3,
+   unresolved.
+2. **`accessibility.sha` and `security.sha` are optional in the schema** while
+   `ci.sha` and `review.sha` are required. An applicable accessibility block
+   can therefore omit its own block-level commit. `provenance.sha` is required
+   and is bound, so the hole is narrow, but the asymmetry is unexplained and
+   the schema cannot be edited here.
+3. **Nothing in the control plane submits a GitHub approving review**, while
+   branch protection on `main` requires one. `mergeStateStatus` would be
+   `BLOCKED` and the gate would correctly refuse — but as a *governance*
+   condition, not an evidence defect, so `PR_BLOCKED_BY_BRANCH_PROTECTION` is
+   named separately and says so in its detail text. No review-submission code
+   was added; that is with the operator.
+4. **`validate.js`'s header is still partly out of date** (§28.3 item 4): lines
+   12-16 say the CI and worker-registry adapters "do not exist in this
+   repository yet". All four now exist and a composition layer now joins them.
+   Correcting that text was left alone this session to avoid a conflicting edit
+   on a file three streams have touched; it should be corrected at integration.
+5. **`.github/workflows/ci.yml` still never runs any of this.** No root
+   `package.json` exists, so the Node steps are skipped. Neither `validate.js`,
+   the adapters, nor `live-gate.js` run in CI today. Still part of C-04's
+   closure criteria.
+
+### 34.6 C-14 durability and annunciation — preserved, not weakened
+
+`control/merge_invariant.py` was read and **not modified**. Its guarantees are
+untouched by this work:
+
+- The classifier stays pure — no network, no state mutation, no ledger write,
+  no clock read — so the Supervisor and the Watchdog still reach identical
+  verdicts from independently-made observations.
+- `accepted_findings` is still not an input; debt expectations still come from
+  the ledger.
+- Every unprovable path still returns `UNPROVABLE` rather than the convenient
+  answer.
+- `annunciate`'s fingerprint, its FROZEN-state normalisation, its single
+  `HUMAN_INTERVENTION_REQUESTED`, its notification and its
+  `STATE_INVARIANT_VIOLATION` are all unchanged.
+
+Nothing was added **after** `attempt_merge` inside the dedicated merge
+transaction, which is C-14.1's rule. The only change to `attempt_merge` is one
+extra key in an already-existing `MERGE_BLOCKED` event on the *refusal* path,
+which runs before anything irreversible and returns immediately.
+
+One behavioural consequence worth stating plainly: the new head check makes
+`evaluate_merge` **stricter**, so some merges that would previously have
+proceeded now will not. Four existing tests in `test_merge_boundary.py` went
+red precisely because their fixtures carried no head at all — a fixture gap,
+not a regression — and `TestMergeOriginContract` and the C-14 invariant cases
+pass unchanged once the fixtures carry one.
+
+### 34.7 Test counts
+
+| Suite | Before | After | Added |
+|---|---|---|---|
+| `node --test` (from `apparatus/`) | 127 | **177** | 50 |
+| `python3 -m unittest discover -s tests` | 1664 | **1682** | 18 |
+
+New files: `apparatus/pr-evidence/live-gate.js`,
+`apparatus/pr-evidence/live-gate.test.js`,
+`tests/test_c04_merge_eligibility.py`.
+
+The five required regressions, each with an explicit test:
+
+| Requirement | Test |
+|---|---|
+| stale output does not authorise merge | `REGRESSION stale output: a verdict produced against an older head denies`, plus a control proving `checkOfflinePolicy` accepts the same package |
+| changed head invalidates the approval | `REGRESSION changed head: …` (JS) and `test_a_force_push_with_an_identical_diff_is_refused` (Python — the case the old code got wrong) |
+| missing provenance denies | `REGRESSION missing provenance: …` ×3, plus `test_a_record_with_no_reviewed_head_is_refused` |
+| mismatched provenance denies | `REGRESSION mismatched provenance: …` ×3 |
+| a model's own claimed SHA denies | `REGRESSION self-claimed SHA: …` ×2 |
+
+Existing tests edited, all declared in `.claude/.test-change` first, all fixture
+gaps rather than weakened assertions: `test_control_plane.py`,
+`test_review_evidence.py`, `test_merge_boundary.py`,
+`test_c05_3_evidence_claim.py`. Each lacked `reviewed_head`/`headRefOid`, or
+pinned the exact `blank_pr_record` field set. No assertion was removed or
+relaxed.
+
+### 34.8 Mutation campaign — 6 broken, 6 detected, 6 restored
+
+Recorded in `experiment/evidence/C-04-merge-composition-mutation.txt`. Each
+mutation was applied to a file whose pre-mutation sha256 was recorded, the
+suite re-run, the file restored from its pre-mutation bytes, and the
+restoration verified by sha256. Both suites were re-run after all restorations
+and returned to 177/0 and OK.
+
+| # | Mutation | Result |
+|---|---|---|
+| M1 | default-deny flipped to default-allow (`decision: ELIGIBLE` unconditionally) | DETECTED — 37 failed |
+| M2 | stale verdict accepted (package/trusted-head comparison disabled) | DETECTED — 2 failed |
+| M3 | changed head not invalidating (`routing.py` drops the `reviewed_head` comparison) | DETECTED — 4 Python failures |
+| M4 | changed head not invalidating (live gate ignores a moved PR head) | DETECTED — 2 failed |
+| M5 | an adapter's result ignored (CI adapter's answer replaced with a pass) | DETECTED — 2 failed |
+| M6 | the accessibility requirement registry bypassed (`applySeverityPolicy(f, undefined)`) | DETECTED — 2 failed |
+
+M6 needed a strengthened assertion to catch at all, and that is worth recording:
+bypassing the registry makes *every* FAILURE-classified accessibility finding
+`INVALID_ACCESSIBILITY_EVIDENCE`, which still denies — so a test that only
+checked "this denies" would have stayed green while the registry did nothing
+and the accessibility box could never go green. The test now asserts the
+finding blocks as a **recognised** P1 and that no
+`INVALID_ACCESSIBILITY_EVIDENCE` is raised.
+
+### 34.9 Verification performed
+
+- `node --test` from `apparatus/` — **177 passed, 0 failed, exit 0**.
+  `experiment/evidence/C-04-merge-composition-node-test.txt`.
+- `python3 -m unittest discover -s tests` — **1682 tests, OK**.
+  `experiment/evidence/C-04-merge-composition-python-test.txt`. The `[FAIL]
+  c16_probe` lines are deliberate probe output inside passing tests, as §28.7
+  records.
+- Mutation campaign — 6/6 detected, 6/6 restored and verified.
+- `python3 scripts/check_no_secrets.py` — clean.
+- `git diff --check` and `git diff --cached --check` — clean.
+- No network calls, no GitHub writes, no merges, no paid API calls, no
+  notifications, no worker launches. Every adapter in every test is a stub.
+
+**Environment note.** `apparatus/node_modules` is absent in a fresh worktree, so
+`validate.test.js` (ajv) and `accessibility/run.test.js` (Playwright) could not
+resolve their dependencies — the two pre-existing failures §28.7 recorded. No
+install was run; instead the main checkout's already-installed packages were
+symlinked in per-package, which `node_modules/` already gitignores. That is a
+local convenience only, carried in no commit.
+
+### 34.10 What this does NOT establish
+
+Stated plainly, because §34.1 reads stronger than the evidence is.
+
+- **Nothing here has touched live GitHub, live git for a real PR, or a real
+  ledger.** Every adapter in every test is a stub. The composition's *logic* is
+  proved; the behaviour of the four adapters against reality is exactly as
+  unexercised as §28.5 left it.
+- **`.runtime/` does not exist** — no run has occurred, it is gitignored, and
+  every ledger fixture is synthetic and hand-shaped to what `supervisor.py` is
+  read to write. The §34.2 contract is a contract, not an observation.
+- **The C-04a realistic multi-cycle FIXTURE preflight has still not been run.**
+  That — Builder→PR→Review FAIL→Fix→CI→Accessibility/Security→fresh
+  re-review→merge, at least two review cycles, against an isolated fixture
+  PR/worktree with real git mechanics — remains C-04a's requirement (1), and it
+  is the gap between "the composition layer exists and is tested" and "the live
+  merge gate has been demonstrated".
+- **C-04 is therefore not closed by this branch.** The composition layer now
+  exists, which §28.5 named as the missing piece; the fixture preflight, the CI
+  wiring (§34.5 gap 5) and the ledger `head_sha` field (§34.2) are all still
+  open. `decision: 'ELIGIBLE'` from a fixture is not launch readiness and this
+  branch claims none.
+- **The audit was not edited.** `experiment/CONTRADICTION-AUDIT.md` rows C-04
+  and C-04a have concurrent edits from other streams; whoever reconciles them
+  should cite the three evidence files named in §34.9.

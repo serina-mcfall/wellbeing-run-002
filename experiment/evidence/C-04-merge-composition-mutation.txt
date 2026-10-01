@@ -1,0 +1,67 @@
+C-04 live merge-gate composition - mutation campaign
+Branch wip/c04-merge-composition, 2026-10-01
+
+Six guards broken one at a time. Each mutation was applied to a file whose
+pre-mutation sha256 was recorded, the relevant suite was re-run, the file was
+restored from its pre-mutation bytes, and the restoration was verified by
+sha256 comparison. Both suites were re-run after all restorations.
+
+No network calls, no GitHub writes, no merges, no notifications, no workers.
+
+========================================================================
+
+BASELINE node --test (from apparatus/): 177 passed, 0 failed, exit 0
+BASELINE python3 -m unittest discover -s tests: OK, exit 0
+
+M1 default-deny flipped to default-allow
+    file          apparatus/pr-evidence/live-gate.js
+    sha256 before 2d6392631870930c6f2dac9403ebf7b2aa54088b2fcb5a484c7818ba95ab207b
+    sha256 mutated08c4c7920bf1ae67e2399fd4d4da62f844502abedf0093aba4e75c1a92316661
+    result        DETECTED (red) - 140 passed, 37 failed, exit 1
+    sha256 after  2d6392631870930c6f2dac9403ebf7b2aa54088b2fcb5a484c7818ba95ab207b
+    restored      VERIFIED
+
+M2 stale verdict accepted (live gate stops comparing the package to the trusted head)
+    file          apparatus/pr-evidence/live-gate.js
+    sha256 before 2d6392631870930c6f2dac9403ebf7b2aa54088b2fcb5a484c7818ba95ab207b
+    sha256 mutated6328bb6442ca5772d06f2eb7e61c9396ca168108606bdfd927e41ca7b1110653
+    result        DETECTED (red) - 175 passed, 2 failed, exit 1
+    sha256 after  2d6392631870930c6f2dac9403ebf7b2aa54088b2fcb5a484c7818ba95ab207b
+    restored      VERIFIED
+
+M3 changed head not invalidating (control/routing.py drops the reviewed_head comparison)
+    file          control/routing.py
+    sha256 before 1a7840868b385f451ebe5347433fa7105a9c666d67744464f36d1e0721ecfd35
+    sha256 mutated1207df0b1a57e71e75f20a825dd5346b74f11b89ca62719e62044d0d1921023e
+    result        DETECTED (red) - FAILED (failures=4), exit 1
+    sha256 after  1a7840868b385f451ebe5347433fa7105a9c666d67744464f36d1e0721ecfd35
+    restored      VERIFIED
+
+M4 changed head not invalidating (live gate ignores a moved pull-request head)
+    file          apparatus/pr-evidence/live-gate.js
+    sha256 before 2d6392631870930c6f2dac9403ebf7b2aa54088b2fcb5a484c7818ba95ab207b
+    sha256 mutated7b341c730f646ca11859e2defcecde6e7c65bb1685cfc903afb0d5c5fe019997
+    result        DETECTED (red) - 175 passed, 2 failed, exit 1
+    sha256 after  2d6392631870930c6f2dac9403ebf7b2aa54088b2fcb5a484c7818ba95ab207b
+    restored      VERIFIED
+
+M5 an adapter's result ignored (the CI adapter's answer is replaced with a pass)
+    file          apparatus/pr-evidence/live-gate.js
+    sha256 before 2d6392631870930c6f2dac9403ebf7b2aa54088b2fcb5a484c7818ba95ab207b
+    sha256 mutatedf04964cf28864c7629282119c5dd536e34f5e4089aea0e85be59b3766859daa7
+    result        DETECTED (red) - 175 passed, 2 failed, exit 1
+    sha256 after  2d6392631870930c6f2dac9403ebf7b2aa54088b2fcb5a484c7818ba95ab207b
+    restored      VERIFIED
+
+M6 the accessibility requirement registry bypassed
+    file          apparatus/pr-evidence/validate.js
+    sha256 before c8a4173105208c31bd0775e3535df748e5447ce1ef1778fff8fdf6e9bff19444
+    sha256 mutatedf9c1697804ee8132b6abcbcaa63cec4c371bd89e539db9fdb1b89976df6a6de5
+    result        DETECTED (red) - 175 passed, 2 failed, exit 1
+    sha256 after  c8a4173105208c31bd0775e3535df748e5447ce1ef1778fff8fdf6e9bff19444
+    restored      VERIFIED
+
+AFTER ALL RESTORATIONS node --test: 177 passed, 0 failed, exit 0
+AFTER ALL RESTORATIONS python: OK, exit 0
+
+OVERALL: all mutations detected and all files restored

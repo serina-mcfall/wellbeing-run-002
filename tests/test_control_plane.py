@@ -86,10 +86,14 @@ class TestTransitions(unittest.TestCase):
         self.assertTrue(state.dependencies_met(doc, child))
 
 
+HEAD_SHA = "a" * 40
+
+
 class TestMergeGate(unittest.TestCase):
     def setUp(self):
         self.pr = {
             "number": 7, "state": "OPEN", "isDraft": False,
+            "headRefOid": HEAD_SHA,
             "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
             "statusCheckRollup": [{"name": "ci", "status": "COMPLETED",
                                    "conclusion": "SUCCESS"}],
@@ -97,6 +101,7 @@ class TestMergeGate(unittest.TestCase):
         self.record = routing.blank_pr_record(7, "TASK-001", "task/task-001")
         self.record.update({"review_verdict": routing.REVIEW_PASS,
                             "approval_current": True,
+                            "reviewed_head": HEAD_SHA,
                             "reviewed_diff_hash": "abc123"})
 
     def test_all_gates_satisfied_allows_merge(self):
