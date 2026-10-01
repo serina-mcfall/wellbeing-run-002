@@ -401,14 +401,14 @@ class TestRoutePrsQueuesButNeverMerges(MergeBoundaryCase):
             candidates = self.sup.route_prs(doc, None, [
                 _open_pr(100, BRANCH_FMT.format("task-001")),
                 _open_pr(101, BRANCH_FMT.format("task-002")),
-            ])
+            ], {})
         merge.assert_not_called()
         self.assertEqual(candidates, [("TASK-001", 100), ("TASK-002", 101)])
 
     def test_candidates_are_identifiers_not_live_document_objects(self):
         doc = self.seed()
         candidates = self.sup.route_prs(
-            doc, None, [_open_pr(100, BRANCH_FMT.format("task-001"))])
+            doc, None, [_open_pr(100, BRANCH_FMT.format("task-001"))], {})
         for candidate in candidates:
             for part in candidate:
                 self.assertIsInstance(part, (str, int))
@@ -419,7 +419,7 @@ class TestRoutePrsQueuesButNeverMerges(MergeBoundaryCase):
         doc["prs"]["100"]["approval_current"] = False
         with mock.patch.object(self.sup, "route_awaiting_dispatch"):
             candidates = self.sup.route_prs(
-                doc, None, [_open_pr(100, BRANCH_FMT.format("task-001"))])
+                doc, None, [_open_pr(100, BRANCH_FMT.format("task-001"))], {})
         self.assertEqual(candidates, [])
 
 
@@ -507,9 +507,14 @@ class InvariantDetectionCase(MergeBoundaryCase):
         view = None if pr_state is None else {
             "number": 100, "state": pr_state, "isDraft": False,
             "mergeCommit": {"oid": MERGED_SHA}}
+        # C-18 stage 1: the observation is taken by the pre-lock phase and
+        # passed in, exactly as tick() does it. Driving it through
+        # observe_closed_prs rather than hand-building the map keeps this
+        # exercising the production wiring.
         with mock.patch.object(supervisor_mod.gh, "pr_view", return_value=view), \
                 mock.patch.object(supervisor_mod.workers, "close_worker"):
-            self.sup.route_prs(doc, None, [])
+            observations = self.sup.observe_closed_prs(doc, [])
+            self.sup.route_prs(doc, None, [], observations)
         return doc
 
     def ledger_events(self, name=None):
@@ -777,7 +782,9 @@ class TestDuplicateSuppression(InvariantDetectionCase):
                 "number": 100, "state": "MERGED", "isDraft": False,
                 "mergeCommit": {"oid": "f" * 40}}), \
                 mock.patch.object(supervisor_mod.workers, "close_worker"):
-            self.sup.route_prs(doc, None, [])       # same verdict, different SHA
+            observations = self.sup.observe_closed_prs(doc, [])
+            # same verdict, different SHA
+            self.sup.route_prs(doc, None, [], observations)
         self.assertGreater(len(self.ledger_events(STATE_INVARIANT_VIOLATION)), before)
 
 

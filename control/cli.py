@@ -274,6 +274,11 @@ def cmd_freeze(args) -> int:
     supervisor = supervisor_mod.Supervisor()
     with supervisor.store.transaction() as doc:
         supervisor.freeze(doc)
+    # C-18 stage 2: freeze() queues its notification rather than sending it
+    # from inside the transaction. Draining here keeps `ctl freeze` a
+    # self-contained command instead of leaving the message for whichever
+    # supervisor tick happens next - there may not be one after a freeze.
+    supervisor.drain_notifications()
     print("EXPERIMENT_FROZEN emitted")
     return 0
 

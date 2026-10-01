@@ -224,10 +224,25 @@ class TestSingletonInvariantPreserved(unittest.TestCase):
     """The repair must not weaken the guard that DEV-001 introduced."""
 
     def test_supervisor_still_refuses_to_start_beside_a_live_incumbent(self):
+        """The DEV-001 guard must not be weakened.
+
+        It was strengthened instead. The original check-then-write - read the
+        pid file, test liveness, then write - left a window in which two
+        starting processes could both find no incumbent and both proceed;
+        measured at 16 duplicate starts in 40 trials. Exclusion is now a
+        non-blocking flock held for the process lifetime, so this pins the
+        atomic mechanism rather than the sequence it replaced.
+
+        Behavioural proof that two concurrent starts cannot both win lives in
+        tests/test_c05_3_step6b_repairs.py, which races real processes. A
+        source grep can only show the mechanism is present.
+        """
         from control import supervisor as supervisor_mod
         source = Path(supervisor_mod.__file__).read_text(encoding="utf-8")
         self.assertIn("SUPERVISOR_START_REFUSED", source)
-        self.assertIn("proc.is_running(incumbent)", source)
+        self.assertIn("fcntl.LOCK_EX | fcntl.LOCK_NB", source)
+        self.assertNotIn("proc.is_running(incumbent)", source,
+                         "the racy check-then-write guard must not return")
 
 
 if __name__ == "__main__":

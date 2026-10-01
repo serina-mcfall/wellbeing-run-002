@@ -37,13 +37,14 @@ observation code (control/proc.py) and its callers.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config, workers
+from . import config, debt, redact, routing, security_contract, workers
 
 COMPLETED = "COMPLETED"
 FAILED = "FAILED"
@@ -125,6 +126,85 @@ SIDECAR_UNREADABLE = "UNREADABLE"  # exists, and the read did not yield bytes
 SIDECAR_INVALID = "INVALID"        # read, but not usable evidence
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+# ------------------------------------------------- C-05.3a security evidence
+#
+# A security review is a QUALITATIVE provider judgement about a diff, not a
+# browser run, so it gets its own attempt namespace beside the accessibility
+# one rather than sharing it. "security-attempt-NNNN" cannot match the
+# "attempt-" prefix scan_sidecars walks, so browser observation never sees
+# these directories - and no RUNNING/TERMINAL markers are written here,
+# because nothing launches a browser whose window they would bound.
+SECURITY_OUTCOME_NAME = "security-outcome.json"
+SECURITY_ATTEMPT_RE = re.compile(r"^security-attempt-[0-9]{4}$")
+TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+# C-05.3a provenance. Written into the attempt directory - which is already
+# addressed by (task, sha, attempt) - immediately after the worktree is
+# acquired and BEFORE the worker is spawned. It answers two questions that
+# nothing else on disk can:
+#
+#   1. Which worker's artefacts belong to this attempt. The publisher reads
+#      status and output by worker name, and a name is only trustworthy if
+#      something durable says this attempt chose it. Missing or mismatched
+#      provenance therefore refuses publication rather than guessing.
+#   2. Which worktree this attempt acquired. That path is the only handle
+#      cleanup has, and a crash between acquisition and Phase D would
+#      otherwise lose it - leaving a real directory owned by nothing.
+#
+# Written before the spawn, not after, so the crash window it covers is the
+# one that actually exists. It is NOT written when worktree acquisition
+# fails, which is exactly what makes the reproduced "materialised but never
+# acquired" path fail closed: no provenance, no publication.
+SECURITY_PROVENANCE_NAME = "security-attempt.json"
+SECURITY_PROVENANCE_KEYS = frozenset({
+    "task_id", "pr", "sha", "attempt_id", "worker", "worktree",
+})
+
+# Why the attempt is not a completed review. ALIASES of
+# control/security_contract, which owns the single string definition of
+# each and composes the eleven-member union. These five describe running a
+# process - this module's own concern - and the other six describe
+# adjudicating the result, but both vocabularies are needed here and by
+# the PR-record claim validator, so neither is restated anywhere.
+# TIMED_OUT and EXIT_NONZERO coincide with the accessibility reasons in
+# _adjudicate by design: same condition, same name.
+TIMED_OUT = security_contract.TIMED_OUT
+EXIT_NONZERO = security_contract.EXIT_NONZERO
+OUTPUT_MISSING = security_contract.OUTPUT_MISSING
+PROVIDER_FAILURE = security_contract.PROVIDER_FAILURE
+SPAWN_OR_RUN_INCOMPLETE = security_contract.SPAWN_OR_RUN_INCOMPLETE
+
+SECURITY_FAILURE_REASONS = security_contract.SECURITY_FAILURE_REASONS
+
+# Bounds for everything provider-controlled that reaches durable evidence.
+# A review-level summary is bounded at 500 to match routing.Review.as_dict;
+# a per-finding summary uses debt.SUMMARY_MAX, the convention already
+# governing a RETAINED finding's summary, rather than inventing a second
+# number for the same kind of text.
+REVIEW_SUMMARY_MAX = 500
+REQUIRED_CHANGE_MAX = 1000
+FILE_MAX = 512
+PROVENANCE_MAX = 64
+
+# The complete finite security-outcome key sets. CLOSED, following the
+# convention metrics.METADATA_KEYS already sets for durable evidence:
+# exactly these keys, always. An extra key on disk means the file was not
+# written by this module, and a reader that tolerated it would let
+# provider-shaped data ride into the Supervisor inside a record that
+# otherwise looks plausible.
+SECURITY_OUTCOME_KEYS = frozenset({
+    "task_id", "pr", "sha", "attempt_id", "status", "reason", "verdict",
+    "surfaces", "findings", "finding_counts", "summary", "provider", "model",
+    "exit_code", "timed_out", "duration_ms", "stdout_name", "stderr_name",
+})
+SECURITY_FINDING_KEYS = frozenset({
+    "id", "severity", "surface", "category", "file", "summary",
+    "required_change",
+})
+
+STDOUT_NAME = "stdout.txt"
+STDERR_NAME = "stderr.txt"
 
 RUN_JS = config.REPO_ROOT / "apparatus" / "accessibility" / "run.js"
 
@@ -617,18 +697,18 @@ def _record(ctx: AttemptContext, task_id: str, result: dict, status: str,
     }
 
 
-def _publish_outcome(attempt_dir: Path, record: dict) -> bool:
-    """Publish one attempt's adjudicated outcome, atomically and once.
+def _publish_json_once(directory: Path, filename: str, record: dict) -> bool:
+    """Publish one JSON record into a directory, atomically and once.
 
-    True only when the outcome is durable AND visible under its final
-    name. False means the attempt has no durable outcome, and TERMINAL
-    must not follow - a lifecycle marker saying an attempt ended, with
-    nothing on disk saying how, is the contradiction this ordering exists
-    to prevent.
+    True only when the record is durable AND visible under its final
+    name. False means nothing was durably published, and for an attempt
+    outcome that means TERMINAL must not follow - a lifecycle marker
+    saying an attempt ended, with nothing on disk saying how, is the
+    contradiction this ordering exists to prevent.
 
     Written to a temporary name, fsynced, then LINKED into place rather
     than renamed. Three properties are needed and only link gives all
-    three: rename would silently replace an existing outcome, and an
+    three: rename would silently replace an existing record, and an
     attempt's adjudication is write-once for the same reason its
     directory is; writing straight to the final name under O_EXCL would
     be write-once but could leave a HALF-WRITTEN file under the name
@@ -641,16 +721,22 @@ def _publish_outcome(attempt_dir: Path, record: dict) -> bool:
     cleanup is durable too and a crash cannot leave debris that looks
     like an outcome in progress.
 
-    A published-but-unsynced outcome is NOT withdrawn, unlike a marker
+    A published-but-unsynced record is NOT withdrawn, unlike a marker
     whose durability fails. A marker's whole content is its presence, so
     a doubtful one must go; an outcome carries adjudication that cannot
     be reconstructed, and an outcome present without TERMINAL reads as
     "may still be running" - conservative in the direction that matters.
     Deleting an adjudication that may already be durable is worse.
+
+    INTERNAL. `filename` is supplied only from trusted control-plane
+    constants - OUTCOME_NAME and its siblings - never from a caller's
+    input, a reviewer's output or anything reaching this process from
+    outside. It is a fixed name chosen by this module, not a parameter a
+    caller may steer.
     """
-    attempt_dir = Path(attempt_dir)
-    final = attempt_dir / OUTCOME_NAME
-    tmp = attempt_dir / (OUTCOME_NAME + ".tmp")
+    directory = Path(directory)
+    final = directory / filename
+    tmp = directory / (filename + ".tmp")
     try:
         payload = (json.dumps(record, indent=2, sort_keys=True) + "\n").encode()
     except (TypeError, ValueError):
@@ -679,7 +765,7 @@ def _publish_outcome(attempt_dir: Path, record: dict) -> bool:
             published = True
         except OSError:
             published = False  # already claimed, or the link did not happen
-    entry_durable = _fsync_path(attempt_dir, os.O_RDONLY) if published else False
+    entry_durable = _fsync_path(directory, os.O_RDONLY) if published else False
     try:
         tmp.unlink()
     except OSError:
@@ -688,8 +774,618 @@ def _publish_outcome(attempt_dir: Path, record: dict) -> bool:
         if published:
             # Best-effort: the outcome is already linked and synced, so a
             # failure here leaves tidy-up undone, never the outcome undone.
-            _fsync_path(attempt_dir, os.O_RDONLY)
+            _fsync_path(directory, os.O_RDONLY)
     return published and entry_durable
+
+
+def _publish_outcome(attempt_dir: Path, record: dict) -> bool:
+    """C-05.2's accessibility attempt outcome, atomically and once.
+
+    Contract unchanged: True only when the outcome is durable and visible
+    under attempt-outcome.json, and TERMINAL must not follow a False. The
+    durability algorithm and the reasoning behind every step of it live
+    in _publish_json_once.
+    """
+    return _publish_json_once(Path(attempt_dir), OUTCOME_NAME, record)
+
+
+def publish_security_outcome(attempt_dir: Path, record: dict) -> bool:
+    """C-05.3a's security attempt outcome, atomically and once.
+
+    Same durability contract as _publish_outcome and the same algorithm -
+    see _publish_json_once - under a different fixed name, so a security
+    attempt's adjudication is as write-once as an accessibility one.
+    """
+    return _publish_json_once(Path(attempt_dir), SECURITY_OUTCOME_NAME, record)
+
+
+def _read_json_nofollow(path: Path):
+    """One JSON record from a real, non-symlink regular file, or None.
+
+    None for every unusable reason alike - absent, a symlink (ELOOP), not a
+    regular file, unreadable, garbled. Never an exception carrying
+    provider-shaped text, and never a partially-trusted record.
+
+    Symlinks are not followed anywhere in the evidence tree: a link could
+    point a reader at a record describing a different commit entirely, which
+    is the stale-SHA attribution the whole design exists to prevent.
+    """
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None  # absent, a symlink (ELOOP), unreadable - all unusable
+    chunks: list[bytes] = []
+    readable = True
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            readable = False
+        else:
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+    except OSError:
+        readable = False
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    if not readable:
+        return None
+    try:
+        return json.loads(b"".join(chunks).decode("utf-8"))
+    except ValueError:
+        return None
+
+
+def _provenance_invariants_hold(record) -> bool:
+    """A provenance record this control plane could have written.
+
+    Closed key set, canonical four-part identity, and two bounded strings.
+    The worker name is checked against routing's own pattern rather than a
+    second copy of it, so the thing validated here is the same thing that
+    names the files on disk.
+    """
+    if not isinstance(record, dict) or set(record) != SECURITY_PROVENANCE_KEYS:
+        return False
+    if not _canonical_identity(record["task_id"], record["pr"], record["sha"],
+                               record["attempt_id"]):
+        return False
+    worker = record["worker"]
+    if not isinstance(worker, str) or not routing.SECURITY_WORKER_RE.match(worker):
+        return False
+    return _bounded_str(record["worktree"], 4096) and bool(record["worktree"])
+
+
+def write_security_provenance(attempt_dir: Path, record: dict) -> bool:
+    """Record which worker and worktree this attempt owns.
+
+    Idempotent rather than write-once, and the difference matters: a crash
+    between acquisition and spawn is resumed by re-running Phase C for the
+    SAME attempt, which re-derives byte-identical provenance. Refusing the
+    rewrite would strand the resumed attempt, so an existing record that
+    already says the same thing is success. An existing record that says
+    something DIFFERENT is a genuine identity collision and is refused.
+    """
+    if not _provenance_invariants_hold(record):
+        return False
+    existing = read_security_provenance(attempt_dir)
+    if existing is not None:
+        return existing == record
+    return _publish_json_once(Path(attempt_dir), SECURITY_PROVENANCE_NAME,
+                              record)
+
+
+def read_security_provenance(attempt_dir: Path) -> dict | None:
+    """The attempt's provenance record, or None for any unusable reason.
+
+    None covers absent, unreadable, a symlink, not a regular file, garbled
+    and structurally invalid alike. Callers must treat None as "provenance
+    not established" and refuse to attribute any worker artefact to this
+    attempt - never as "no constraint".
+    """
+    record = _read_json_nofollow(Path(attempt_dir) / SECURITY_PROVENANCE_NAME)
+    if record is None or not _provenance_invariants_hold(record):
+        return None
+    return record
+
+
+def scan_security_attempts(root: Path | None = None) -> tuple[list[dict], bool]:
+    """Every readable security-attempt provenance record, and whether the
+    walk was complete.
+
+    (records, ok). ok is False when any part of the tree could not be
+    enumerated, and a caller deciding whether a resource may be RELEASED
+    must treat an incomplete walk as "unknown", never as "nothing found" -
+    the same fail-closed rule scan_sidecars applies to browsers.
+
+    Reads only. Nothing here creates, removes or repairs anything.
+    """
+    base = Path(root) if root is not None else config.EVIDENCE_DIR
+    records: list[dict] = []
+    if not base.is_dir():
+        # No evidence tree yet is a complete answer, not a failed walk:
+        # nothing has been attempted, so nothing is owned. Distinct from a
+        # tree that exists but cannot be read, which falls through below.
+        return records, True
+    ok = True
+    try:
+        task_dirs = sorted(p for p in base.iterdir() if p.is_dir())
+    except OSError:
+        return records, False
+    for task_dir in task_dirs:
+        try:
+            sha_dirs = sorted(p for p in task_dir.iterdir() if p.is_dir())
+        except OSError:
+            ok = False
+            continue
+        for sha_dir in sha_dirs:
+            try:
+                attempts = sorted(p for p in sha_dir.iterdir()
+                                  if p.is_dir()
+                                  and SECURITY_ATTEMPT_RE.match(p.name))
+            except OSError:
+                ok = False
+                continue
+            for attempt in attempts:
+                record = read_security_provenance(attempt)
+                if record is None:
+                    # Either no provenance was ever written (an attempt that
+                    # never acquired a worktree owns nothing) or it is
+                    # unreadable. Neither yields a resource to release, and
+                    # an unreadable one must not silently become "absent".
+                    if (attempt / SECURITY_PROVENANCE_NAME).exists():
+                        ok = False
+                    continue
+                # The record must agree with WHERE it was found. The path
+                # encodes task, full SHA and attempt independently of the
+                # file's contents, so a record naming a different attempt is
+                # one that has been moved, copied or corrupted - and this
+                # record is what the publisher treats as an attempt's
+                # identity. Trusting a displaced one would attribute a
+                # review to whatever it happens to name. Dropped, and the
+                # walk is no longer complete, so nothing is released on it.
+                if (record["task_id"] != task_dir.name
+                        or record["sha"] != sha_dir.name
+                        or record["attempt_id"] != attempt.name):
+                    ok = False
+                    continue
+                records.append(record)
+    return records, ok
+
+
+def security_attempt_dir(task_id: str, sha: str, attempt_id: str, *,
+                         root: Path | None = None) -> Path:
+    """Address the EXACT claimed security attempt. Allocates nothing.
+
+    The ordinal is chosen under the state lock, in the Supervisor's
+    state-only claim, and this function's whole job is to say where that
+    claim lives. It never probes the filesystem, never increments, never
+    recomputes an ordinal, and never substitutes a different directory
+    because the named one already exists - any of those would let the
+    filesystem, rather than the durable claim, decide which attempt is
+    being written, which is precisely the race the state-first design
+    removes.
+
+    Every component is validated rather than trusted: a task id or attempt
+    id carrying a separator, a parent reference or an absolute prefix would
+    escape the evidence tree entirely. Rejection raises ValueError, because
+    a caller handing an unvalidated identifier here has a bug that must not
+    be papered over with a fallback path.
+    """
+    if not TASK_ID_RE.match(task_id or ""):
+        raise ValueError("task_id must be a bare alphanumeric identifier")
+    if not SHA_RE.match(sha or ""):
+        raise ValueError("sha must be a full 40-character lowercase-hex git SHA")
+    if not SECURITY_ATTEMPT_RE.match(attempt_id or ""):
+        raise ValueError("attempt_id must be exactly security-attempt-NNNN")
+    base = Path(root) if root is not None else config.EVIDENCE_DIR
+    return base / task_id / sha / attempt_id
+
+
+def _canonical_identity(task_id, pr, sha, attempt_id) -> bool:
+    """Is this the four-part identity a security outcome is bound to?
+
+    ONE definition, used when writing and when reading. Two copies would
+    drift, and the failure mode of drift here is silent: a writer that
+    accepts what the reader refuses produces durable evidence nothing can
+    ever ingest. bool is excluded from pr explicitly - True would otherwise
+    pass as PR number 1.
+    """
+    return (isinstance(task_id, str) and bool(TASK_ID_RE.match(task_id))
+            and isinstance(pr, int) and not isinstance(pr, bool) and pr > 0
+            and isinstance(sha, str) and bool(SHA_RE.match(sha))
+            and isinstance(attempt_id, str)
+            and bool(SECURITY_ATTEMPT_RE.match(attempt_id)))
+
+
+def _bounded_str(value, limit: int) -> bool:
+    return isinstance(value, str) and len(value) <= limit
+
+
+def _count_int(value) -> bool:
+    """A real non-negative count. bool is an int in Python, and True would
+    otherwise read as a count of 1."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _valid_exit_code(value) -> bool:
+    """An int or None. None is legitimate: an attempt that never launched
+    has no exit code, which is not the same as exiting zero."""
+    return value is None or (isinstance(value, int)
+                             and not isinstance(value, bool))
+
+
+def _valid_duration_ms(value) -> bool:
+    """A finite non-negative number, or None.
+
+    NaN and the infinities are excluded explicitly. json.dumps emits them
+    unquoted and json.loads reads them back, so a NaN duration would
+    round-trip through the artifact and compare unequal to itself in
+    anything that later reasoned about it.
+    """
+    if value is None:
+        return True
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and value >= 0
+
+
+def _runtime_fields(result: dict) -> dict:
+    """The three runtime-metadata fields, validated once for writer and
+    reader alike.
+
+    A malformed value here is a CONTROL-PLANE bug, not a provider failure,
+    so it raises rather than becoming a persisted reason: filing our own
+    schema mistake under a finite code would record it as evidence about
+    the review. Nothing is coerced - a string exit code is a caller error,
+    and turning it into an int would hide that.
+    """
+    if not isinstance(result, dict):
+        raise ValueError("result must be a mapping")
+    exit_code = result.get("exit_code")
+    duration = result.get("duration_ms")
+    if not _valid_exit_code(exit_code):
+        raise ValueError("exit_code must be an int or None")
+    if not _valid_duration_ms(duration):
+        raise ValueError(
+            "duration_ms must be a finite non-negative number or None")
+    # Present AND an actual bool - never bool(...) over whatever arrived.
+    # Coercion is the quietest kind of wrong here: "false" becomes True,
+    # a missing key becomes False, and the record then states as fact that
+    # the attempt did or did not time out when nothing ever said so.
+    if "timed_out" not in result or not isinstance(result["timed_out"], bool):
+        raise ValueError("timed_out must be present and an actual bool")
+    return {"exit_code": exit_code,
+            "timed_out": result["timed_out"],
+            "duration_ms": duration}
+
+
+def _safe_text(value, limit: int) -> str:
+    """Scrub then hard-bound one provider-controlled string.
+
+    Scrubbed rather than rejected, following control/debt.py: this is model
+    output, and a redacted string is still valid evidence. Bounded second,
+    so the bound applies to what will actually be written.
+    """
+    return redact.scrub(str("" if value is None else value))[:limit]
+
+
+def _evidence_relative_path(value) -> str | None:
+    """A source-relative file reference, or None if it is not one.
+
+    None means the finding is INVALID, not that the path is blanked: a
+    finding whose location cannot be trusted is not a lesser finding, and
+    silently emptying the field would leave a blocking finding pointing
+    nowhere. Absolute paths are refused outright rather than trimmed,
+    because /home/<user>/... in durable evidence leaks the host layout, and
+    a '..' segment claims to describe something outside the tree.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or text.startswith(("/", "\\", "~")):
+        return None
+    if re.match(r"^[A-Za-z]:", text):
+        return None  # drive-letter absolute
+    if ".." in text.replace("\\", "/").split("/"):
+        return None
+    return _safe_text(text, FILE_MAX)
+
+
+def _normalise_finding(finding: dict) -> dict | None:
+    """One finding reduced to the seven fields routing and fixing need.
+
+    None means invalid - the caller fails the whole outcome closed rather
+    than dropping this finding, because dropping the one finding that will
+    not validate is how a malformed review becomes a clean pass.
+
+    Every other key the reviewer sent is discarded, `evidence` most
+    deliberately of all: it is unbounded prose quoting the diff, it is the
+    field most likely to carry a secret verbatim, and nothing downstream
+    needs it. `category` is set to SECURITY so the finding is consumable by
+    the existing fixer path, which reads routing.KNOWN_GATES.
+    """
+    if not isinstance(finding, dict):
+        return None
+    finding_id = finding.get("id")
+    if not isinstance(finding_id, str) or not finding_id.strip():
+        return None
+    severity = finding.get("severity")
+    surface = finding.get("surface")
+    if severity not in routing.SEVERITIES:
+        return None
+    if surface not in routing.SECURITY_SURFACES:
+        return None
+    path = _evidence_relative_path(finding.get("file"))
+    if path is None:
+        return None
+    return {
+        "id": _safe_text(finding_id.strip(), PROVENANCE_MAX),
+        "severity": severity,
+        "surface": surface,
+        "category": "SECURITY",
+        "file": path,
+        "summary": _safe_text(finding.get("summary"), debt.SUMMARY_MAX),
+        "required_change": _safe_text(finding.get("required_change"),
+                                      REQUIRED_CHANGE_MAX),
+    }
+
+
+def _security_failed(task_id, pr, sha, attempt_id, result, reason,
+                     provider, model) -> dict:
+    if reason not in SECURITY_FAILURE_REASONS:
+        raise ValueError("reason must be one of the finite security failure codes")
+    return {
+        "task_id": task_id, "pr": pr, "sha": sha, "attempt_id": attempt_id,
+        "status": FAILED, "reason": reason,
+        "verdict": None, "surfaces": None,
+        "findings": [], "finding_counts": None, "summary": "",
+        "provider": _safe_text(provider, PROVENANCE_MAX) if provider else None,
+        "model": _safe_text(model, PROVENANCE_MAX) if model else None,
+        **_runtime_fields(result),
+        "stdout_name": STDOUT_NAME, "stderr_name": STDERR_NAME,
+    }
+
+
+def normalize_security_outcome(*, task_id: str, pr: int, sha: str,
+                               attempt_id: str, result: dict,
+                               review=None, reason: str = "",
+                               provider: str | None = None,
+                               model: str | None = None) -> dict:
+    """The control plane's durable record of one security attempt.
+
+    One helper, because normalisation and adjudication cannot be separated
+    here without letting a caller persist a verdict the contract refuses.
+    Pass a finite `reason` for an apparatus failure; pass a parsed
+    SecurityReview and this decides whether it is a coherent C-05b contract
+    and downgrades it to FAILED with routing's own finite reason if not.
+
+    COMPLETED means reason == "", a recognised verdict, all twelve surfaces
+    and populated counts. FAILED means a finite reason, null verdict, null
+    surfaces, null counts. A valid SECURITY_FAIL is COMPLETED with a
+    failing verdict - a review that ran and found something is not an
+    apparatus failure, and conflating the two would hide real findings
+    behind a broken-tooling reading.
+
+    ALL valid findings are kept, P2/P3 included. The artifact is the
+    evidence; separating blocking from debt is the caller's routing
+    decision, and discarding debt here would destroy the record of it.
+    """
+    # Identifiers first, with the same predicate the strict reader uses.
+    # Producing a structurally valid record under an identity the reader
+    # will later refuse is worse than failing here: the attempt would
+    # publish, look complete, and never be ingestible.
+    if not _canonical_identity(task_id, pr, sha, attempt_id):
+        raise ValueError("task_id, pr, sha and attempt_id must be canonical")
+    if reason:
+        return _security_failed(task_id, pr, sha, attempt_id, result, reason,
+                                provider, model)
+    if review is None:
+        raise ValueError("normalize_security_outcome needs a review or a reason")
+
+    ok, why = routing.security_is_consistent(review)
+    if not ok:
+        return _security_failed(task_id, pr, sha, attempt_id, result, why,
+                                provider, model)
+
+    findings = []
+    for raw in review.findings:
+        normalised = _normalise_finding(raw)
+        if normalised is None:
+            # The contract passed but a finding will not reduce - an
+            # unusable path, a blank id. Fail the whole outcome closed
+            # rather than persist a partial finding set that would read as
+            # complete.
+            return _security_failed(task_id, pr, sha, attempt_id, result,
+                                    routing.FINDING_FIELDS_INVALID,
+                                    provider, model)
+        findings.append(normalised)
+
+    return {
+        "task_id": task_id, "pr": pr, "sha": sha, "attempt_id": attempt_id,
+        "status": COMPLETED, "reason": "",
+        "verdict": review.verdict,
+        "surfaces": {s: review.surfaces[s] for s in routing.SECURITY_SURFACES},
+        "findings": findings,
+        "finding_counts": {s: sum(1 for f in findings if f["severity"] == s)
+                           for s in routing.SEVERITIES},
+        "summary": _safe_text(review.summary, REVIEW_SUMMARY_MAX),
+        "provider": _safe_text(provider, PROVENANCE_MAX) if provider else None,
+        "model": _safe_text(model, PROVENANCE_MAX) if model else None,
+        **_runtime_fields(result),
+        "stdout_name": STDOUT_NAME, "stderr_name": STDERR_NAME,
+    }
+
+
+def _is_canonical_text(value, limit: int) -> bool:
+    """Whether a stored string is EXACTLY what the writer would have stored.
+
+    Length is not the test. The writer scrubs and then bounds, and
+    _safe_text is idempotent, so a value the writer produced survives being
+    put through it again unchanged. A value that changes was never written
+    here: it carries a raw secret the scrub would have redacted, or
+    whitespace the writer would have stripped, or length the writer would
+    have cut. Checking only the bound would let a forged record carry an
+    unredacted credential in a field of perfectly legal size.
+
+    The canonical replacement is deliberately NOT substituted for the
+    stored value. A record that needed repairing is not evidence this
+    module wrote, and silently repairing it on read would launder a forgery
+    into trusted state.
+    """
+    return isinstance(value, str) and value == _safe_text(value, limit)
+
+
+def _stored_finding_is_valid(finding) -> bool:
+    """Whether one finding on disk is exactly what _normalise_finding
+    produced - the same rules as writing, applied in reverse."""
+    if not isinstance(finding, dict) or set(finding) != SECURITY_FINDING_KEYS:
+        return False
+    if finding["severity"] not in routing.SEVERITIES:
+        return False
+    if finding["surface"] not in routing.SECURITY_SURFACES:
+        return False
+    if finding["category"] != "SECURITY":
+        return False
+    finding_id = finding["id"]
+    if not isinstance(finding_id, str) or not finding_id.strip():
+        return False
+    if finding_id != _safe_text(finding_id.strip(), PROVENANCE_MAX):
+        return False
+    # Structurally a source-relative path AND already in the exact form
+    # _evidence_relative_path would have produced.
+    if finding["file"] != _evidence_relative_path(finding["file"]):
+        return False
+    if not _is_canonical_text(finding["summary"], debt.SUMMARY_MAX):
+        return False
+    return _is_canonical_text(finding["required_change"], REQUIRED_CHANGE_MAX)
+
+
+def _outcome_invariants_hold(record: dict) -> bool:
+    """Whether a record on disk is a shape this module would have written.
+
+    Strict on purpose, and strict about the boring fields too. A corrupt or
+    hand-written file must not become trusted Supervisor evidence merely
+    because its verdict and surfaces look plausible - those are the two
+    fields an author would get right. The closed key set, the fixed artifact
+    names, the bounds, and finding_counts agreeing with the findings it
+    counts are what a forgery has to reproduce as well.
+    """
+    if not isinstance(record, dict) or set(record) != SECURITY_OUTCOME_KEYS:
+        return False
+    if not _canonical_identity(record["task_id"], record["pr"], record["sha"],
+                               record["attempt_id"]):
+        return False
+    if record["stdout_name"] != STDOUT_NAME or record["stderr_name"] != STDERR_NAME:
+        return False
+    if not isinstance(record["timed_out"], bool):
+        return False
+    # The same predicates the writer validated against, so the writer
+    # cannot emit a record this refuses. Absent bounds are legitimate: an
+    # attempt that never launched has no exit code and no duration, which
+    # is not the same as exiting zero in zero milliseconds.
+    if not _valid_exit_code(record["exit_code"]):
+        return False
+    if not _valid_duration_ms(record["duration_ms"]):
+        return False
+    for key in ("provider", "model"):
+        if record[key] is not None and not _is_canonical_text(record[key],
+                                                              PROVENANCE_MAX):
+            return False
+    if not _is_canonical_text(record["summary"], REVIEW_SUMMARY_MAX):
+        return False
+    if not isinstance(record["findings"], list):
+        return False
+
+    status, reason = record["status"], record["reason"]
+    if status == COMPLETED:
+        if reason != "":
+            return False
+        if record["verdict"] not in (routing.SECURITY_PASS,
+                                     routing.SECURITY_FAIL):
+            return False
+        surfaces = record["surfaces"]
+        if not isinstance(surfaces, dict):
+            return False
+        if set(surfaces) != set(routing.SECURITY_SURFACES):
+            return False
+        if any(v not in routing.SURFACE_VALUES for v in surfaces.values()):
+            return False
+        if not all(_stored_finding_is_valid(f) for f in record["findings"]):
+            return False
+        counts = record["finding_counts"]
+        if not isinstance(counts, dict) or set(counts) != set(routing.SEVERITIES):
+            return False
+        if not all(_count_int(v) for v in counts.values()):
+            return False
+        # The counts must count THESE findings. A tally that disagrees with
+        # the list beside it is the cheapest way to make a review look
+        # clean while its findings say otherwise.
+        actual = {s: sum(1 for f in record["findings"] if f["severity"] == s)
+                  for s in routing.SEVERITIES}
+        if counts != actual:
+            return False
+        # The C-05b verdict rule, re-checked on the way in: a stored PASS
+        # carrying a blocker, or a stored FAIL carrying none, was never
+        # written by normalize_security_outcome.
+        blocking = actual["P0"] + actual["P1"]
+        if record["verdict"] == routing.SECURITY_PASS and blocking:
+            return False
+        return not (record["verdict"] == routing.SECURITY_FAIL and not blocking)
+
+    if status == FAILED:
+        return (reason in SECURITY_FAILURE_REASONS
+                and record["verdict"] is None
+                and record["surfaces"] is None
+                and record["finding_counts"] is None
+                and record["findings"] == []
+                and record["summary"] == "")
+    return False
+
+
+def read_security_outcome(task_id: str, pr: int, sha: str, attempt_id: str, *,
+                          root: Path | None = None) -> dict | None:
+    """The durable outcome of one EXACT claimed attempt, or None.
+
+    Bound to the whole four-part identity (task_id, pr, sha, attempt_id).
+    A record naming a different PR is refused exactly like one naming a
+    different SHA: the evidence tree is keyed by task and commit, so two
+    pull requests can legitimately reach the same commit, and attributing
+    one's review to the other would be the same wrong-head mistake in a
+    different direction.
+
+    None means "not usable evidence for these identifiers", for any reason:
+    absent, unreadable, not a regular file, garbled, structurally invalid,
+    or recording a different task, PR, SHA or attempt than the one asked
+    for. Never an exception carrying provider-shaped text, and never a
+    partially-trusted record.
+
+    Symlinks are not followed. Evidence is only evidence where the evidence
+    tree put it, and a link could point the reader at a record describing a
+    different commit entirely - which is exactly the stale-SHA attribution
+    this contract exists to prevent.
+
+    No "latest attempt" scan: the caller holds the authoritative claimed
+    attempt_id from durable state, and letting directory ordering choose
+    would reintroduce the race the state-first claim removes.
+    """
+    if not _canonical_identity(task_id, pr, sha, attempt_id):
+        return None
+    try:
+        path = security_attempt_dir(task_id, sha, attempt_id,
+                                    root=root) / SECURITY_OUTCOME_NAME
+    except ValueError:
+        return None
+    record = _read_json_nofollow(path)
+    if record is None or not _outcome_invariants_hold(record):
+        return None
+    if (record["task_id"] != task_id or record["pr"] != pr
+            or record["sha"] != sha or record["attempt_id"] != attempt_id):
+        return None  # a record about something else is not this attempt
+    return record
 
 
 def _adjudicate(ctx: AttemptContext, task_id: str, result: dict) -> dict:

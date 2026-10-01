@@ -16,6 +16,7 @@
     "max_builders": 3,
     "max_fixers": 1,
     "max_reviewers": 1,
+    "max_security": 1,
     "max_observers": 1,
     "max_repair_cycles": 3
   },
@@ -62,7 +63,7 @@
     },
     "jev": {
       "provider": "openrouter",
-      "model": "google/gemini-2.5-flash-lite",
+      "model": "typesafe/jev-1.13",
       "effort": "low"
     },
     "companion": {
@@ -86,6 +87,10 @@
     "builder": 3600,
     "fixer": 2400,
     "reviewer": 1800,
+    "security": 1800,
+    "accessibility_soft_seconds": 120,
+    "accessibility_hard_seconds": 300,
+    "product_server_readiness_seconds": 120,
     "lease_grace_seconds": 60
   },
 
@@ -102,5 +107,18 @@
       "grok": 900,
       "openrouter": 600
     }
+  },
+
+  "jev_pricing": {
+    "reservation_usd_per_call": 0.002688,
+    "input_usd_per_million_tokens": 0.042,
+    "max_billable_input_tokens": 64000,
+    "verified_on": "2026-10-01",
+    "basis": [
+      "Price: OpenRouter's own model endpoint GET /api/v1/models/typesafe/jev-1.13/endpoints reports pricing.prompt 0.000000042 per input token (= $0.042 per million), pricing.completion 0, and NO per-request price field. Cross-checked against the documented worked example in OpenRouter's Jev tutorial: 476 input tokens billed $0.000019992, which is exactly 476 x 0.000000042.",
+      "Token ceiling: the bound is the largest documented maximum input a single request may carry, so it covers the COMPLETE request - model, state, questions, instructions and every criteria description - without depending on a tokenizer we have no specification for. OpenRouter reports context_length 32000 for the served model; TypeSafe's own models page is reported as 64000 per request (32000 for state plus the longest question). The two disagree, so the larger is used.",
+      "Reservation: 64000 x 0.000000042 = 0.002688 USD per call.",
+      "NOT claimed: that payload bytes bound tokens; that the returned model identifier proves immutable weights; that a request exceeding the limit is rejected rather than truncated - OpenRouter documents neither that behaviour nor any billing overhead or minimum charge. The bound assumes only that billed input tokens cannot exceed the maximum input a request may carry, and that no undocumented per-request surcharge exists. It is admission control, not a prediction of actual cost; actual cost is whatever the provider reports."
+    ]
   }
 }

@@ -115,7 +115,9 @@ class TestMergeShaUnavailable(CompleteTaskNotificationCase):
 def _pr_view_result(ok=True, state=None, merge_commit_oid=None):
     if not ok:
         return None
-    data = {}
+    # C-18 stage 1 binds an observation to the pull request it was requested
+    # for, and real `gh pr view` always returns number - PR_FIELDS asks for it.
+    data = {"number": PR}
     if state is not None:
         data["state"] = state
     if merge_commit_oid is not None:
@@ -169,7 +171,10 @@ class ExternalMergeDetectionCase(unittest.TestCase):
         with mock.patch.object(supervisor_mod.gh, "pr_view", return_value=pr_view_result), \
                 mock.patch.object(supervisor_mod.workers, "close_worker"):
             # No open PRs at all - forces the pr is None branch for every task.
-            self.sup.route_prs(doc, None, [])
+            # C-18 stage 1: the view is observed before the transaction and
+            # handed in, which is what tick() does.
+            observations = self.sup.observe_closed_prs(doc, [])
+            self.sup.route_prs(doc, None, [], observations)
 
     def test_merged_with_sha_completes_with_correct_evidence(self):
         doc = self.doc_with_pr_task()
@@ -467,7 +472,16 @@ class TestDiscordFailureDoesNotEraseTheLedgerEvent(unittest.TestCase):
     """The primary business event (PR_OPENED here, standing in for the
     shared notify_out mechanism every E1 notification uses) must survive a
     real Discord send failure - this exercises the REAL notify_out method,
-    unlike every test above, which stubs it out to inspect call content."""
+    unlike every test above, which stubs it out to inspect call content.
+
+    C-18 stage 2 moved the send itself out of the caller's transaction, so
+    the failure can no longer be injected here: notify_out only queues. What
+    this case still proves is that the business event and the state change
+    are durable and the notification is not lost. The end-to-end version -
+    a delivery that actually fails during the drain, against a real store,
+    rolling nothing back and leaving the intent retryable - lives in
+    tests/test_c18_stage2_notification_queue.py.
+    """
 
     def setUp(self):
         cfg = config.load()
@@ -489,7 +503,14 @@ class TestDiscordFailureDoesNotEraseTheLedgerEvent(unittest.TestCase):
 
         self.sup.attach_pr(doc, task, PR)
 
-        self.sup.notifier.send.assert_called_once()
+        # Nothing is delivered from inside the caller's transaction any more.
+        self.assertEqual(self.sup.notifier.send.call_count, 0)
+        # The notification is not lost by not being sent here: it is durable,
+        # queued alongside the state change, and awaiting the drain.
+        intents = list(notify.queue(doc).values())
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(intents[0]["status"], notify.PENDING)
+
         event_types = [name for name, _ in self.events]
         self.assertIn("PR_OPENED", event_types)
         # The underlying state change itself must also survive - a Discord

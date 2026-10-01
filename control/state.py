@@ -103,8 +103,16 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
                           "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET"}),
     "WAITING_CI": frozenset({"REVIEW", "WAITING_EVIDENCE", "STALE", "FAILED",
                              "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET"}),
-    "WAITING_EVIDENCE": frozenset({"REVIEW", "STALE", "FAILED", "HUMAN_REQUIRED",
-                                   "WAITING_PROVIDER_RESET"}),
+    # FIX_REQUIRED added by C-05.3 governance (2026-09-30). A specialized
+    # evidence FAIL on the current head means that head needs remediation
+    # before a reviewer spends a cycle on it. The loop is
+    # WAITING_EVIDENCE -> FIX_REQUIRED -> PR_OPEN -> WAITING_EVIDENCE, with
+    # the required evidence rerun for the NEW head; a prior SHA's pass
+    # never carries forward. REVIEW is reached only once every required
+    # current-SHA evidence class has passed. Evidence is not merge
+    # authority - the reviewer remains the acceptance authority.
+    "WAITING_EVIDENCE": frozenset({"REVIEW", "FIX_REQUIRED", "STALE", "FAILED",
+                                   "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET"}),
     "REVIEW": frozenset(
         {"FIX_REQUIRED", "MERGE_READY", "MERGED", "PR_OPEN", "STALE", "FAILED",
          "HUMAN_REQUIRED", "WAITING_PROVIDER_RESET", "FROZEN"}
@@ -167,8 +175,13 @@ def initial_document(experiment_id: str, protocol_version: str) -> dict:
         "baseline_sha": None,
         "tasks": {},
         "providers": {},
+        # C-19: `reservations` holds conservative allowances committed before a
+        # paid request is sent. Readers use budget.reservations(doc), which
+        # setdefaults, so a document written before this key existed still
+        # works unchanged.
         "budget": {"total_usd": 0.0, "spent_usd": 0.0, "estimated_usd": 0.0,
-                   "thresholds_crossed": [], "hard_stop": False},
+                   "thresholds_crossed": [], "hard_stop": False,
+                   "reservations": {}},
         "migration_lock": {"state": "FREE", "owner_task": None, "owner_pr": None,
                            "acquired_at": None, "waiters": [], "contention_events": 0},
         "workers": {},
@@ -180,6 +193,11 @@ def initial_document(experiment_id: str, protocol_version: str) -> dict:
                      "recoveries": 0, "migration_lock_waits": 0},
         "review_queue_depth_history": [],
         "checkpoints_sent": [],
+        # C-18 stage 2. Notification intents, committed with the state change
+        # that produced them and delivered afterwards with no lock held.
+        # Readers use notify.queue(doc), which setdefaults, so a document
+        # written before this key existed still works unchanged.
+        "notifications": {},
     }
 
 

@@ -8,6 +8,7 @@ here - only the *names* of the environment variables that must be present.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,13 @@ LEDGER_PATH = RUNTIME_DIR / "ledger.jsonl"
 STATE_PATH = RUNTIME_DIR / "state.json"
 HEARTBEAT_PATH = RUNTIME_DIR / "supervisor-heartbeat.json"
 PID_PATH = RUNTIME_DIR / "supervisor.pid"
+# Exclusion, as against reporting. PID_PATH says which process to look at;
+# this inode is what actually stops a second Supervisor, via a non-blocking
+# flock held open for the process lifetime. It is created once and never
+# unlinked or replaced during normal operation - a new inode under the same
+# name would be a second, independent lock, which is how "atomic" exclusion
+# quietly becomes no exclusion at all.
+SINGLETON_LOCK_PATH = RUNTIME_DIR / "supervisor.lock"
 WATCHDOG_PID_PATH = RUNTIME_DIR / "watchdog.pid"
 BASELINE_PATH = RUNTIME_DIR / "baseline.json"
 PREFLIGHT_PATH = RUNTIME_DIR / "preflight.json"
@@ -73,6 +81,7 @@ class ExperimentConfig:
     max_builders: int
     max_fixers: int
     max_reviewers: int
+    max_security: int
     max_observers: int
     max_repair_cycles: int
     tmux_session: str
@@ -86,6 +95,7 @@ class ExperimentConfig:
     heartbeat_stale_seconds: int
     cooldown_seconds: dict[str, int]
     extra: dict = field(default_factory=dict)
+    jev_pricing: dict = field(default_factory=dict)
 
 
 def load_secrets_file(path: Path | None = None) -> list[str]:
@@ -140,6 +150,7 @@ def load() -> ExperimentConfig:
         max_builders=int(raw["concurrency"]["max_builders"]),
         max_fixers=int(raw["concurrency"]["max_fixers"]),
         max_reviewers=int(raw["concurrency"]["max_reviewers"]),
+        max_security=int(raw["concurrency"]["max_security"]),
         max_observers=int(raw["concurrency"]["max_observers"]),
         max_repair_cycles=int(raw["concurrency"]["max_repair_cycles"]),
         tmux_session=raw["tmux_session"],
@@ -153,7 +164,24 @@ def load() -> ExperimentConfig:
         heartbeat_stale_seconds=int(raw["supervisor"]["heartbeat_stale_seconds"]),
         cooldown_seconds=dict(raw["providers"]["cooldown_seconds"]),
         extra=raw,
+        jev_pricing=dict(raw.get("jev_pricing") or {}),
     )
+
+
+def jev_reservation_usd(cfg: ExperimentConfig) -> float | None:
+    """The governed per-call allowance reserved before a paid Jev request.
+
+    None means no defensible bound is configured, and the paid path is blocked
+    rather than a number being guessed. The basis for the configured value is
+    recorded in config/experiment.json alongside it.
+    """
+    value = (cfg.jev_pricing or {}).get("reservation_usd_per_call")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    amount = float(value)
+    if not math.isfinite(amount) or amount <= 0:
+        return None
+    return amount
 
 
 def ensure_runtime_dirs() -> None:

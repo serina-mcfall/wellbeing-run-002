@@ -177,7 +177,12 @@ class TestS1RepairCycleLimit(SupervisorSiteCase):
         self.assertEqual(doc["counters"]["human_interventions"], 1)
         self.fire_s1(doc)   # deduped recurrence: no second notification
         self.assertEqual(doc["counters"]["human_interventions"], 1)
-        self.assertEqual(self.sup.notifier.send.call_count, 1)
+        # C-18 stage 2: notify_out queues a durable intent and the drain
+        # delivers it later, so "no second notification" is now counted at
+        # the queue. Exactly one intent means exactly one send can ever
+        # happen - the same claim, checked one step earlier.
+        self.assertEqual(len(notify.queue(doc)), 1)
+        self.assertEqual(self.sup.notifier.send.call_count, 0)
 
 
 class TestS1CounterSemantics(SupervisorSiteCase):

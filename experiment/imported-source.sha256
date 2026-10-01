@@ -9,3 +9,31 @@ a2fa69bf24df553f0a18462a31c3ea3dd3934c85883c060965344b3449f7039b  tasks/TASKS.md
 114249f14557d66d2b594dd82181d1cc069ec8ee17f04e5f80a16cf6d4b499e0  protocol/RUN-002-PROTOCOL-v2.0.md
 175f0ba267ad85a2b6be620e28846a568bc5f83fd274d282f68b934b0731e851  protocol/pr-evidence.schema.json
 c42cb9b6b351f2c3ff1262ebff358d10f419a7d5330faee8ed1630607f55085b  protocol/experiment-manifest.template.json
+#
+# --- Run 001 source import, 2026-10-01 -------------------------------------
+# Governed by C-06 (RESOLVED 2026-09-25), whose eight conditions are met as
+# recorded below. Located read-only and hash-pinned in
+# C05-3a-SESSION-HANDOVER.md section 15; copied here byte-for-byte.
+#
+#   source repo   ~/wellbeing-agent-experiment/agent-run-001 (read-only)
+#   commit        0876aa2ad6c0ffc9bd028a6b5626465c7219b3ea
+#                 "experiment: freeze Run 001 Protocol v1.0"
+#   blob          efa42493c1f6059fea42868e162d5bad0e1a1289
+#   size          1569 bytes
+#   method        git --git-dir=<run-001>/.git cat-file blob <blob> > skills/README.md
+#                 Object-store read only: no worktree, no ref, no lock, no
+#                 checkout, no Run 001 runtime, process, port or credential.
+#   verified      commit:skills/README.md resolves to that blob; blob size and
+#                 destination SHA-256 both match the pinned values.
+#   authorization explicit human instruction, this session, pre-T+00.
+#   reconciliation content is method guidance only and carries its own
+#                 authority boundary - "These are methods, not authority.
+#                 Contract/spec always wins." Nothing was rewritten, extended
+#                 or reformatted, so no new skill authority is created and
+#                 Protocol v2 contracts continue to outrank it.
+#   manifest      no frozen-input hash changes: skills/README.md is in neither
+#                 manifest.PRODUCT_SPEC_FILES nor SEVERITY_POLICY_FILES, and is
+#                 not a REQUIRED_PROMPT_FILES entry. It is a preflight
+#                 SPEC_FILES presence entry only.
+#
+46d3833e5460430ec4c4f32e773a5d79e5b46eba70cba794d2bb0ddc3909329c  skills/README.md

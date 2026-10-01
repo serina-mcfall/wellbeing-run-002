@@ -188,7 +188,7 @@ class TestReviewerDispatchCannotStrand(InvariantCase):
         with mock.patch.object(self.sup, "dispatch_reviewer") as review, \
                 mock.patch.object(self.sup, "dispatch_fixer") as fix:
             self.sup.route_prs(doc, clock.ClockState(clock.now(TZ), clock.now(TZ), 24),
-                               [self.open_pr()])
+                               [self.open_pr()], {})
         review.assert_called_once()
         fix.assert_not_called()
         self.assertIn("DISPATCH_RETRY", self.events)
@@ -199,7 +199,7 @@ class TestReviewerDispatchCannotStrand(InvariantCase):
         with mock.patch.object(self.sup, "dispatch_reviewer") as review, \
                 mock.patch.object(self.sup, "dispatch_fixer") as fix:
             self.sup.route_prs(doc, clock.ClockState(clock.now(TZ), clock.now(TZ), 24),
-                               [self.open_pr()])
+                               [self.open_pr()], {})
         fix.assert_called_once()
         review.assert_not_called()
 
@@ -210,7 +210,7 @@ class TestReviewerDispatchCannotStrand(InvariantCase):
         with mock.patch.object(self.sup, "dispatch_reviewer") as review, \
                 mock.patch.object(self.sup, "dispatch_fixer") as fix:
             self.sup.route_prs(doc, clock.ClockState(clock.now(TZ), clock.now(TZ), 24),
-                               [self.open_pr()])
+                               [self.open_pr()], {})
         review.assert_not_called()
         fix.assert_not_called()
 
@@ -232,7 +232,7 @@ class TestIndependentReviewStillRequired(InvariantCase):
         doc["prs"][str(PR)]["pending_findings"] = None
         with mock.patch.object(self.sup, "dispatch_reviewer"):
             self.sup.route_prs(doc, clock.ClockState(clock.now(TZ), clock.now(TZ), 24),
-                               [self.open_pr()])
+                               [self.open_pr()], {})
         record = doc["prs"][str(PR)]
         self.assertIsNone(record["review_verdict"])
         self.assertFalse(record["approval_current"])
@@ -254,7 +254,7 @@ class TestIndependentReviewStillRequired(InvariantCase):
         with mock.patch.object(self.sup, "dispatch_reviewer"):
             candidates = self.sup.route_prs(
                 doc, clock.ClockState(clock.now(TZ), clock.now(TZ), 24),
-                [self.open_pr()])
+                [self.open_pr()], {})
         self.assertEqual(candidates, [])
 
 

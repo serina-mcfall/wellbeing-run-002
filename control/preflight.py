@@ -65,6 +65,11 @@ SPEC_FILES = (
 )
 
 
+# The gate sends one fixed probe, so this constant is its logical request
+# identity: a second run is the same request, not a new one.
+JEV_GATE_PURPOSE = "preflight:jev_minimal_decision"
+
+
 class Preflight:
     def __init__(self, cfg=None, skip: tuple[str, ...] = ()) -> None:
         self.cfg = cfg or config.load()
@@ -362,21 +367,82 @@ class Preflight:
                      "tail": result["stdout"][-300:]})
 
     def gate_jev(self) -> Gate:
+        """C-19: the preflight path is budget-gated too.
+
+        This gate spends real money, and until now it spent it regardless of
+        `hard_stop`. A refusal is reported as NOT EVALUATED, not as a failure:
+        "the budget would not let us ask" is a different fact from "Jev
+        answered wrongly", and a gate that conflated them would send a human
+        hunting the wrong problem.
+        """
+        store = state_mod.Store(tz=self.tz)
+        allowance = config.jev_reservation_usd(self.cfg)
+        if allowance is None:
+            return Gate("jev_minimal_decision", True, False,
+                        "NOT EVALUATED: no governed per-call cost bound is "
+                        "configured, so the paid path is blocked",
+                        {"not_evaluated": True, "reason_code": "NO_COST_BOUND"})
+        if not store.exists():
+            return Gate("jev_minimal_decision", True, False,
+                        "NOT EVALUATED: no state document, so a budget "
+                        "reservation cannot be made durable before sending",
+                        {"not_evaluated": True, "reason_code": "NO_STATE_DOCUMENT"})
+
+        with store.transaction() as doc:
+            reservation = budget.reserve(doc, "openrouter", allowance,
+                                         purpose=JEV_GATE_PURPOSE,
+                                         at=clock.iso(clock.now(self.tz)))
+            refused = budget.summary(doc)
+            duplicate = budget.duplicate_blocked(doc, JEV_GATE_PURPOSE)
+        if reservation is None and duplicate:
+            # Distinct from a budget refusal on purpose: the money is there.
+            # Reporting this as BUDGET_REFUSED would send a human to look at a
+            # ceiling that is not the problem.
+            return Gate("jev_minimal_decision", True, False,
+                        "NOT EVALUATED: an identical probe was lost in flight "
+                        "and may already have been billed; it is not re-sent. "
+                        "Reconcile the reservation against the provider's "
+                        "billing to clear it",
+                        {"not_evaluated": True,
+                         "reason_code": "DUPLICATE_REQUEST_UNRESOLVED",
+                         "budget": refused})
+        if reservation is None:
+            return Gate("jev_minimal_decision", True, False,
+                        "NOT EVALUATED: budget refused the call "
+                        f"(spent ${refused['spent_usd']:.4f} plus exposure "
+                        f"${refused['outstanding_exposure_usd']:.4f} of "
+                        f"${refused['total_usd']:.2f}, hard_stop "
+                        f"{refused['hard_stop']})",
+                        {"not_evaluated": True, "reason_code": "BUDGET_REFUSED",
+                         "budget": refused})
+
         service = jev.DecisionService(self.cfg.roles["jev"].model)
         decision = service.decide(
             "worker_health",
             {"task": "PREFLIGHT", "state": "ACTIVE", "attempts": 0,
              "minutes_since_progress": 0, "review_queue_depth": 0},
         )
+        with store.transaction() as doc:
+            budget.settle(doc, reservation, provider="openrouter",
+                          billing_state=decision.billing_state,
+                          actual_cost_usd=decision.actual_cost_usd)
+
         ok = decision.source == "jev" and decision.choice in jev.DECISIONS[
             "worker_health"]["options"]
         return Gate("jev_minimal_decision", True, ok,
                     f"Jev returned {decision.choice}" if ok
                     else f"Jev unavailable: {decision.error}",
                     {"choice": decision.choice, "source": decision.source,
-                     "model": decision.model, "actual_cost_usd": decision.actual_cost_usd,
+                     # Requested and returned are never conflated, and neither
+                     # proves which weights answered.
+                     "requested_model": decision.requested_model,
+                     "returned_model": decision.returned_model or "unknown",
+                     "billing_state": decision.billing_state,
+                     "reservation_usd": allowance,
+                     "actual_cost_usd": decision.actual_cost_usd,
                      "input_tokens": decision.input_tokens,
                      "output_tokens": decision.output_tokens,
+                     "confidence": decision.confidence,
                      "duration_ms": decision.duration_ms, "error": decision.error})
 
     def gate_langfuse(self) -> Gate:

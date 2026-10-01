@@ -272,33 +272,75 @@ def _reserved_job_file_ports() -> set[int]:
     return reserved
 
 
-def allocate_port(doc: dict, lo: int | None = None,
-                  hi: int | None = None) -> tuple[int | None, str]:
-    """One governed dev-server port, or an explicit reason (C-09).
+def select_port_candidates(doc: dict, lo: int | None = None,
+                           hi: int | None = None) -> tuple[list[int], str]:
+    """C-18 stage 3. The ports this state permits, in order - NO BIND.
 
-    Excluded: ports owned by committed worker records, ports reserved by a
-    job file whose worker-entry or recorded agent may still be live (see
-    _reserved_job_file_ports), and ports that fail a real 127.0.0.1 bind
-    right now. The bind-test-to-builder-bind TOCTOU window is unavoidable
-    without a reservation daemon; a foreign listener taking the port in
-    that window is surfaced by reverse listener detection.
+    The half of allocation that may run under the state lock. It performs no
+    network operation of any kind and, deliberately, **writes nothing**:
+    selecting a candidate makes no durable claim on it. That is what makes a
+    failed probe safe - there is no reservation to leak, and no cleanup path
+    that could be skipped. The durable claim on a port is still made exactly
+    where C-09 puts it, in the job file written before spawn.
+
+    Exclusions are unchanged from the single-function allocator: ports owned
+    by committed worker records, and ports reserved by a job file whose
+    worker-entry or recorded agent may still be live. `_reserved_job_file_ports`
+    keeps its fail-closed behaviour on a failed /proc scan, unreadable-but-
+    present status evidence, and ambiguous agent identity.
+
+    Returns (candidates, exhaustion_reason). The reason is populated whether
+    or not the list is empty, so a caller whose probes all fail can report
+    the same governed message without recomputing the counts.
     """
     if lo is None or hi is None:
         lo, hi = hostcheck.read_candidate_port_range()
     owned = {meta.get("port") for meta in doc.get("workers", {}).values()
              if isinstance(meta.get("port"), int)}
     reserved = _reserved_job_file_ports()
-    for port in range(lo, hi + 1):
-        if port in owned or port in reserved:
-            continue
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            try:
-                sock.bind(("127.0.0.1", port))
-            except OSError:
-                continue
-        return port, ""
-    return None, (f"no bindable unowned port in [{lo}, {hi}] "
-                  f"(owned={len(owned)}, reserved={len(reserved)})")
+    candidates = [port for port in range(lo, hi + 1)
+                  if port not in owned and port not in reserved]
+    return candidates, (f"no bindable unowned port in [{lo}, {hi}] "
+                        f"(owned={len(owned)}, reserved={len(reserved)})")
+
+
+def probe_port(port: int) -> bool:
+    """C-18 stage 3. One real 127.0.0.1 bind - the EXTERNAL half.
+
+    A point-in-time observation, never a reservation: the socket is closed
+    immediately, so all this establishes is that nothing held the port at
+    this instant. The probe-to-worker-bind TOCTOU window is unavoidable
+    without a reservation daemon, and a foreign listener taking the port
+    inside it is surfaced by C-09's reverse listener detection rather than
+    prevented here.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def allocate_port(doc: dict, lo: int | None = None,
+                  hi: int | None = None) -> tuple[int | None, str]:
+    """One governed dev-server port, or an explicit reason (C-09).
+
+    The composed form: selection then probe. Signature, return contract and
+    exhaustion message are unchanged, so every existing caller and test is
+    unaffected.
+
+    C-18 stage 3 split the two halves apart but did NOT migrate the callers.
+    `dispatch_builder` and `dispatch_fixer` still call this function inside
+    T1, so a bind still happens under the state lock today - that migration
+    is stages 4 and 6. What stage 3 delivers is a selection half proven to
+    perform no bind, which those stages need before they can move anything.
+    """
+    candidates, why = select_port_candidates(doc, lo, hi)
+    for port in candidates:
+        if probe_port(port):
+            return port, ""
+    return None, why
 
 
 def remove_worker(name: str) -> gh.Result:

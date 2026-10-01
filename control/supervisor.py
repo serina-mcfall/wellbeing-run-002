@@ -8,11 +8,14 @@ and records.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import secrets
 import signal
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from . import (
     budget,
@@ -20,6 +23,7 @@ from . import (
     config,
     debt,
     evidence,
+    gate_evidence,
     gh,
     intervention,
     jev,
@@ -30,7 +34,9 @@ from . import (
     proc,
     prompts,
     providers,
+    redact,
     routing,
+    security_contract,
     state as state_mod,
     telemetry,
     workers,
@@ -45,6 +51,84 @@ JEV_BOUND_SECONDS = 60
 BUSY_MARGIN_SECONDS = 60
 
 
+def jev_consultation_identity(task: dict) -> str:
+    """Which worker_health consultation this is - C-19, §25.4.
+
+    This is the key the duplicate guard uses, so what it includes decides two
+    things at once: a lost consultation must be recognisable when it is
+    retried, and a consultation that is genuinely a NEW question must not be
+    mistaken for that retry.
+
+    Four durable task fields, each covering a change the others miss:
+
+    - `attempts`   a re-dispatched BUILDER. The builder's worker id is
+                   `<task>-builder` for every attempt, so nothing else moves.
+    - `worker`     a re-dispatched fixer or reviewer, whose worker id carries
+                   its own cycle number while `attempts` stays put.
+    - `progress_marker`  the agent's output byte count at its last observed
+                   progress, written by `reap_workers` ONLY when it differs
+                   from the stored one. This is the record's one durable
+                   marker of the worker having actually done something.
+    - `state`      a durable transition. ACTIVE and REVIEW are different
+                   questions about the same worker, and the criteria say so.
+
+    Deliberately absent, because the question is unchanged when they move:
+    `minutes_since_progress` (recomputed from the clock on every tick),
+    `last_progress_at` (the timestamp of the same event `progress_marker`
+    already identifies, without being a clock reading), `review_queue_depth`
+    (another part of the run entirely), and `updated_at`.
+
+    The consequence worth naming: a STALLED worker emits no new output, so its
+    marker does not move and the lost consultation stays suppressed - which is
+    exactly the case the suppression exists for. A worker that is genuinely
+    progressing produces a different question, and gets one.
+    """
+    worker = task.get("worker")
+    marker = task.get("progress_marker")
+    return (f"jev:worker_health:{task['id']}"
+            f":a{task.get('attempts')}"
+            f":w{worker if worker is not None else 'none'}"
+            f":p{marker if marker is not None else 'none'}"
+            f":{task.get('state')}")
+
+
+class _DrainAllowance:
+    """One tick's total notification-delivery allowance.
+
+    The governed limits are PER TICK, and a tick drains twice. Holding the
+    deadline and the attempt count here - rather than recreating them inside
+    drain_notifications - is what stops the two drains between them spending
+    twice the approved time and twice the approved attempts.
+    """
+
+    __slots__ = ("deadline", "attempts_left")
+
+    def __init__(self, budget_seconds: float, max_attempts: int) -> None:
+        self.deadline = time.monotonic() + budget_seconds
+        self.attempts_left = max_attempts
+
+    def remaining(self) -> float:
+        return self.deadline - time.monotonic()
+
+# Why a security attempt's worktree sits in a task's retained_worktrees map.
+# The map's contract is "this path has a durable owner"; this value says which
+# lifecycle owns it, so Phase F can tell its own entries from a builder's.
+SECURITY_WORKTREE_WHY = "SECURITY_ATTEMPT"
+
+
+def _reported_pid() -> int | None:
+    """The pid the incumbent last reported, for the refusal record only.
+
+    Never used to decide exclusion - that is the flock's job. This exists so
+    a refused start names who holds the lock instead of saying only that
+    someone does.
+    """
+    try:
+        return int(config.PID_PATH.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
 class Supervisor:
     def __init__(self, cfg=None) -> None:
         self.cfg = cfg or config.load()
@@ -55,6 +139,9 @@ class Supervisor:
         self.telemetry = telemetry.Telemetry(experiment_id=self.cfg.experiment_id)
         self.jev = jev.DecisionService(self.cfg.roles["jev"].model)
         self.stopping = False
+        # Held open for the process lifetime once run() takes it. Closing it,
+        # or letting it be collected, releases the singleton lock.
+        self._singleton_lock = None
         # Start the observer interval now: the first cycles after a start or a
         # restart belong to getting Builders working, not to observing nothing.
         self._last_observer = time.monotonic()
@@ -80,20 +167,347 @@ class Supervisor:
 
     def notify_out(self, doc: dict, severity: str, title: str, body: str = "",
                    no_human_action_needed: bool = False) -> dict:
-        result = self.notifier.send(severity, title, body,
-                                    no_human_action_needed=no_human_action_needed,
-                                    clock_label=self.label(doc))
+        """Queue one notification. C-18 stage 2: this NO LONGER DELIVERS.
+
+        The send used to happen right here, synchronously, on whatever
+        transaction the caller held - which is the defect C-18 names. The
+        intent is now committed with the state change that produced it and
+        delivered later by drain_notifications(), holding no lock.
+
+        What is deliberately unchanged: the caller's content, the
+        human-intervention count (incremented here, inside the caller's
+        transaction, so the count can never disagree with the state change
+        that earned it), and Protocol v2 §Discord's "ledger append succeeds
+        before Discord notification" - which this strengthens, since the
+        intent is durable at least one commit before any send.
+
+        The return value reports QUEUING, not delivery. Nothing in the
+        control plane reads it; claiming {"ok": True} would be a delivery
+        claim this method can no longer make.
+        """
+        intent_id = f"NTF-{secrets.token_hex(8)}"
+        try:
+            intent = notify.new_intent(
+                severity=severity, title=title, body=body,
+                no_human_action_needed=no_human_action_needed,
+                clock_label=self.label(doc), created_at=clock.iso(self.now()))
+        except ValueError as exc:
+            # Refusing to PERSIST is new; refusing to SEND is not. Notifier
+            # .send already blocks a secret-bearing message, but it never had
+            # to consider durability because nothing was stored. Only the
+            # finite reason is recorded - never the offending text.
+            reason = str(exc) if str(exc) == "BLOCKED_SECRET_IN_NOTIFICATION" \
+                else "INTENT_INVALID"
+            self.log("NOTIFICATION_BLOCKED", activity_class="ORCHESTRATION",
+                     outcome=reason,
+                     metadata_redacted={"severity": severity,
+                                        "intent_id": intent_id})
+            return {"queued": False, "reason": reason}
+
+        notify.queue(doc)[intent_id] = intent
         self.log(
-            "NOTIFICATION",
+            "NOTIFICATION_QUEUED",
             activity_class="ORCHESTRATION",
-            outcome="DELIVERED" if result.get("ok") else "FAILED",
+            outcome="QUEUED",
             human_intervention=severity == notify.HUMAN_REQUIRED,
-            metadata_redacted={"severity": severity, "title": title,
-                               "delivery": result},
+            metadata_redacted={"severity": severity, "title": intent["title"],
+                               "intent_id": intent_id},
         )
         if severity == notify.HUMAN_REQUIRED:
             doc["counters"]["human_interventions"] += 1
-        return result
+        return {"queued": True, "intent_id": intent_id}
+
+    # ------------------------------------------- C-18 stage 2: the drain
+
+    # A tick may spend at most this long delivering, and attempt at most this
+    # many sends. Both bind: the time budget is what actually bounds a hanging
+    # destination (a count of 20 against a 20s HTTP timeout is 400 seconds),
+    # and the count is what stops a large cleared backlog monopolising a tick
+    # of fast successes. The supervisor polls every 30s and the watchdog calls
+    # a heartbeat stale at 120s, so 10s leaves room for the rest of the tick.
+    DRAIN_BUDGET_SECONDS = 10.0
+    DRAIN_MAX_ATTEMPTS = 20
+    # Below this there is not enough budget left for a send to mean anything,
+    # and starting one would overrun the budget rather than respect it.
+    MIN_SEND_SECONDS = 0.5
+
+    def new_drain_allowance(self) -> "_DrainAllowance":
+        """One tick's TOTAL delivery allowance.
+
+        The governed limits are per tick, not per call, and a tick drains
+        twice - once after the merges and once after the slow provider work.
+        Both share this object, so the two drains cannot between them spend
+        twice the approved time or twice the approved attempts.
+        """
+        return _DrainAllowance(self.DRAIN_BUDGET_SECONDS, self.DRAIN_MAX_ATTEMPTS)
+
+    def drain_notifications(self, allowance: "_DrainAllowance | None" = None) -> dict:
+        """Deliver queued intents. NO STATE LOCK IS HELD DURING ANY SEND.
+
+        `allowance` is the tick's shared budget. Omitting it - which is what a
+        standalone `ctl freeze` does - mints a fresh one, because a one-shot
+        command has no tick to share with.
+
+        WHAT THE BUDGET ACTUALLY BOUNDS, precisely. It bounds when a new send
+        may START: no send begins once the allowance is spent, and each send
+        is given only the time that remains, recomputed after the fence
+        transaction rather than before it. It does NOT guarantee the drain
+        returns within the budget. `http.post_json` passes its timeout to
+        `urllib.request.urlopen`, which applies it to each individual socket
+        operation - connect, and each read - not to the request as a whole,
+        so a response that trickles in slowly can exceed it in total. The
+        honest bound is therefore: the budget, plus at most one in-flight
+        send. Tightening that further needs a different transport, not a
+        different number here.
+        """
+        if not self.store.exists():
+            return {"attempted": 0, "delivered": 0, "failed": 0,
+                    "pending": 0, "oldest_pending_age_seconds": None}
+        allowance = allowance or self.new_drain_allowance()
+        self._converge_notifications()
+
+        attempted = delivered = failed = skipped = 0
+        while allowance.attempts_left > 0:
+            if allowance.remaining() < self.MIN_SEND_SECONDS:
+                break
+            # The durable pre-send fence, one short transaction per intent.
+            # Fencing lazily rather than in a batch keeps the window between
+            # authorising a send and making it as small as it can be.
+            fenced = self._fence_next_notification()
+            if fenced is None:
+                break
+            allowance.attempts_left -= 1
+
+            # Recomputed AFTER the fence: that transaction waits on the state
+            # lock and can itself consume the remainder. Passing the
+            # pre-fence figure would hand a send more time than the tick has.
+            remaining = allowance.remaining()
+            if remaining < self.MIN_SEND_SECONDS:
+                # Fenced but never sent. We KNOW no external effect exists,
+                # so this must not be left suppressed under the ambiguity
+                # rule - it is released back to PENDING, durably, and
+                # retried on the next tick.
+                self._release_unsent_notification(fenced)
+                skipped += 1
+                break
+            attempted += 1
+            if self._deliver_notification(fenced, timeout=remaining):
+                delivered += 1
+            else:
+                failed += 1
+
+        summary = {"attempted": attempted, "delivered": delivered,
+                   "failed": failed, "skipped_no_budget": skipped}
+        summary.update(self._notification_backlog())
+        if attempted or skipped or summary["pending"]:
+            self.log("NOTIFICATION_DRAIN", activity_class="ORCHESTRATION",
+                     outcome="DRAINED" if not summary["pending"] else "BACKLOG",
+                     metadata_redacted=dict(summary))
+        return summary
+
+    def _release_unsent_notification(self, fenced: dict) -> None:
+        """Undo a fence whose send the allowance refused to start.
+
+        The ledger append comes first and is what makes this restart-safe:
+        if the state commit below is lost, convergence finds NOT_ATTEMPTED
+        and releases the intent anyway. Recorded as its own outcome rather
+        than as FAILED, because nothing failed - nothing was tried - so no
+        backoff is applied and the intent is eligible again immediately.
+        """
+        self.log("NOTIFICATION", activity_class="ORCHESTRATION",
+                 outcome="NOT_ATTEMPTED",
+                 metadata_redacted={"intent_id": fenced["intent_id"],
+                                    "attempt": fenced["attempt"],
+                                    "reason": "DRAIN_BUDGET_EXHAUSTED"})
+        try:
+            with self.store.transaction() as doc:
+                intent = notify.queue(doc).get(fenced["intent_id"])
+                if intent and intent.get("status") == notify.ATTEMPTING \
+                        and intent.get("attempt") == fenced["attempt"]:
+                    intent["status"] = notify.PENDING
+                    intent["last_outcome"] = "NOT_ATTEMPTED"
+        except Exception:  # noqa: BLE001
+            self.log("NOTIFICATION_DRAIN_ERROR", activity_class="ORCHESTRATION",
+                     outcome="ERROR",
+                     metadata_redacted={"phase": "RELEASE",
+                                        "error_code": "RELEASE_FAILED"})
+
+    def _converge_notifications(self) -> None:
+        """Repair ATTEMPTING intents from durable ledger evidence.
+
+        The state commit that records an outcome can be lost while the ledger
+        append that proves it survives - that is the crash window between
+        delivering and recording the delivery. The ledger is therefore the
+        authority: a DELIVERED event settles the intent permanently, and a
+        FAILED event for the attempt that is currently fenced makes it
+        retryable. An intent with NEITHER stays ATTEMPTING, which is the
+        ambiguous case, and stays suppressed.
+        """
+        try:
+            with self.store.transaction() as doc:
+                now = self.now()
+                for intent_id, intent in notify.queue(doc).items():
+                    if intent.get("status") != notify.ATTEMPTING:
+                        continue
+                    if self._notification_event(intent_id, "DELIVERED"):
+                        intent["status"] = notify.DELIVERED
+                        intent["last_outcome"] = "DELIVERED"
+                    elif self._notification_event(intent_id, "NOT_ATTEMPTED",
+                                                  attempt=intent.get("attempt")):
+                        # Fenced, then the allowance ran out before the send
+                        # began. No external effect exists, so this is freely
+                        # retryable and earns no backoff.
+                        intent["status"] = notify.PENDING
+                        intent["last_outcome"] = "NOT_ATTEMPTED"
+                    elif self._notification_event(intent_id, "FAILED",
+                                                  attempt=intent.get("attempt")):
+                        intent["status"] = notify.PENDING
+                        intent["last_outcome"] = "FAILED"
+                        intent["next_attempt_at"] = clock.iso(
+                            now + timedelta(seconds=notify.backoff_seconds(
+                                intent.get("attempt", 1))))
+        except Exception:  # noqa: BLE001 - convergence is best-effort repair
+            # Finite structural metadata only, for the same reason
+            # watchdog.annunciate_orphans gives: runtime prose can carry
+            # anything and no external effect came from this transaction.
+            self.log("NOTIFICATION_DRAIN_ERROR", activity_class="ORCHESTRATION",
+                     outcome="ERROR",
+                     metadata_redacted={"phase": "CONVERGE",
+                                        "error_code": "CONVERGE_FAILED"})
+
+    def _notification_event(self, intent_id: str, outcome: str,
+                            attempt: int | None = None) -> bool:
+        """Whether the ledger durably records this outcome for this intent."""
+        inspection = self.ledger.inspect(event_types=("NOTIFICATION",))
+        for event in inspection.events:
+            meta = event.get("metadata_redacted") or {}
+            if meta.get("intent_id") != intent_id:
+                continue
+            if event.get("outcome") != outcome:
+                continue
+            if attempt is not None and meta.get("attempt") != attempt:
+                continue
+            return True
+        return False
+
+    def _fence_next_notification(self) -> dict | None:
+        """Commit ATTEMPTING for the oldest due intent, and return a copy.
+
+        The copy is plain scalars: the document it came from is stale the
+        moment this transaction commits, and the send happens after that.
+        """
+        try:
+            with self.store.transaction() as doc:
+                now = self.now()
+                for intent_id, intent in notify.due_intents(doc, now):
+                    intent["status"] = notify.ATTEMPTING
+                    intent["attempt"] = intent.get("attempt", 0) + 1
+                    intent["last_attempt_at"] = clock.iso(now)
+                    return {"intent_id": intent_id,
+                            "severity": intent["severity"],
+                            "title": intent["title"],
+                            "body": intent.get("body", ""),
+                            "no_human_action_needed": bool(
+                                intent.get("no_human_action_needed")),
+                            "clock_label": intent.get("clock_label"),
+                            "attempt": intent["attempt"]}
+                return None
+        except Exception:  # noqa: BLE001
+            self.log("NOTIFICATION_DRAIN_ERROR", activity_class="ORCHESTRATION",
+                     outcome="ERROR",
+                     metadata_redacted={"phase": "FENCE",
+                                        "error_code": "FENCE_FAILED"})
+            return None
+
+    def _deliver_notification(self, fenced: dict, *, timeout: float) -> bool:
+        """One send, with no lock held, plus its durable outcome.
+
+        Returns whether it was delivered. An exception after the send began
+        is AMBIGUOUS: the message may have gone out, so no failure is
+        recorded and the intent stays ATTEMPTING - suppressed rather than
+        resent. Only a durably recorded failure earns another attempt.
+        """
+        intent_id = fenced["intent_id"]
+        send_started = False
+        try:
+            send_started = True
+            result = self.notifier.send(
+                fenced["severity"], fenced["title"], fenced["body"],
+                no_human_action_needed=fenced["no_human_action_needed"],
+                clock_label=fenced["clock_label"],
+                timeout=timeout) or {}
+        except Exception:  # noqa: BLE001
+            if send_started:
+                self.log("NOTIFICATION", activity_class="ORCHESTRATION",
+                         outcome="AMBIGUOUS",
+                         metadata_redacted={"intent_id": intent_id,
+                                            "attempt": fenced["attempt"],
+                                            "error_code": "SEND_OUTCOME_UNKNOWN"})
+            return False
+
+        ok = bool(result.get("ok"))
+        # A transport that could not establish what happened is NOT a failure.
+        # A read timeout means the webhook may have been delivered in full and
+        # only the answer lost; recording that as FAILED would retry it and
+        # deliver twice. Only the transport can tell these apart, so it says
+        # so and this honours it.
+        if not ok and result.get("ambiguous"):
+            self.log("NOTIFICATION", activity_class="ORCHESTRATION",
+                     outcome="AMBIGUOUS",
+                     metadata_redacted={"intent_id": intent_id,
+                                        "attempt": fenced["attempt"],
+                                        "error_code": "SEND_OUTCOME_UNKNOWN",
+                                        "status": result.get("status")})
+            return False        # stays ATTEMPTING, and so stays suppressed
+
+        # The ledger append is what survives a lost state commit, so it comes
+        # first and the state update is only a cache of it.
+        self.log(
+            "NOTIFICATION", activity_class="ORCHESTRATION",
+            outcome="DELIVERED" if ok else "FAILED",
+            human_intervention=fenced["severity"] == notify.HUMAN_REQUIRED,
+            metadata_redacted={"intent_id": intent_id,
+                               "attempt": fenced["attempt"],
+                               "severity": fenced["severity"],
+                               "title": fenced["title"],
+                               "delivery": redact.scrub(result)},
+        )
+        self._record_notification_outcome(intent_id, fenced["attempt"], ok)
+        return ok
+
+    def _record_notification_outcome(self, intent_id: str, attempt: int,
+                                     ok: bool) -> None:
+        """Cache the ledger's verdict in state. Losing this commit is
+        survivable - _converge_notifications rebuilds it from the ledger."""
+        try:
+            with self.store.transaction() as doc:
+                intent = notify.queue(doc).get(intent_id)
+                if not intent or intent.get("status") != notify.ATTEMPTING \
+                        or intent.get("attempt") != attempt:
+                    return          # superseded; the ledger still governs
+                now = self.now()
+                if ok:
+                    intent["status"] = notify.DELIVERED
+                    intent["last_outcome"] = "DELIVERED"
+                    intent["delivered_at"] = clock.iso(now)
+                else:
+                    intent["status"] = notify.PENDING
+                    intent["last_outcome"] = "FAILED"
+                    intent["next_attempt_at"] = clock.iso(
+                        now + timedelta(seconds=notify.backoff_seconds(attempt)))
+        except Exception:  # noqa: BLE001
+            self.log("NOTIFICATION_DRAIN_ERROR", activity_class="ORCHESTRATION",
+                     outcome="ERROR",
+                     metadata_redacted={"phase": "RECORD",
+                                        "error_code": "RECORD_FAILED"})
+
+    def _notification_backlog(self) -> dict:
+        """Pending count and oldest pending age. Nothing is trimmed in this
+        stage, so these are how a growing queue becomes visible."""
+        try:
+            return notify.backlog(self.store.read(), self.now())
+        except Exception:  # noqa: BLE001
+            return {"pending": None, "oldest_pending_age_seconds": None}
 
     def heartbeat(self, doc: dict) -> None:
         cs = self.clock_state(doc)
@@ -611,6 +1025,853 @@ class Supervisor:
                      state_after=after, activity_class="ORCHESTRATION",
                      outcome=after, metadata_redacted={"reason": reason})
 
+    # ------------------------------------------- C-05.3a security evidence
+
+    def plan_security(self, doc: dict, task: dict, pr_number: int,
+                      head_sha: str,
+                      observation: routing.SecurityObservation,
+                      *, slots_free: bool = True):
+        """Phase B: claim one security attempt. STATE ONLY.
+
+        Nothing here creates a directory, writes a job file, runs git,
+        calls GitHub, opens a socket or spawns a process. The observations
+        it classifies were gathered before the lock was taken, and the
+        materialisation and spawn happen after it is released - that split
+        is the whole point, and extending C-18's defect into the new path
+        is what it exists to prevent.
+
+        The ORDINAL is chosen here, under the exclusive state lock, and
+        nowhere else. That is what makes it safe: two ticks cannot both
+        decide "attempt 3", because only one holds the lock. routing's
+        claim builder receives the number already chosen and derives the
+        attempt id and worker name from it.
+
+        Returns identifiers only - (task_id, pr, sha, attempt_id, worker) -
+        never the task, record or claim dicts, which belong to this
+        transaction's document and are stale the moment it commits. That
+        is the C-14.1 rule route_prs already follows. None means there is
+        nothing for the caller to do.
+        """
+        record = doc["prs"].get(str(pr_number))
+        if record is None:
+            return None
+
+        # The head the observations describe and the head the claim would
+        # be written for must be the same commit. If they disagree, this
+        # would classify one SHA's evidence and then allocate or reuse an
+        # attempt for another - attributing a review to a commit it never
+        # looked at. There is no authoritative head on the PR record to
+        # fall back on: reviewed_head belongs to the reviewer's cycle, not
+        # to evidence, and borrowing it here would silently substitute a
+        # different commit again.
+        if head_sha != observation.head_sha:
+            self.log("SECURITY_EVIDENCE_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome="HEAD_MISMATCH",
+                     metadata_redacted={"head": head_sha,
+                                        "observed": observation.head_sha})
+            return None
+
+        claim = record.get("security_evidence")
+        recovery = routing.security_recovery_state(claim, observation)
+        uncommitted = routing.security_spawn_uncommitted(claim, observation)
+
+        # A stale-head claim whose worker may still be running must not be
+        # replaced. The recovery table reads it as NO_CLAIM - correct about
+        # the HEAD, which has nothing claimed - but overwriting the record
+        # would erase the only durable identity a live attempt has, leaving a
+        # paid provider review running that nothing owns and nothing can ever
+        # ingest. Both facts needed are already observed, and an unsuccessful
+        # scan is treated exactly like a live worker.
+        if (recovery == routing.SECURITY_RECOVERY_NO_CLAIM
+                and isinstance(claim, dict)
+                and routing.security_claim_is_valid(claim)[0]
+                and claim["sha"] != head_sha
+                and (observation.worker_live or not observation.scan_ok)):
+            self.log("SECURITY_EVIDENCE_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome="STALE_HEAD_ATTEMPT_LIVE",
+                     metadata_redacted={"head": head_sha,
+                                        "attempt_id": claim["attempt_id"],
+                                        "scan_ok": observation.scan_ok,
+                                        "worker_live": observation.worker_live})
+            return None
+
+        if recovery not in routing.SECURITY_RECOVERY_DISPATCHABLE:
+            # RUNNING, INDETERMINATE, UNKNOWN and COMPLETE each mean the
+            # same thing here: no new external work. Only COMPLETE will
+            # ever produce anything, and ingesting it is Phase E's job.
+            self.log("SECURITY_EVIDENCE_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome=recovery,
+                     metadata_redacted={
+                         "head": head_sha,
+                         "recovery": recovery,
+                         "spawn_uncommitted": uncommitted,
+                         # Finite and CLAIM_*-prefixed, never exception
+                         # prose: an operator holding on malformed evidence
+                         # needs to know which rule it broke, not only that
+                         # something is wrong. "" when the claim is fine
+                         # and the hold is for an ordinary reason.
+                         "claim_diagnostic":
+                             routing.security_claim_diagnostic(claim)})
+            return None
+
+        # Every remaining recovery state ends in a PROVIDER WORKER BEING
+        # SPAWNED, so every one of them is gated. That includes the reuse
+        # branch below: NOT_MATERIALIZED means nothing has ever run, and
+        # MATERIALIZED_NOT_SPAWNED means a directory exists but no job file
+        # was ever written - in both, Phase C acquires a worktree and starts
+        # a paid worker. An earlier version of this method placed the check
+        # after the reuse branch on the reasoning that resuming a claim is
+        # "recovery, not new work". That reasoning was wrong and the gap was
+        # reproduced: a PLANNED claim spawned a paid security worker while
+        # the run was FROZEN and the provider was in COOLDOWN.
+        #
+        # An existing claim is a RESERVATION, not permission to spend. What
+        # it preserves is identity - the same ordinal, the same attempt
+        # directory - and that survives the hold unchanged, so the attempt
+        # resumes under its own identity on a later tick once the control
+        # clears. Nothing is abandoned and no second ordinal is allocated.
+        #
+        # Publication, ingestion and release are all reached from elsewhere
+        # in the tick and none of them passes through here, so blocking
+        # dispatch never blocks evidence or cleanup.
+        blocked = self._security_dispatch_block(doc)
+        if blocked:
+            self.log("SECURITY_EVIDENCE_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome=blocked,
+                     metadata_redacted={"head": head_sha, "reason": blocked,
+                                        "recovery": recovery})
+            return None
+
+        if recovery in (routing.SECURITY_RECOVERY_NOT_MATERIALIZED,
+                        routing.SECURITY_RECOVERY_MATERIALIZED_NOT_SPAWNED):
+            # The claim already exists and is still the right one; the work
+            # outside the lock simply has not finished. Re-use it exactly -
+            # allocating a second ordinal here would abandon a directory
+            # that may already hold evidence.
+            #
+            # Deliberately NOT capacity-checked. This claim already holds its
+            # slot: _security_slots_free counts it when any OTHER pull
+            # request asks, so counting it again here would double-count one
+            # reservation and strand every resumed attempt at
+            # max_security = 1. The reservation is real either way - what is
+            # refused is a SECOND slot, not the one already held.
+            return self._security_plan(task, pr_number, head_sha, claim)
+
+        # A fresh attempt from here on, so it consumes a NEW concurrency
+        # slot - unlike the reuse branch above, which already holds one.
+        if not slots_free:
+            self.log("SECURITY_EVIDENCE_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome="AT_CAPACITY",
+                     metadata_redacted={"head": head_sha,
+                                        "max_security": self.cfg.max_security})
+            return None
+
+        # NO_CLAIM or PROVEN_NOT_RUNNING: a fresh attempt. The ordinal
+        # advances only when the previous one is for THIS head and is
+        # provably finished; a claim for a different head starts again at
+        # one, because the attempt namespace is scoped per (task, SHA).
+        previous = claim if isinstance(claim, dict) else {}
+        ordinal = 1
+        if (recovery == routing.SECURITY_RECOVERY_PROVEN_NOT_RUNNING
+                and previous.get("sha") == head_sha):
+            ordinal = previous.get("ordinal", 0) + 1
+            self.log("SECURITY_ATTEMPT_ABANDONED", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome=security_contract.SPAWN_OR_RUN_INCOMPLETE,
+                     metadata_redacted={
+                         "head": head_sha,
+                         "attempt_id": previous.get("attempt_id"),
+                         "reason": security_contract.SPAWN_OR_RUN_INCOMPLETE})
+        if ordinal > routing.SECURITY_ORDINAL_MAX:
+            # The namespace is four digits wide. Refusing here is the
+            # fail-closed end of a runaway, not a case to design around.
+            self.log("SECURITY_EVIDENCE_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome="ORDINAL_EXHAUSTED",
+                     metadata_redacted={"head": head_sha, "ordinal": ordinal})
+            return None
+
+        try:
+            fresh = routing.security_claim(
+                task_id=task["id"], sha=head_sha, ordinal=ordinal,
+                claimed_at=clock.iso(self.now()),
+                lease_expires_at=self._lease_expires("security"))
+        except ValueError:
+            # A claim state would refuse is worse than no claim: the
+            # attempt would look made and never be actionable. Finite
+            # outcome only - no exception prose reaches the ledger.
+            self.log("SECURITY_EVIDENCE_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome="CLAIM_REFUSED",
+                     metadata_redacted={"head": head_sha, "ordinal": ordinal})
+            return None
+
+        record["security_evidence"] = fresh
+        if task["state"] == "PR_OPEN":
+            self.transition(doc, task["id"], "WAITING_EVIDENCE",
+                            f"security evidence claimed for {head_sha[:12]}")
+        self.log("SECURITY_EVIDENCE_CLAIMED", task_id=task["id"],
+                 pr_id=pr_number, activity_class="ORCHESTRATION",
+                 outcome=recovery,
+                 metadata_redacted={"head": head_sha,
+                                    "attempt_id": fresh["attempt_id"],
+                                    "ordinal": ordinal,
+                                    "spawn_uncommitted": uncommitted,
+                                    "lease_expires_at": fresh["lease_expires_at"]})
+        return self._security_plan(task, pr_number, head_sha, fresh)
+
+    # -- C-05.3a Step 6b: observe -> plan -> execute -> commit ---------------
+    #
+    # Phase A gathers, T1 claims, Phase C does the external work with no lock
+    # held, Phase D caches, Phase E ingests evidence that is ALREADY durable.
+    # Phase E is deliberately not a reap_workers callback: reap_workers runs
+    # inside T1, so a callback there that read worker output and published
+    # files would put exactly the external work C-18 documents back inside the
+    # transaction. Reading and publishing happen in Phase A/E-publish, outside
+    # the lock; only the finished record crosses into T1.
+
+    def observe_security(self, snapshot: dict, heads: dict,
+                         entries: dict | None):
+        """Phase A. Read-only, OUTSIDE the state lock.
+
+        `snapshot` is a non-authoritative read of the document - T1 re-reads
+        it under the lock before deciding anything. `entries` is one
+        proc.worker_entry_processes scan for the whole tick; None means the
+        scan failed and nothing about liveness may be concluded.
+
+        Returns {pr_number: (head_sha, SecurityObservation, outcome_record,
+        provenance_record)}. The outcome is read HERE so Phase E can ingest it
+        inside T1 without the transaction touching the filesystem, and the
+        provenance is read here for the same reason: T1 registers the
+        attempt's worktree from it, so ownership survives a crash between
+        acquisition and Phase D without the lock ever reaching a file.
+        """
+        observations: dict[int, tuple] = {}
+        now = clock.iso(self.now())
+        for task in snapshot.get("tasks", {}).values():
+            pr_number = task.get("pr")
+            if pr_number is None or task.get("state") not in self.EVIDENCE_STATES:
+                continue
+            head = heads.get(pr_number)
+            if not head:
+                continue
+            record = snapshot.get("prs", {}).get(str(pr_number)) or {}
+            claim = record.get("security_evidence")
+            attempt_dir = job_file = outcome = provenance = None
+            live = publishable = False
+            if isinstance(claim, dict):
+                try:
+                    attempt_dir = gate_evidence.security_attempt_dir(
+                        task["id"], claim.get("sha") or "",
+                        claim.get("attempt_id") or "")
+                except (ValueError, TypeError):
+                    attempt_dir = None
+                worker = claim.get("worker")
+                if isinstance(worker, str) and entries is not None:
+                    live = worker in entries
+                if isinstance(worker, str):
+                    job_file = config.WORKER_LOG_DIR / f"{worker}.job.json"
+                if attempt_dir is not None:
+                    provenance = gate_evidence.read_security_provenance(
+                        attempt_dir)
+                if claim.get("sha") == head:
+                    outcome = gate_evidence.read_security_outcome(
+                        task["id"], pr_number, head,
+                        claim.get("attempt_id") or "")
+                    # Is there a finished answer still waiting to be written?
+                    # Asked with the SAME provenance gate the publisher uses,
+                    # so the classifier can never hold for a publication the
+                    # publisher would refuse to attempt.
+                    publishable = (outcome is None and not live
+                                   and entries is not None
+                                   and self._security_output_pending(
+                                       task["id"], pr_number, head, claim,
+                                       attempt_dir, provenance))
+            observations[pr_number] = (head, routing.SecurityObservation(
+                head_sha=head, now=now, scan_ok=entries is not None,
+                worker_live=live,
+                attempt_dir_exists=bool(attempt_dir and attempt_dir.is_dir()),
+                job_file_exists=bool(job_file and job_file.is_file()),
+                outcome_present=outcome is not None,
+                output_readable=publishable), outcome, provenance)
+        return observations
+
+    def _security_output_pending(self, task_id, pr_number, head, claim,
+                                 attempt_dir, provenance) -> bool:
+        """Terminal, provenance-verified provider output exists and is not
+        published. Read-only; no lock held.
+
+        Provenance is checked FIRST and failure is closed. Status and output
+        are addressed by worker NAME, and a name is only this attempt's if
+        something durable says so - without that, a directory left by an
+        earlier attempt could answer for this one."""
+        if not routing.security_claim_is_valid(claim)[0]:
+            return False
+        if not self._provenance_matches(task_id, pr_number, head, claim,
+                                        provenance):
+            return False
+        if attempt_dir is None or not attempt_dir.is_dir():
+            return False
+        status = workers.read_status(claim["worker"]) or {}
+        if status.get("phase") not in ("DONE", "FAILED", "TIMEOUT"):
+            return False
+        return True
+
+    @staticmethod
+    def _provenance_matches(task_id, pr_number, head, claim,
+                            provenance) -> bool:
+        """Does the durable provenance record name exactly this attempt?
+
+        Missing provenance is a refusal, not a pass. An attempt that
+        materialised but never acquired a worktree writes none, which is what
+        makes that path fail closed instead of reading whatever artefacts
+        happen to sit under the worker name.
+        """
+        if not isinstance(provenance, dict):
+            return False
+        return (provenance.get("task_id") == task_id
+                and provenance.get("pr") == pr_number
+                and provenance.get("sha") == head
+                and provenance.get("attempt_id") == claim.get("attempt_id")
+                and provenance.get("worker") == claim.get("worker"))
+
+    EVIDENCE_STATES = ("PR_OPEN", "WAITING_EVIDENCE")
+
+    def route_evidence(self, doc: dict, observations: dict) -> list:
+        """T1. STATE ONLY - claim what needs claiming, ingest what is already
+        durable, and return identifiers for the work to be done outside."""
+        planned = []
+        for task in sorted(doc["tasks"].values(), key=lambda t: t["id"]):
+            pr_number = task.get("pr")
+            if pr_number is None or task["state"] not in self.EVIDENCE_STATES:
+                continue
+            seen = observations.get(pr_number)
+            if seen is None:
+                continue
+            head, observation, outcome, provenance = seen
+            # Ownership before anything else, and regardless of what happens
+            # next. The worktree named here physically exists; registering it
+            # is what stops the Watchdog reporting a working attempt as an
+            # orphan, and re-registering every tick is what covers a crash
+            # between acquisition and Phase D. Idempotent by construction -
+            # the map is keyed by path.
+            self._own_security_worktree(doc, task, provenance)
+            if outcome is not None:
+                self.ingest_security(doc, task, pr_number, head, outcome)
+                continue
+            identifiers = self.plan_security(
+                doc, task, pr_number, head, observation,
+                slots_free=self._security_slots_free(doc, pr_number))
+            if identifiers:
+                planned.append(identifiers)
+        return planned
+
+    @staticmethod
+    def _security_plan(task: dict, pr_number: int, head_sha: str,
+                       claim: dict) -> routing.SecurityPlan:
+        """Copy out the immutable facts Phase C needs, and nothing else.
+
+        Every field is a scalar read here, under the lock, and frozen. No
+        reference to the task, PR record or claim leaves this transaction:
+        by the time Phase C runs, the document they came from has committed
+        and may already have moved on, so a retained reference would be read
+        - or mutated - outside the lock. SecurityPlan re-derives and
+        re-validates the worker name, so a plan that disagreed with its own
+        identity cannot reach the spawn.
+        """
+        return routing.SecurityPlan(
+            task_id=task["id"], task_title=task["title"], pr=pr_number,
+            sha=head_sha, attempt_id=claim["attempt_id"],
+            worker=claim["worker"])
+
+    def _security_dispatch_block(self, doc: dict) -> str:
+        """Why a NEW security attempt may not start, or "" if it may.
+
+        Every control here already exists and already governs some other
+        dispatch site; none is invented for this path.
+
+        * frozen_at - dispatchable() refuses new builders on it, and a freeze
+          set by cli.py's human freeze survives into ticks where cs.expired is
+          False, so tick's expiry return does not cover it.
+        * stopping - a SIGTERM has been received. Claiming an attempt whose
+          spawn the shutdown will skip leaves a PLANNED claim to recover, and
+          spawning a paid worker during shutdown is worse.
+        * providers.may(doc, "review") - the capability a security review IS.
+          dispatch_reviewer gates on exactly this, and the ledger already
+          classifies this work REVIEW.
+        * providers.usable(doc, <security provider>) - that provider in
+          COOLDOWN or UNAVAILABLE cannot serve the call being dispatched.
+
+        NOT gated on budget, and deliberately not: `budget.hard_stop` governs
+        metered OpenRouter/Jev spend via metered_call_allowed, which is its
+        only consumer. No control anywhere in this repository gates
+        subscription-provider worker dispatch on budget - builder, fixer,
+        reviewer and observer are all ungated - so claiming a budget control
+        here would be claiming one that does not exist. Recorded as a gap in
+        the handover rather than invented.
+        """
+        if doc.get("frozen_at"):
+            return "RUN_FROZEN"
+        if self.stopping:
+            return "SUPERVISOR_STOPPING"
+        # Provider state that cannot be read is not provider state that
+        # permits spending. providers.ensure runs at the top of every tick,
+        # so an absent bucket means the document being consulted is not one
+        # this control plane wrote - and a paid worker must not start on an
+        # unreadable control.
+        try:
+            if not providers.may(doc, "review"):
+                return "REVIEW_NOT_PERMITTED"
+            if not providers.usable(doc, self.cfg.roles["security"].provider):
+                return "PROVIDER_UNAVAILABLE"
+        except (KeyError, TypeError, AttributeError):
+            return "CONTROLS_UNREADABLE"
+        return ""
+
+    def _security_slots_free(self, doc: dict, pr_number: int) -> bool:
+        """Is there capacity for a NEW security attempt on this PR?
+
+        Counts every OTHER pull request holding an attempt that is not
+        COMPLETE - which is deliberately the widest reading available:
+
+        * a stale-head attempt still counts, because its worker may be
+          running and its worktree certainly exists;
+        * an attempt whose liveness could not be established counts, because
+          unknown liveness must never free capacity. The count reads
+          claim_state, not the /proc scan, so a failed scan cannot silently
+          release a slot.
+
+        This PR's own claim is excluded because resuming or replacing an
+        attempt on this record consumes no additional concurrency - one PR
+        record holds exactly one claim - and counting it would make a single
+        PR unable to ever re-attempt at max_security = 1.
+        """
+        used = 0
+        for key, record in (doc.get("prs") or {}).items():
+            if key == str(pr_number):
+                continue
+            claim = record.get("security_evidence")
+            if isinstance(claim, dict) and claim.get("claim_state") != "COMPLETE":
+                used += 1
+        return used < self.cfg.max_security
+
+    def _own_security_worktree(self, doc: dict, task: dict,
+                               provenance) -> None:
+        """Assert durable ownership of an attempt's worktree. STATE ONLY.
+
+        Uses the existing retained_worktrees map unchanged - same key, same
+        two fields - because that map is already read by
+        reconcile.detect_orphans as proof a worktree has an owner, which is
+        exactly the claim being made. The attempt's own lifecycle detail
+        lives in its durable provenance record, not here, so this map keeps
+        the shape and meaning the rest of the control plane relies on.
+
+        Deliberately NOT removed when the claim reaches COMPLETE: the
+        directory still physically exists then, and ownership that ends
+        before the resource does is how a real worktree becomes an orphan.
+        Only a successful physical release drops it.
+        """
+        if not isinstance(provenance, dict):
+            return
+        path = provenance.get("worktree")
+        if not isinstance(path, str) or not path:
+            return
+        retained = task.setdefault("retained_worktrees", {})
+        if path not in retained:
+            retained[path] = {"retained_at": clock.iso(self.now()),
+                              "why": SECURITY_WORKTREE_WHY}
+
+    def execute_security(self, planned: list) -> list:
+        """Phase C. External work, with NO state lock held.
+
+        Materialises the exact claimed attempt, writes the job file and
+        spawns. Returns the identifiers that actually spawned, so Phase D
+        caches only what happened.
+
+        The controls are re-read HERE as well as in T1, because T1 has
+        already committed and released the lock by the time this runs. A
+        freeze arriving from `ctl freeze`, or a provider entering COOLDOWN,
+        lands in the state document between the two - and the decision that
+        matters is the one true at the instant a paid worker would start,
+        not the one true when it was planned.
+
+        The re-read uses the same non-transactional state observation Phase A
+        uses (`store.read()`), so it takes no lock and performs no external
+        work: no git, no GitHub, no process, no socket. A plan whose controls
+        have since closed is dropped, and its claim stays exactly as it is -
+        same ordinal, same attempt directory - to resume on a later tick.
+        """
+        spawned = []
+        snapshot = self.store.read() if self.store.exists() else {}
+        for plan in planned:
+            if self.stopping:
+                # A stop signal arrived after T1 committed. The claim is
+                # durable and resumes on the next start; spawning a paid
+                # worker the shutdown is about to orphan is not recoverable.
+                self.log("SECURITY_EXECUTION_FAILED", task_id=plan.task_id,
+                         pr_id=plan.pr, activity_class="ORCHESTRATION",
+                         outcome="SUPERVISOR_STOPPING",
+                         metadata_redacted={"attempt_id": plan.attempt_id})
+                break
+            blocked = self._security_dispatch_block(snapshot)
+            if blocked:
+                self.log("SECURITY_EXECUTION_FAILED", task_id=plan.task_id,
+                         pr_id=plan.pr, activity_class="ORCHESTRATION",
+                         outcome=blocked,
+                         metadata_redacted={"attempt_id": plan.attempt_id,
+                                            "phase": "EXECUTE"})
+                continue
+            task_id, pr_number, head = plan.task_id, plan.pr, plan.sha
+            attempt_id, worker = plan.attempt_id, plan.worker
+            try:
+                attempt = gate_evidence.security_attempt_dir(task_id, head,
+                                                             attempt_id)
+                attempt.mkdir(parents=True, exist_ok=True)
+            except (ValueError, OSError):
+                self.log("SECURITY_EXECUTION_FAILED", task_id=task_id,
+                         pr_id=pr_number, activity_class="ORCHESTRATION",
+                         outcome="MATERIALISE_FAILED",
+                         metadata_redacted={"attempt_id": attempt_id})
+                continue
+            role_cfg = self.cfg.roles["security"]
+            # The real task title, carried immutably out of T1. Passing the
+            # task id here instead rendered "Task: TASK-001" into the prompt
+            # and told the reviewer nothing about what the task was for.
+            # The branch reported is the one the worktree is actually on.
+            branch = f"security/{attempt_id}/{head[:12]}"
+            prompt_text = prompts.security(
+                {"id": task_id, "title": plan.task_title}, pr_number,
+                branch, self.cfg.github_repo, 1)
+            prompt_path = prompts.write(worker, prompt_text)
+            path, why = workers.acquire_worktree(
+                worker, branch, head,
+                self.cfg.tmux_session, prompt_path,
+                reuse_if_checked_out=False)
+            if path is None:
+                self.log("SECURITY_EXECUTION_FAILED", task_id=task_id,
+                         pr_id=pr_number, activity_class="ORCHESTRATION",
+                         outcome="WORKTREE_UNAVAILABLE",
+                         metadata_redacted={"attempt_id": attempt_id,
+                                            "detail": why[:200]})
+                continue
+            # Provenance BEFORE the spawn, and before the job file. It binds
+            # this worker name and this worktree to this exact (task, PR, SHA,
+            # attempt), and the publisher refuses to read any artefact
+            # without it. Written here rather than after start_job so a crash
+            # between the two still leaves an owned, attributable attempt;
+            # not written at all when acquisition failed above, which is what
+            # makes that path fail closed rather than read whatever a
+            # previous attempt left under the same name.
+            if not gate_evidence.write_security_provenance(attempt, {
+                    "task_id": task_id, "pr": pr_number, "sha": head,
+                    "attempt_id": attempt_id, "worker": worker,
+                    "worktree": str(path)}):
+                self.log("SECURITY_EXECUTION_FAILED", task_id=task_id,
+                         pr_id=pr_number, activity_class="ORCHESTRATION",
+                         outcome="PROVENANCE_UNWRITABLE",
+                         metadata_redacted={"attempt_id": attempt_id})
+                continue
+            job = workers.write_job(
+                worker, "security", role_cfg.provider, role_cfg.model, task_id,
+                path, prompt_path, self.tz, pr=pr_number,
+                hard_timeout_seconds=self.cfg.extra["timeouts"]["security"],
+                effort=role_cfg.effort)
+            started = workers.start_job(worker, job, path)
+            if not started.ok:
+                self.log("SECURITY_EXECUTION_FAILED", task_id=task_id,
+                         pr_id=pr_number, activity_class="ORCHESTRATION",
+                         outcome="SPAWN_FAILED",
+                         metadata_redacted={"attempt_id": attempt_id})
+                continue
+            self.log("SECURITY_DISPATCHED", task_id=task_id, pr_id=pr_number,
+                     role="security", provider=role_cfg.provider,
+                     model=role_cfg.model, agent_id=worker,
+                     activity_class="REVIEW", outcome="DISPATCHED")
+            spawned.append(plan)
+        return spawned
+
+    def publish_security_results(self, snapshot: dict,
+                                 entries: dict | None) -> None:
+        """Phase E, publish half. Reads worker output and writes the durable
+        outcome - all OUTSIDE the state lock.
+
+        Publication comes BEFORE ingestion commits, and a failure to publish
+        leaves the claim exactly as it was. Nothing is marked COMPLETE, no
+        findings are applied, the task does not advance, and no replacement
+        attempt is launched merely because a write failed - the attempt's
+        evidence stays on disk so the next tick can retry.
+
+        Driven from DURABLE PROVENANCE, not from the current claim, and that
+        is what lets a superseded attempt still be published. An attempt whose
+        claim was replaced by a newer head's has no claim left to find, and a
+        claim-driven publisher therefore never revisited it: its answer stayed
+        unwritten and its worktree, which may only be released once
+        publication is durable, was retained for the rest of the run. Every
+        attempt that reached the point of having a worktree has a provenance
+        record naming its exact task, PR, full SHA, attempt and worker, so
+        that record is a complete and sufficient identity - and each outcome
+        is published under it, never under whatever the record holds now.
+
+        Publishing a superseded outcome is safe because ingestion is bound
+        separately: _current_claim re-checks SHA and attempt id, so a stale
+        outcome can never reach the current task's findings, debt or state.
+
+        scan_ok is deliberately ignored here. An incomplete walk means some
+        attempts were not seen, which costs a retry; it is not an assertion
+        about absence, unlike release, where it must fail closed.
+        """
+        if entries is None:
+            return  # the scan failed: no worker can be proven finished
+        records, _ = gate_evidence.scan_security_attempts()
+        for record in records:
+            worker = record["worker"]
+            if worker in entries:
+                continue  # still running
+            if gate_evidence.read_security_outcome(
+                    record["task_id"], record["pr"], record["sha"],
+                    record["attempt_id"]):
+                continue  # already published; nothing to redo
+            status = workers.read_status(worker) or {}
+            if status.get("phase") not in ("DONE", "FAILED", "TIMEOUT"):
+                continue  # not provably finished, and the lease still governs
+            self._publish_one_security_result(record, status)
+
+    # -------------------------------------------------- Phase F: release
+    #
+    # Physical cleanup, with NO state lock held. Split from publication
+    # because releasing is the one irreversible step here: a worktree removed
+    # while its worker is alive, or before its answer is durable, destroys
+    # evidence that cannot be rebuilt.
+
+    def release_security_worktrees(self, snapshot: dict,
+                                   entries: dict | None) -> None:
+        """Remove finished security worktrees. OUTSIDE any transaction.
+
+        Three conditions, all required, none inferable from the others:
+
+        1. liveness is ESTABLISHED and the worker is absent. entries is None
+           means the scan failed, which proves nothing - so nothing is
+           removed, rather than removed on an assumption;
+        2. the attempt's outcome is durably published. Removing the worktree
+           first would discard the run that produced an answer nothing has
+           recorded yet;
+        3. the claim that governs the attempt is COMPLETE, so ingestion has
+           already taken what it needs.
+
+        Driven from durable provenance rather than from the current claim, so
+        a superseded attempt - whose claim has since been replaced by a newer
+        head's - is still released rather than leaked.
+
+        A failed removal changes nothing: ownership stays asserted, the
+        failure is durable and finite in the ledger, and the next tick
+        retries. Cleanup that fails silently is how a leak becomes invisible.
+        """
+        if entries is None:
+            return
+        records, scan_ok = gate_evidence.scan_security_attempts()
+        if not scan_ok:
+            return  # an incomplete walk cannot prove anything is releasable
+        for record in records:
+            worker = record["worker"]
+            if worker in entries:
+                continue  # still running
+            if not gate_evidence.read_security_outcome(
+                    record["task_id"], record["pr"], record["sha"],
+                    record["attempt_id"]):
+                continue  # no durable answer yet; publication retries first
+            if not self._security_attempt_settled(snapshot, record):
+                continue
+            self._release_one_security_worktree(record)
+
+    @staticmethod
+    def _security_attempt_settled(snapshot: dict, record: dict) -> bool:
+        """Has the claim governing this attempt finished with it?
+
+        True when the attempt's own claim is COMPLETE, and equally when the
+        record no longer holds that attempt at all - a superseded attempt is
+        settled by definition, because nothing will ever ingest it again.
+        """
+        pr_record = (snapshot.get("prs") or {}).get(str(record["pr"])) or {}
+        claim = pr_record.get("security_evidence")
+        if not isinstance(claim, dict):
+            return True
+        if claim.get("attempt_id") != record["attempt_id"] or \
+                claim.get("sha") != record["sha"]:
+            return True  # superseded: this attempt is nobody's current work
+        return claim.get("claim_state") == "COMPLETE"
+
+    def _release_one_security_worktree(self, record: dict) -> None:
+        path = record["worktree"]
+        if not Path(path).exists():
+            self._drop_security_worktree(record["task_id"], path)
+            return
+        result = workers.remove_worker(record["worker"])
+        if not result.ok:
+            self.log("SECURITY_WORKTREE_RELEASE_FAILED",
+                     task_id=record["task_id"], pr_id=record["pr"],
+                     agent_id=record["worker"], activity_class="ORCHESTRATION",
+                     outcome="REMOVE_FAILED",
+                     metadata_redacted={"attempt_id": record["attempt_id"]})
+            return
+        self._drop_security_worktree(record["task_id"], path)
+        self.log("SECURITY_WORKTREE_RELEASED", task_id=record["task_id"],
+                 pr_id=record["pr"], agent_id=record["worker"],
+                 activity_class="ORCHESTRATION", outcome="RELEASED",
+                 metadata_redacted={"attempt_id": record["attempt_id"]})
+
+    def _drop_security_worktree(self, task_id: str, path: str) -> None:
+        """Ownership ends only after the resource does. Its own small
+        transaction, and only this lifecycle's own entries are touched."""
+        with self.store.transaction() as doc:
+            task = doc.get("tasks", {}).get(task_id)
+            if not task:
+                return
+            retained = task.get("retained_worktrees") or {}
+            entry = retained.get(path)
+            if isinstance(entry, dict) and entry.get("why") == SECURITY_WORKTREE_WHY:
+                retained.pop(path, None)
+
+    def _publish_one_security_result(self, provenance: dict, status) -> None:
+        """Adjudicate and durably publish ONE attempt, under its own identity.
+
+        Every identifier comes from the attempt's provenance record - the task,
+        PR, full SHA and attempt that actually produced this output - never
+        from whatever the PR record holds now. A superseded attempt therefore
+        publishes as itself, which is the only attribution that is true.
+        """
+        task_id, pr_number = provenance["task_id"], provenance["pr"]
+        head, worker = provenance["sha"], provenance["worker"]
+        attempt_id = provenance["attempt_id"]
+        attempt = gate_evidence.security_attempt_dir(task_id, head, attempt_id)
+        text = workers.worker_output(worker, 40000)
+        last = config.WORKER_LOG_DIR / f"{worker}.last.txt"
+        if last.exists():
+            try:
+                text = last.read_text(encoding="utf-8")
+            except OSError:
+                pass
+        result = {"exit_code": status.get("exit_code"),
+                  "timed_out": status.get("phase") == "TIMEOUT",
+                  "duration_ms": status.get("duration_ms")}
+        role_cfg = self.cfg.roles["security"]
+        kwargs = dict(task_id=task_id, pr=pr_number, sha=head,
+                      attempt_id=attempt_id, result=result,
+                      provider=role_cfg.provider, model=role_cfg.model)
+        if status.get("phase") == "TIMEOUT":
+            record = gate_evidence.normalize_security_outcome(
+                reason=security_contract.TIMED_OUT, **kwargs)
+        elif status.get("phase") == "FAILED":
+            record = gate_evidence.normalize_security_outcome(
+                reason=security_contract.PROVIDER_FAILURE, **kwargs)
+        elif not text.strip():
+            record = gate_evidence.normalize_security_outcome(
+                reason=security_contract.OUTPUT_MISSING, **kwargs)
+        else:
+            record = gate_evidence.normalize_security_outcome(
+                review=routing.parse_security(text), **kwargs)
+        published = gate_evidence.publish_security_outcome(attempt, record)
+        self.log("SECURITY_OUTCOME_PUBLISHED", task_id=task_id,
+                 pr_id=pr_number, activity_class="REVIEW",
+                 outcome="PUBLISHED" if published else "PUBLISH_FAILED",
+                 metadata_redacted={"head": head,
+                                    "attempt_id": attempt_id,
+                                    "status": record["status"],
+                                    "reason": record["reason"]})
+
+    def confirm_security_spawn(self, spawned: list) -> None:
+        """Phase D. Cache only.
+
+        Correctness does not rest on this committing: the recovery table
+        already reads a claim with a job file as spawned, so a crash before
+        this lands is recovered from the filesystem, not from the cache.
+        """
+        if not spawned:
+            return
+        with self.store.transaction() as doc:
+            for plan in spawned:
+                claim = self._current_claim(doc, plan.task_id, plan.pr,
+                                            plan.sha, plan.attempt_id)
+                if claim and claim["claim_state"] == "PLANNED":
+                    claim["claim_state"] = "SPAWNED"
+
+    @staticmethod
+    def _current_claim(doc: dict, task_id: str, pr_number: int, head: str,
+                       attempt_id: str):
+        """The claim ONLY if it is still the exact one that was acted on.
+
+        Task association, PR, head SHA and attempt identity all re-checked.
+        A delayed result must never update a newer attempt for the same SHA,
+        so the attempt id is compared too - the SHA alone would let attempt 2
+        be overwritten by attempt 1's late answer.
+        """
+        task = doc.get("tasks", {}).get(task_id)
+        if not task or task.get("pr") != pr_number:
+            return None
+        record = doc.get("prs", {}).get(str(pr_number)) or {}
+        claim = record.get("security_evidence")
+        if not isinstance(claim, dict):
+            return None
+        if claim.get("sha") != head or claim.get("attempt_id") != attempt_id:
+            return None
+        return claim
+
+    def ingest_security(self, doc: dict, task: dict, pr_number: int,
+                        head: str, outcome: dict) -> None:
+        """Phase E. Commit an outcome that is ALREADY durably published.
+
+        Idempotent: a claim already COMPLETE is left alone, so repeated ticks
+        cannot duplicate findings or debt. Apparatus failure stays apparatus
+        failure - it never becomes a reviewer SECURITY_FAIL.
+        """
+        claim = self._current_claim(doc, task["id"], pr_number, head,
+                                    outcome.get("attempt_id") or "")
+        if claim is None or claim["claim_state"] == "COMPLETE":
+            return
+        record = doc["prs"][str(pr_number)]
+        status = outcome.get("status")
+        verdict = outcome.get("verdict")
+
+        if status != gate_evidence.COMPLETED:
+            claim["claim_state"] = "COMPLETE"
+            claim["reason"] = outcome.get("reason") or \
+                security_contract.SPAWN_OR_RUN_INCOMPLETE
+            self.log("SECURITY_RESULT", task_id=task["id"], pr_id=pr_number,
+                     role="security", activity_class="REVIEW",
+                     outcome=claim["reason"],
+                     metadata_redacted={"head": head, "status": status,
+                                        "attempt_id": claim["attempt_id"]})
+            return
+
+        findings = outcome.get("findings") or []
+        blocking = [f for f in findings
+                    if f.get("severity") in routing.BLOCKING_SEVERITIES]
+        debt_entries = [f for f in findings
+                        if f.get("severity") in ("P2", "P3")]
+        claim["claim_state"] = "COMPLETE"
+        claim["verdict"] = verdict
+        record["security_debt"] = debt_entries
+        self.log("SECURITY_RESULT", task_id=task["id"], pr_id=pr_number,
+                 role="security", activity_class="REVIEW", outcome=verdict,
+                 metadata_redacted={"head": head,
+                                    "attempt_id": claim["attempt_id"],
+                                    "counts": outcome.get("finding_counts"),
+                                    "blocking": len(blocking),
+                                    "debt": len(debt_entries)})
+        if verdict == security_contract.SECURITY_FAIL:
+            # Only P0/P1 block. P2/P3 are recorded debt and never
+            # independently force remediation (C-05b).
+            record["pending_findings"] = blocking
+            self.transition(doc, task["id"], "FIX_REQUIRED",
+                            f"security findings on {head[:12]}")
+        # SECURITY_PASS deliberately does NOT advance to REVIEW: accessibility
+        # is a required evidence class and is not implemented until C-05.3b,
+        # so the task holds in WAITING_EVIDENCE.
+
     # ---------------------------------------------------------- worker reaping
 
     def _lease_expires(self, role: str) -> str:
@@ -930,14 +2191,67 @@ class Supervisor:
         self.notify_out(doc, notify.INFO, f"{task['id']}: PR #{pr_number} opened",
                         f"Branch {task['branch']}.")
 
-    def route_prs(self, doc: dict, cs: clock.ClockState,
-                  prs: list[dict]) -> list[tuple[str, int]]:
+    def observe_closed_prs(self, snapshot: dict, open_prs: list[dict]) -> dict:
+        """`gh pr view` for every PR-bearing task whose PR is not open.
+
+        C-18 stage 1. route_prs made this call itself, inside the state
+        transaction; it is made here instead, with no lock held, and the
+        answer is passed in.
+
+        Only the pull requests route_prs would have asked about are observed -
+        a task's own PR, with a record, not already merged, and absent from
+        the open list - so this MOVES a GitHub call rather than adding one.
+
+        The snapshot is read outside the lock and may be stale by the time T1
+        runs. That cannot cause a wrong action: an observation route_prs does
+        not find is deferred to the next tick, never assumed.
+        """
+        open_numbers = {pr.get("number") for pr in open_prs}
+        records = snapshot.get("prs") or {}
+        wanted: set[int] = set()
+        for task in (snapshot.get("tasks") or {}).values():
+            number = task.get("pr")
+            if not isinstance(number, int) or isinstance(number, bool):
+                continue
+            if number in open_numbers:
+                continue
+            record = records.get(str(number))
+            if record is None or record.get("merged"):
+                continue
+            wanted.add(number)
+
+        observations: dict[int, routing.ClosedPrObservation] = {}
+        for number in sorted(wanted):
+            view = gh.pr_view(self.cfg.github_repo, number)
+            try:
+                observations[number] = routing.ClosedPrObservation(
+                    pr_number=number, observed_at=clock.iso(self.now()), view=view)
+            except ValueError as exc:
+                # An observation that cannot be bound to this pull request
+                # proves nothing about it. Dropping it leaves route_prs with
+                # no entry for the PR, which defers it - strictly safer than
+                # routing on an answer that may describe a different PR.
+                self.log("PR_OBSERVATION_REJECTED", pr_id=number,
+                         outcome="OBSERVATION_INCONSISTENT",
+                         activity_class="OBSERVATION",
+                         metadata_redacted={"reason": str(exc)})
+        return observations
+
+    def route_prs(self, doc: dict, cs: clock.ClockState, prs: list[dict],
+                  pr_observations: dict) -> list[tuple[str, int]]:
         """Route every PR-bearing task, and return the merge-ready ones.
 
         C-14.1: routing decides, it does not merge. Candidates are returned as
         (task_id, pr_number) identifiers - never the task, record or PR dicts,
         which belong to this transaction's document and are stale the moment it
         commits. execute_merges() re-reads them from fresh state.
+
+        C-18 stage 1: this runs inside T1 and therefore makes no GitHub call.
+        pr_observations is observe_closed_prs()'s result for this tick, keyed
+        by pull request number; it is required rather than defaulted so a
+        caller that forgets it fails loudly instead of silently losing
+        external-merge detection. A pull request with no entry is deferred,
+        and there is no fallback fetch to fall back to.
         """
         candidates: list[tuple[str, int]] = []
         open_prs = {pr["number"]: pr for pr in prs}
@@ -956,14 +2270,27 @@ class Supervisor:
             pr = open_prs.get(pr_number)
 
             if pr is None:
-                merged_view = gh.pr_view(self.cfg.github_repo, pr_number)
+                observation = pr_observations.get(pr_number)
+                if observation is None or observation.pr_number != pr_number:
+                    # C-18 stage 1: no observation was taken for this pull
+                    # request - the pre-lock snapshot did not name it, or the
+                    # answer failed its binding check. Defer to the next tick.
+                    # There is deliberately no fallback fetch here; a GitHub
+                    # call under the lock is the defect being removed.
+                    self.log("PR_ROUTING_DEFERRED", task_id=task["id"],
+                             pr_id=pr_number, outcome="OBSERVATION_MISSING",
+                             activity_class="ORCHESTRATION",
+                             metadata_redacted={
+                                 "reason": "no pre-transaction GitHub observation"})
+                    continue
+                merged_view = observation.view
                 # C-14.2: a pull request merged out there while state says it
                 # is not may be an ordinary human merge, or this control plane's
                 # own merge whose commit was lost. Completing both the same way
                 # converts a durable contradiction into a clean-looking task.
                 if self.invariant_violated(doc, task, record, pr_number, merged_view):
                     continue
-                merge_sha_observed = merged_view is not None
+                merge_sha_observed = observation.observed
                 merged_data = merged_view or {}
                 if (merged_data.get("state") or "").upper() == "MERGED":
                     merged_sha = (merged_data.get("mergeCommit") or {}).get("oid")
@@ -1380,6 +2707,19 @@ class Supervisor:
             return
         task = active[0]
 
+        # C-19: the allowance is committed to durable state BEFORE the request
+        # leaves, so a crash mid-flight leaves the exposure on disk instead of
+        # erasing it. `reservation is None` is the budget refusing the call.
+        allowance = config.jev_reservation_usd(self.cfg)
+        purpose = jev_consultation_identity(task)
+        with self.store.transaction() as doc:
+            reservation = budget.reserve(doc, "openrouter", allowance,
+                                         purpose=purpose,
+                                         at=clock.iso(self.now()))
+            # Why nothing was asked, where a human will look for it: a
+            # suppressed duplicate is not the budget running out.
+            suppressed = reservation is None and budget.duplicate_blocked(doc, purpose)
+
         decision = self.jev.decide(
             "worker_health",
             {
@@ -1389,21 +2729,28 @@ class Supervisor:
                 "minutes_since_progress": self._minutes_since(task.get("last_progress_at")),
                 "review_queue_depth": state_mod.review_queue_depth(snapshot),
             },
-            allowed=budget.metered_call_allowed(snapshot),
+            allowed=reservation is not None,
         )
 
         self.log("JEV_DECISION", task_id=task["id"], provider="openrouter",
-                 model=decision.model, activity_class="ORCHESTRATION",
+                 model=decision.requested_model, activity_class="ORCHESTRATION",
                  outcome=decision.choice, actual_cost_usd=decision.actual_cost_usd,
                  cost_source="provider" if decision.actual_cost_usd is not None else "none",
                  input_tokens=decision.input_tokens, output_tokens=decision.output_tokens,
                  duration_ms=decision.duration_ms,
                  metadata_redacted={"source": decision.source, "kind": decision.kind,
                                     "confidence": decision.confidence,
-                                    "reason": decision.reason, "error": decision.error})
+                                    "reason": decision.reason, "error": decision.error,
+                                    "requested_model": decision.requested_model,
+                                    "returned_model": decision.returned_model or "unknown",
+                                    "billing_state": decision.billing_state,
+                                    "reservation_usd": allowance if reservation else None,
+                                    "duplicate_suppressed": suppressed})
 
         with self.store.transaction() as doc:
-            crossed = budget.record(doc, "openrouter", decision.actual_cost_usd, None)
+            crossed = budget.settle(doc, reservation, provider="openrouter",
+                                    billing_state=decision.billing_state,
+                                    actual_cost_usd=decision.actual_cost_usd)
             for name in crossed:
                 self.on_budget_threshold(doc, name)
 
@@ -1576,6 +2923,39 @@ class Supervisor:
         """
         open_prs = gh.list_open_prs(self.cfg.github_repo)
         merge_candidates: list[tuple[str, int]] = []
+        planned_security: list = []
+
+        # C-05.3a Phase A + Phase E-publish, and C-18 stage 1's pull-request
+        # observation, all OUTSIDE the lock. The snapshot is
+        # non-authoritative; T1 re-reads under the lock and re-checks task,
+        # PR, SHA and attempt identity before acting.
+        security_observations: dict = {}
+        pr_observations: dict = {}
+        if self.store.exists():
+            snapshot = self.store.read()
+            # C-18 stage 1: the `gh pr view` route_prs used to make while
+            # holding the lock. Taken here, passed in below.
+            pr_observations = self.observe_closed_prs(snapshot, open_prs)
+            # Heads are resolved ONLY for pull requests whose task actually
+            # needs evidence. gh.pr_diff_sha calls gh.pr_view, so asking for
+            # every open PR every tick would add a GitHub round trip per PR
+            # for work nothing is waiting on.
+            wanted = {task.get("pr") for task in snapshot.get("tasks", {}).values()
+                      if task.get("state") in self.EVIDENCE_STATES}
+            eligible = [pr["number"] for pr in open_prs
+                        if pr["number"] in wanted]
+            if eligible:
+                entries = proc.worker_entry_processes(config.WORKER_LOG_DIR)
+                heads = {number: gh.pr_diff_sha(self.cfg.github_repo, number)
+                         for number in eligible}
+                self.publish_security_results(snapshot, entries)
+                # Phase F, after publication and before T1: a worktree is
+                # released only once its answer is durable, and releasing
+                # before T1 keeps a removal and an ingest from contending
+                # for the same attempt within one tick.
+                self.release_security_worktrees(snapshot, entries)
+                security_observations = self.observe_security(snapshot, heads,
+                                                              entries)
 
         with self.store.transaction() as doc:
             providers.ensure(doc)
@@ -1603,7 +2983,13 @@ class Supervisor:
                 return
 
             self.reap_workers(doc)
-            merge_candidates = self.route_prs(doc, cs, open_prs)
+            # C-05.3a T1: claim, and ingest evidence already durable on disk.
+            # Deliberately not folded into reap_workers - that callback path
+            # runs inside this transaction, and reading worker output or
+            # publishing files from it would put external work back under the
+            # lock. Only finished records cross this boundary.
+            planned_security = self.route_evidence(doc, security_observations)
+            merge_candidates = self.route_prs(doc, cs, open_prs, pr_observations)
             self.detect_stale(doc)
             self.detect_lease_expiry(doc)
 
@@ -1619,9 +3005,34 @@ class Supervisor:
 
             self.checkpoints(doc, cs)
 
+        # T1 has committed and the lock is released. C-05.3a Phase C runs
+        # here - materialise the claimed attempt, write the job file, spawn -
+        # with no state lock held, then Phase D caches the spawn in its own
+        # transaction.
+        #
+        # Placed before execute_merges as directed. C-14.1's reason for
+        # running merges early is ROLLBACK safety: each merge gets its own
+        # transaction so no later failure can undo one GitHub already
+        # recorded. Phase C holds no transaction, so it cannot roll a merge
+        # back and that guarantee is unaffected. It does add worktree and
+        # spawn latency ahead of merges - see the report.
+        if planned_security:
+            self.confirm_security_spawn(self.execute_security(planned_security))
+
         # T1 has committed. Each merge now gets its own transaction, before the
         # slow provider work so a merge never waits on a provider call.
         self.execute_merges(merge_candidates)
+
+        # C-18 stage 2. Every notification this tick queued - from T1, from
+        # Phase D and from each merge's own transaction - is delivered here,
+        # with no lock held and under a bounded budget. Placed BEFORE the
+        # slow provider work deliberately: the Observer alone may run for
+        # minutes, and a HUMAN_REQUIRED message must not wait behind it.
+        #
+        # ONE allowance, shared with the second drain below. The governed
+        # limits are per tick, so two drains must not each get a full one.
+        drain_allowance = self.new_drain_allowance()
+        self.drain_notifications(drain_allowance)
 
         # Outside the lock: a slow provider must never stall the control cycle.
         # Each is declared as bounded busy work so a healthy supervisor is not
@@ -1632,6 +3043,17 @@ class Supervisor:
                           + BUSY_MARGIN_SECONDS)
         self.run_declared("observer", observer_bound, self.run_observer)
 
+        # A second bounded drain, because the provider work above has its own
+        # transaction and can queue an escalation - consult_jev records spend
+        # and a crossed budget threshold raises HUMAN_REQUIRED. Without this
+        # the hard-stop message would wait for the next tick, behind an
+        # Observer that may legitimately run for minutes. Costs nothing when
+        # nothing was queued: the drain finds an empty queue and returns.
+        #
+        # Deliberately the SAME allowance the first drain used: whatever it
+        # spent is already gone, and this one may only use what is left.
+        self.drain_notifications(drain_allowance)
+
     def run_declared(self, what: str, bound_seconds: float, action) -> None:
         """Run bounded slow work with its deadline published in the heartbeat."""
         self.declare_busy(what, bound_seconds)
@@ -1640,23 +3062,67 @@ class Supervisor:
         finally:
             self.clear_busy()
 
+    def _acquire_singleton(self) -> bool:
+        """Take the process-lifetime singleton lock, or refuse to start.
+
+        The handle is kept on the instance so the file description - and with
+        it the lock - survives for the life of the Supervisor. Letting it fall
+        out of scope would close the descriptor and silently release the lock
+        while the process kept running.
+
+        The descriptor is marked non-inheritable so a spawned worker never
+        carries the lock into its own process. Python marks new descriptors
+        non-inheritable by default (PEP 446) and subprocess closes them anyway,
+        but ownership of a singleton is not something to leave resting on two
+        defaults holding at once.
+        """
+        try:
+            handle = open(config.SINGLETON_LOCK_PATH, "a+", encoding="utf-8")
+        except OSError:
+            self.log("SUPERVISOR_START_REFUSED", outcome="LOCK_UNAVAILABLE",
+                     activity_class="ORCHESTRATION",
+                     metadata_redacted={"this_pid": os.getpid()})
+            return False
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # BlockingIOError for a held lock; any other OSError is equally
+            # "this process did not get exclusive ownership", and starting
+            # without it is the one outcome that must not happen.
+            handle.close()
+            self.log("SUPERVISOR_START_REFUSED", outcome="ALREADY_RUNNING",
+                     activity_class="ORCHESTRATION",
+                     metadata_redacted={"incumbent_pid": _reported_pid(),
+                                        "this_pid": os.getpid()})
+            return False
+        os.set_inheritable(handle.fileno(), False)
+        self._singleton_lock = handle
+        return True
+
     def run(self) -> int:
         config.ensure_runtime_dirs()
 
         # Exactly one supervisor. Two would both dispatch, and the state lock
         # only serialises their writes - it does not stop them duplicating work.
-        if config.PID_PATH.exists():
-            try:
-                incumbent = int(config.PID_PATH.read_text(encoding="utf-8").strip())
-            except (ValueError, OSError):
-                incumbent = None
-            if incumbent and incumbent != os.getpid() and proc.is_running(incumbent):
-                self.log("SUPERVISOR_START_REFUSED", outcome="ALREADY_RUNNING",
-                         activity_class="ORCHESTRATION",
-                         metadata_redacted={"incumbent_pid": incumbent,
-                                            "this_pid": os.getpid()})
-                return 1
+        #
+        # This is an ATOMIC exclusion, and it replaces a check-then-write that
+        # was not one: reading the pid file, testing liveness and then writing
+        # left a window in which two starting processes could both observe no
+        # incumbent and both proceed. Measured at 16 duplicate starts in 40
+        # trials against the previous sequence.
+        #
+        # flock is the same primitive state.py and ledger.py already use. The
+        # lock lives on the open file description, so it is held for exactly as
+        # long as this process keeps the handle - and the kernel releases it on
+        # exit OR on a crash, which is why no stale-lock cleanup exists here
+        # and none is needed. The inode is created once and never unlinked:
+        # replacing it would hand a second process an independent lock.
+        if not self._acquire_singleton():
+            return 1
 
+        # Reporting only, and deliberately still written: watchdog.supervisor_pid
+        # and preflight read this to identify and liveness-check the incumbent.
+        # It no longer carries any exclusion duty.
         config.PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
 
         def stop(_signum, _frame):

@@ -314,6 +314,37 @@ def _attempt_terminal(record: dict, doc: dict) -> bool | None:
     return None
 
 
+def _security_claimed_workers(doc: dict) -> set[str]:
+    """Worker names a durable C-05.3a security claim owns.
+
+    A security attempt spawns OUTSIDE the state transaction - that is what
+    keeps external work off the state lock - so it can never hold a
+    doc["workers"] record, and orphanhood judged from that map alone reports
+    every working attempt as ownerless. The durable claim is the attempt's
+    identity authority, so it is the right place to ask.
+
+    Read at ANY claim_state, including COMPLETE. COMPLETE says the control
+    plane has finished with the attempt, not that its process has gone;
+    dropping ownership there would report a real, still-exiting worker as an
+    orphan during the exact window cleanup is waiting on.
+
+    Only the shape needed is required. A malformed claim still names a worker
+    this control plane spawned, and orphanhood is a claim about the ABSENCE
+    of an owner - never one to make from evidence too damaged to read.
+    """
+    owned: set[str] = set()
+    for record in (doc.get("prs") or {}).values():
+        if not isinstance(record, dict):
+            continue
+        claim = record.get("security_evidence")
+        if not isinstance(claim, dict):
+            continue
+        worker = claim.get("worker")
+        if isinstance(worker, str) and worker:
+            owned.add(worker)
+    return owned
+
+
 def detect_orphans(doc: dict, *, repo_root=None) -> tuple[list[OrphanFinding],
                                                           dict[str, bool]]:
     repo_root = repo_root or config.REPO_ROOT
@@ -366,8 +397,9 @@ def detect_orphans(doc: dict, *, repo_root=None) -> tuple[list[OrphanFinding],
         if status_paths is not None:
             scan_ok["process"] = True
             recorded = doc.get("workers", {})
+            claimed = _security_claimed_workers(doc)
             for worker, pid in sorted(entries.items()):
-                if worker in recorded:
+                if worker in recorded or worker in claimed:
                     continue
                 status = workers_mod.read_status(worker) or {}
                 if status.get("phase") in ("DONE", "FAILED", "TIMEOUT"):
@@ -378,7 +410,7 @@ def detect_orphans(doc: dict, *, repo_root=None) -> tuple[list[OrphanFinding],
                     f"doc[\"workers\"] record exists for it"))
             for status_path in status_paths:
                 worker = status_path.name[: -len(".status.json")]
-                if worker in recorded or worker in entries:
+                if worker in recorded or worker in entries or worker in claimed:
                     continue
                 status = workers_mod.read_status(worker)
                 if not status or status.get("phase") in ("DONE", "FAILED",

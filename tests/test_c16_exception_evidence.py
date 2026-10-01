@@ -73,6 +73,8 @@ class SupervisorTickErrorCase(unittest.TestCase):
         sup._interruptible_sleep = sleeps
         with mock.patch.object(supervisor.config, "PID_PATH",
                                Path(self.tmp.name) / "supervisor.pid"), \
+                mock.patch.object(supervisor.config, "SINGLETON_LOCK_PATH",
+                                  Path(self.tmp.name) / "supervisor.lock"), \
                 mock.patch.object(supervisor.config, "ensure_runtime_dirs",
                                   lambda: None), \
                 mock.patch.object(supervisor.signal, "signal",

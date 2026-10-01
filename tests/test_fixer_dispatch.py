@@ -161,7 +161,7 @@ class TestDispatchFailureIsNeverSilent(FixerDispatchCase):
         pr = {"number": PR, "state": "OPEN", "isDraft": False,
               "headRefName": BRANCH, "mergeStateStatus": "CLEAN"}
         with mock.patch.object(self.sup, "dispatch_fixer") as retry:
-            self.sup.route_prs(doc, cs, [pr])
+            self.sup.route_prs(doc, cs, [pr], {})
 
         retry.assert_called_once()
         self.assertEqual(retry.call_args.args[2], PR)
@@ -195,7 +195,7 @@ class TestDispatchFailureIsNeverSilent(FixerDispatchCase):
         pr = {"number": PR, "state": "OPEN", "isDraft": False,
               "headRefName": BRANCH, "mergeStateStatus": "CLEAN"}
         with mock.patch.object(self.sup, "dispatch_fixer") as retry:
-            self.sup.route_prs(doc, cs, [pr])
+            self.sup.route_prs(doc, cs, [pr], {})
         retry.assert_not_called()
 
 
