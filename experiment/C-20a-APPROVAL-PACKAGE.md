@@ -14,7 +14,7 @@ the decision.
 | Also supersedes | the proposal's §7 R2 and runbook step 11, both of which say the publisher "does not exist". It exists — `control/publisher.py`. It still has no transport, which is the half of F7 that remains |
 | Revised | 2026-10-02, after an independent review. Eight corrections are marked **CORRECTED** or **ADDED** in place; two of them (actions 3a/3b and the protection capture) change the deployment sequence |
 
-**What approving this authorises:** the eighteen actions in §9, in that
+**What approving this authorises:** the twenty actions in §9, in that
 order. Nothing else, and nothing until you say so.
 
 ---
@@ -346,7 +346,7 @@ that is documented.
 ## 7. The trusted revision
 
 > **TRUSTED APPARATUS REVISION:
-> `44e1eb51c959786bcac59bb347a3213c9273791b`**, on
+> `2c7c6cf257054872171d6e8f34d6329368a056a6`**, on
 > `wip/c05-1-persistence`. Full 40 hex, never a branch name.
 
 **`main` is disqualified, and this was checked rather than assumed.**
@@ -432,7 +432,7 @@ never `config.REPO_ROOT`, which is a mutable tree.
 
 ---
 
-## 9. What needs YOUR approval — the eighteen actions, in order
+## 9. What needs YOUR approval — the twenty actions, in order
 
 **It was twelve until 2026-10-02.** An independent review found that the
 twelve, carried out exactly as written, would have left no process
@@ -454,7 +454,9 @@ rows are marked **ADDED**; two existing rows are marked **CORRECTED**.
 | 6 | Replace `worker_entry.py`'s environment pass-through with an allow-list. **The derivation is already written and tested** — `worker_entry.worker_child_env`, 10 tests. This action is the one line at the call site, plus confirming a real worker still starts | yes — code |
 | 6b | **ADDED, AND THE ORIGINAL TWELVE DID NOT WORK WITHOUT IT.** Change `control/gh.py:33` to pass an explicit per-role `GH_TOKEN`. See the box below | yes — code |
 | 6c | **ADDED.** Decide `origin` SSH → HTTPS for the worker's worktrees. Promoted out of §12, because after action 5 this is not optional | yes |
-| 7 | Create the read-only gate export at the §7 pin | yes — delete |
+| 7 | Create the gate export at the §7 pin — `git worktree add --detach` | yes — delete |
+| **7b** | **ADDED 2026-10-02, AND WITHOUT IT THE GATE CANNOT RUN AT ALL.** `cd <export>/apparatus && npm ci --omit=dev`, **before** the `chown`/`chmod`. See the box below | yes — delete the export |
+| 7c | **Only now** `chown -R run002-sup:run002` and `chmod -R a-w` the export | yes |
 | 8 | Build the gate invoker that runs `live-gate.js` from that export. **Read the §7 box on `WORKSPACE_MISMATCH` first** — the obvious implementation denies every pull request | yes — code |
 | 9 | Wire `control/publisher.py` to the gate invoker and the gate credential, and give it a real transport | yes — code |
 | 10 | Run the falsification plan on the THROWAWAY repository — **V1–V13**, including deliberately reproducing the F5 deadlock (V10). **V12 and V13 were added 2026-10-02**: V12 is the second-required-context check behind §4's box, and **V13 runs the gate from the read-only export, which is the step that would have caught the §7 trap.** V13 must pass before action 11 | n/a |
@@ -466,6 +468,39 @@ rows are marked **ADDED**; two existing rows are marked **CORRECTED**.
 
 **Step 11 is last, and that ordering is not a preference.** Applying it
 before 8–10 deadlocks every product PR permanently.
+
+> ### ACTION 7b — THE EXPORT AS SPECIFIED COULD NOT RUN THE GATE. REPRODUCED.
+>
+> A real `git worktree add --detach` of the pin, loaded with `node`:
+>
+> ```
+> Error: Cannot find module 'ajv/dist/2020'
+> ```
+>
+> `validate.js:49` requires `ajv` at **module load**, and `live-gate.js:40`
+> requires `validate.js` at its own. `node_modules/` is gitignored, so a
+> worktree export contains none, and Node resolves by `__dirname` ancestry —
+> `/opt/run-002/gate-<SHA>/…` walks up to `/` and finds nothing.
+>
+> **The gate CRASHES before deciding anything.** It fails closed, so it is
+> not a safety hole — it is a 100% outage, and it would have been discovered
+> on launch day. No existing test caught it because every simulated export
+> contains only adapter files, which use Node built-ins exclusively.
+>
+> **Fixed at the packaging end, already done locally:** `ajv` moved from
+> `devDependencies` to `dependencies` — it is a runtime dependency of the
+> gate, not a test tool — and the lockfile regenerated so `npm ci` still
+> matches. **Verified:** `npm ci --omit=dev` installs it (5 packages) and
+> pulls in **no** playwright, so no browser download happens inside the
+> export.
+>
+> **Do NOT symlink or bind-mount the live `apparatus/node_modules` into the
+> export.** That reintroduces a mutable, worker-reachable dependency tree as
+> the code the gate executes — the exact property the export exists to
+> remove. Install, so `chmod -R a-w` freezes the dependencies too.
+>
+> Installing does not disturb the pin: the revision check reads `HEAD`, not
+> a tree hash.
 
 > ### ACTION 6b — WITHOUT IT, APPROVING THE REST BREAKS THE SYSTEM
 >
@@ -512,6 +547,9 @@ before 8–10 deadlocks every product PR permanently.
 | Both of the above **verified as a connected path against simulated services** — real `node`, a real throwaway export, a real throwaway git repo, and a gate program the test writes. 60 tests, 10 mutations | `tests/test_c20a_publication_path.py` |
 | **The sixth provenance condition**, which C-04c recorded as unmatchable. It closed a real hole: the merge path never required a `REVIEW_DISPATCHED` at all, so one appended `REVIEW_RESULT` attributed to nobody satisfied the whole code-review leg | `control/routing.py::_review_worker_attests`, `tests/test_c04c_merge_attestation.py` |
 | The recursive protection-restatement check, and the nested field it immediately caught | `check-templates.py` check B, `branch-protection-AFTER.json` |
+| **The gate program itself** (action 8's deployment half): envelope in on stdin, the gate's decision out verbatim, built around all three `__dirname` traps and proved by a regression test that runs it from a directory that is NOT the configured workspace | `apparatus/pr-evidence/gate-cli.js`, 29 tests |
+| **The `ajv` packaging fix** for action 7b, with `npm ci --omit=dev` verified to install it and not playwright | `apparatus/package.json`, `package-lock.json` |
+| **The gate process's environment allow-list** — `NODE_PATH` and `NODE_OPTIONS` both choose what code Node runs, and the spawn passed neither through a filter | `control/gate_invoker.py::gate_child_env`, 7 tests |
 
 ---
 

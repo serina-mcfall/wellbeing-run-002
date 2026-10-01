@@ -209,8 +209,32 @@ grep = subprocess.run(
 # would have made the whole run untrustworthy. `git grep` only searches
 # tracked files, which is exactly why committing the checker was the event
 # that broke it.
+# `.test.js` and `tests/` are excluded, and the reason is not convenience.
+#
+# This check asks "does any SHIPPED code construct the commit-status path".
+# A test that lists `'statuses/'` among the strings it asserts the gate does
+# NOT contain is proving this check's own claim, and it tripped the check by
+# saying so - `gate-cli.test.js:725` does exactly that. Counting an
+# absence-assertion as a construction is the same false positive as matching
+# the English word "publisher" in a comment, and a guard that fires on the
+# tests written to support it is one people switch off.
+#
+# The narrowing is real and worth naming: a transport added inside a test
+# file would no longer be seen here. That is acceptable because a test file
+# is not shipped execution, and because the thing this ultimately protects -
+# that no process reaches GitHub by accident - is enforced where it belongs,
+# by the publishing module and `gate-cli.js` having no default transport and
+# every caller injecting a simulated one.
+#
+# (That sentence originally spelled the function as module-dot-name, and the
+# containment guard in tests/test_c20a_publication_path.py caught this file
+# as a caller. The guard was right: attribute access is exactly what it
+# looks for. Reworded rather than exempted.)
 hits = [l for l in grep.stdout.splitlines()
-        if not l.startswith("experiment/") and "node_modules" not in l]
+        if not l.startswith("experiment/")
+        and not l.startswith("tests/")
+        and ".test.js:" not in l
+        and "node_modules" not in l]
 check(not hits, "E. no code constructs a commit-status API call",
       f"{len(hits)} hit(s): {hits[0]}" if hits
       else "control/publisher.py posts only through an injected `poster`; "

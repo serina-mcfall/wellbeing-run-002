@@ -8417,3 +8417,127 @@ drift. **Everything in §46.3 is tamper evidence, not prevention.**
 - **Three re-pins in two sessions, every one demanded by `F2` rather than
   noticed by a person.** That is the argument for the check, not against
   the pin.
+
+## 47. SESSION HANDOVER — the session that tried to run the export (2026-10-02)
+
+**Read this first. It supersedes §46 and everything before it.** §46 remains
+accurate about what it describes.
+
+### 47.1 Verified state
+
+| | |
+|---|---|
+| Branch | `wip/c05-1-persistence` |
+| HEAD | `2c7c6cf` plus this section's own documentation commit |
+| Verification | **2,466 Python tests OK · 259 apparatus tests OK** · `check-templates.py` OK, 0 failing · secret scan clean over 281 tracked files · `git diff --check` clean |
+| T+00 | **NOT_STARTED** — `started_at: None`, nine tasks QUEUED, no PRs, no workers, one ledger line |
+| Run 001 | Untouched |
+| Trusted pin | **RE-PINNED to `2c7c6cf257054872171d6e8f34d6329368a056a6`** — the fourth, every one demanded by `F2` |
+| Subagents | Three dispatched, three complete, all reviewed and integrated. None resumable, no worktree left behind |
+
+### 47.2 THE HEADLINE: THE EXPORT COULD NOT RUN THE GATE, AND IT IS REPRODUCED
+
+§46 found by reading that two adapters would deny every pull request from
+the export. This session tried to actually run it. A real
+`git worktree add --detach` of the pin, loaded with `node`:
+
+```
+Error: Cannot find module 'ajv/dist/2020'
+```
+
+`validate.js:49` requires `ajv` at **module load**; `live-gate.js:40`
+requires `validate.js` at its own. `node_modules/` is gitignored, so a
+worktree export has none. **The gate crashes before deciding anything.**
+
+It fails closed, so it is not a safety hole — it is a **100% outage**, and
+nothing would have found it before launch day, because every simulated
+export in every test contained only adapter files that use Node built-ins.
+
+**Fixed at the packaging end:** `ajv` is a runtime dependency of the gate
+and now lives in `dependencies`; the lockfile is regenerated so `npm ci`
+still matches; `npm ci --omit=dev` is **verified** to install it (5
+packages) and to pull in **no** playwright. Action **7b** adds the install
+step between `worktree add` and `chmod -R a-w`. Symlinking the live
+`node_modules` is explicitly refused — it would put a mutable,
+worker-reachable dependency tree under the code the gate executes.
+
+### 47.3 Four more things that were weaker than they read
+
+**1. The gate inherited the Supervisor's whole environment.** `run_node`
+passed no `env=`. `NODE_PATH` and `NODE_OPTIONS` both decide what code Node
+runs — and `NODE_PATH` is not theoretical here: the same `live-gate.js`
+that cannot find `ajv` from the export **loads fine** when `NODE_PATH`
+points at a writable tree elsewhere. Now allow-listed, same shape as
+`worker_child_env`, with the spawn's use of it asserted.
+
+**2. One appended ledger line bricked the control plane.**
+`{"outcome": {}}` made `ledger_attests_merge` raise `TypeError` out of a
+predicate whose docstring promises it never raises; `attempt_merge` does
+not catch it, so the tick aborted and kept aborting. The ledger is writable
+by the UID that runs the workers — that is C-22's premise — so this was a
+one-line denial of service. Non-string outcomes are coerced and treated as
+non-passing.
+
+**3. A success could name a head the gate never resolved.** One decision
+object with `trustedHeadSha: null` and the pending flag set posted
+`success` against **two different commits**. Today's `live-gate.js` cannot
+emit that pair — but that is an unstated invariant of a program in another
+language, and this module already declines to take the flag on trust.
+
+**4. The containment guard missed the obvious wiring.**
+`from control.publisher import publish` did not match, nor `import_module`,
+`run_path` or `exec`-by-path. The class whose entire purpose is "nothing
+reaches the publisher" would have stayed green through the most ordinary
+way anyone would wire it. The hole **predates** §46's narrowing and
+survived it. Both guards widened, and the pattern now asserts its own
+coverage — twelve wiring spellings must match, four real documentation
+sentences must not.
+
+### 47.4 The gate program exists
+
+`apparatus/pr-evidence/gate-cli.js` is action 8's deployment half: envelope
+in on stdin, the decision out verbatim. Built around **all three** trap
+instances — verified by reading its `require`s, not its report: the
+low-level `resolveTrustedHeadSha(identity, {repoRoot: liveRepoRoot})` and
+`loadReviewerEvidence(<liveRepoRoot>/<runtime_dir>, …)`;
+`request.ledgerEvents` dropped on the floor. `resolveRun002CiResult` and
+`resolveRun002TaskRecord` **are** used — config from the export is correct.
+
+The regression test runs the program from a directory that is **not** the
+configured workspace and asserts it still returns the SHA git reports.
+
+**GRADE: CONNECTED PATH VERIFIED WITH SIMULATED EXTERNAL SERVICES.**
+Nothing has run against real GitHub. No `gh`, no network, no credential, no
+commit status. There is still **no transport**.
+
+### 47.5 What remains, and who owns it
+
+| # | Item | Owner |
+|---|---|---|
+| 1 | **Provision the eight secrets** | **HUMAN** — still the one everything waits on |
+| 2 | **C-20a(C) / C-22** — approve, reject or amend. Now **twenty** actions | **OPERATOR** |
+| 3 | The `orphan_annunciations` residue | OPERATOR, not urgent |
+| 4 | inotify headroom on a quiet host | HUMAN, before preflight |
+| 5 | Run the real preflight | ENGINEERING, after 1 |
+| 6 | C-04a against real GitHub | ENGINEERING, after 2 |
+| 7 | **Nothing in the control plane calls `live-gate.js`, and nothing assembles a gate request** | ENGINEERING — **the largest remaining gap.** It is architectural, and deliberately NOT closed here: C-04b chose option (iii), and making the Supervisor execute the JavaScript gate changes which gate is the merge authority. That is a governance decision, not an implementation one |
+| 8 | A status transport | ENGINEERING, after 2. Deliberately unwritten: the package specifies the permission but never the request, and it cannot be tested with simulated services at the exact point where a mistake posts a false pass |
+
+### 47.6 For whoever picks this up cold
+
+- **Run the thing, then run it where it will actually run.** §46 found two
+  export traps by reading. Running a real export found a third problem that
+  reading had not: the gate cannot load at all. Reading is cheaper; running
+  is the only thing that finds what reading cannot imagine.
+- **Simulated fixtures inherit the author's assumptions.** Every "export"
+  in every test was built by copying in exactly the files the author was
+  thinking about, so the one module with a third-party import was never
+  present and the missing dependency could not appear.
+- **Check the guard against the thing it guards.** Three guards this
+  session were weaker than they read, and the widened one now tests its own
+  pattern spelling by spelling. A scan proves nothing if the scanner cannot
+  recognise what it is looking for.
+- **A subagent's finding is a claim.** All three agents were re-verified.
+  Two of their reports contained a claim that did not survive checking, and
+  one "dangling V11 reference" turned out to be defined in another section —
+  so nothing was "fixed" there.
