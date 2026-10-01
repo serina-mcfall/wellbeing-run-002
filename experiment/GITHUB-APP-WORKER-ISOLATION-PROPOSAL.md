@@ -604,7 +604,7 @@ created on GitHub, and so the F5 deadlock is resolved before it can bite.
 | # | Step | Who | Authorisation | Rollback |
 |---|---|---|---|---|
 | 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `183959e06dcafd4915ab989efb1721946174bc85`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
-| **0b** | **Push `wip/c05-1-persistence`** so the pinned revision exists on `origin`. It is three commits ahead today (§9.5), so the pin is not independently fetchable until this happens. | human | repo write | n/a — pushing an existing local commit |
+| **0b** | ~~**Push `wip/c05-1-persistence`** so the pinned revision exists on `origin`.~~ **DONE 2026-10-02** — pushed at `17dc358`; `183959e` is reachable from `origin/wip/c05-1-persistence` and the pin is now independently fetchable. | done | repo write | n/a — pushing an existing local commit |
 | 1 | Create OS users `run002-sup`, `run002-wrk` and group `run002`. Set ownership and modes per §3.3 and §9.4. | human | root | `userdel run002-sup run002-wrk; groupdel run002`; restore ownership to `serina` |
 | 2 | Create the throwaway probe repository. | human | GitHub account | delete the repository |
 | 3 | Run V1, V1b, V4, V4b, V5, V5b, V6 — the **filesystem** half of §5. No GitHub objects needed. | human | sudo | n/a (read-only assertions) |
@@ -1061,21 +1061,24 @@ b66944a Running it found G6's composite mapping never fired
 7f937a8 C-02b: the frozen prompt stops calling its own dispatch unimplemented
 ```
 
-**The pinned commit is ahead of `origin`, and the commits in between touch
-`apparatus/` and `control/`.** So:
+**When the pin was chosen it was ahead of `origin`, and the commits in
+between touch `apparatus/` and `control/`.** So:
 
 - Pinning `dbee92c` instead would export an **older**
   `control/accessibility_services.py` and an **older** `control/routing.py`
   than the ones the current tests pass against — the latter being the one
   C-04b stopped merging on absent facts. Not acceptable.
-- Pinning `183959e` is correct **and is not fetchable by anyone else until
-  the branch is pushed.** A trusted revision nobody can fetch cannot be
-  independently verified, which defeats half the point of pinning.
+- Pinning `183959e` is correct, but while the branch sat unpushed it was
+  **not fetchable by anyone else.** A trusted revision nobody can fetch
+  cannot be independently verified, which defeats half the point of
+  pinning.
 
-> **PRECONDITION, runbook step 0b: push `wip/c05-1-persistence` so the
-> pinned commit exists on `origin` before any export is made.** Pushing the
-> branch is ordinary work and is done; what is not authorised by this
-> document is creating the export, the Apps, or anything else in §6.
+> **PRECONDITION, runbook step 0b — SATISFIED 2026-10-02.**
+> `wip/c05-1-persistence` was pushed to `origin` at `17dc358`, which
+> contains the pinned commit, so `183959e` is now fetchable and the pin is
+> independently verifiable. Pushing the working branch is ordinary work and
+> was authorised. What is **not** authorised by this document is creating
+> the export, the Apps, the OS users, or anything else in §6.
 
 #### The pinning rule, which outlives this particular SHA
 
