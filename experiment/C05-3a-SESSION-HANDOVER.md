@@ -7436,3 +7436,287 @@ parallel. Nothing in 1–4 requires a paid call.
   touched, no paid call made, no product worker launched, no merge to
   `main`. Run 001 untouched. C-18a stands.
 - **T+00 remains NOT_STARTED.**
+
+## 42. SESSION HANDOVER — delegated-decision session close (2026-10-01)
+
+**Read this section first. It supersedes §41, which in turn superseded §16.**
+§41 is still accurate about what it describes; it is simply older, and one
+of its summary claims was wrong — see 42.3.
+
+### 42.1 State at handover — verified, not reported from memory
+
+| | |
+|---|---|
+| Branch | `wip/c05-1-persistence` |
+| HEAD | **`a0d57f6`**, plus this section's own documentation commit on top of it. Everything verified below was measured at `a0d57f6`; the commit that adds §42 touches only `experiment/` documents and no code |
+| Pushed | **Yes** — `git status -sb` shows no divergence from `origin/wip/c05-1-persistence` |
+| Working tree | **Clean.** `git status --porcelain` empty |
+| Verification at HEAD | **2,273 Python tests OK · 218 apparatus tests OK**, both exit 0. Secret scan clean over 244 tracked files. `git diff --check` clean |
+| Baseline at session start | `1387275`, 2,171 Python / 218 apparatus |
+| Subagents | **Three dispatched, all complete and all integrated.** Two worked in isolated worktrees and their single commits were cherry-picked after review; the third was read-only and returned a report |
+| T+00 | **NOT_STARTED** |
+
+**A note on the two worktree agents.** Both reported that their worktree was
+cut at `4eeaa7c` rather than the stated `1387275` — 21 and 41 commits stale
+respectively — and both fast-forwarded before starting. Their commits apply
+cleanly to `1387275` and each touches exactly the one file it owned. Worth
+knowing if more worktree agents are dispatched: **verify the base, do not
+assume the harness cut it where you asked.**
+
+### 42.2 What the operator delegated, and what was done with it
+
+The operator was away for this session and delegated three of the four
+pending decisions. Each authorisation is recorded **verbatim** in its own
+evidence file, because the instruction said: *"If repository governance
+requires a record of my decision, record this instruction and your selected
+implementation."*
+
+| Decision | Record | Outcome |
+|---|---|---|
+| **C-02a** — the frozen prompt | `experiment/evidence/C-02a-frozen-prompt-amendment.txt` | **APPLIED.** One line of `prompts/accessibility.md` |
+| **C-18 stage 7** — `declare_busy` bounds | handover 42.5 + the C-18 audit row | **APPLIED.** Five phases bounded; the proposed table was not adopted |
+| **Notification amendment** | `experiment/evidence/C-18-notification-amendment.txt` | **APPLIED.** The last synchronous send is out of T1 |
+| **C-20a(C)** — GitHub App + worker UID | `experiment/GITHUB-APP-WORKER-ISOLATION-PROPOSAL.md` | **NOT APPLIED. Still the operator's.** Proposal only; nothing created or changed |
+
+All earlier approvals — G1, G2/G9, G3's phase limits and direction, G4, G6,
+G7, C-18a — are **unchanged and still applied**. None was reopened.
+
+### 42.3 The discrepancy §41 contained, resolved
+
+§41.4 said both accessibility halves were "built and wired, with the tick
+path proved end to end". §41.5 said the qualitative tick dispatch was
+unfinished. Both sentences described something true. The summary did not:
+
+- the **automated** half genuinely was tick-connected end to end, but
+  `route_evidence` gates it on `accessibility_services_factory`, which was
+  `None` and which nothing ever set. It never planned. **Wired and inert.**
+- the **qualitative** half was callable and proved through the Supervisor,
+  but `route_evidence` called **neither** `plan_accessibility_review` **nor**
+  `ingest_accessibility_review`. Nothing dispatched it in a real run, so
+  `review_gate_fires` could never see that leg pass and **no product PR could
+  ever have left `WAITING_EVIDENCE`.**
+
+Both are now closed. Precisely what is callable, dispatched and unwired as
+of `a0d57f6`:
+
+| | Callable | Dispatched automatically by `tick()` | Still unwired |
+|---|---|---|---|
+| Automated accessibility | yes | **yes** — `route_evidence` → `execute_accessibility` → `commit_accessibility`, and the factory is now real | nothing in the chain. It has never faced a real product |
+| Qualitative accessibility | yes | **yes** — `route_evidence` → `execute_accessibility_review` → `confirm_accessibility_review_spawn` → `reap_workers` → `on_accessibility_review_finished` | nothing in the chain. It has never spent a real provider call |
+| `live-gate.js` | yes | **no** | unchanged from §41. `routing.evaluate_merge` is the Python-side gate; the two remain unjoined |
+
+### 42.4 C-02a — what was changed, and the residual that was also closed
+
+`prompts/accessibility.md:80` now reads `"unmet_requirement":
+"ACC-DOD-VISIBLE_FOCUS"`. One line. `source_phrase` is "visible focus" —
+the same requirement, named canonically; no other registry entry concerns
+focus visibility, so the mapping was not ambiguous.
+
+**Hash footprint.** Exactly one of six `prompt_hashes` entries moved,
+`5aa0a2ea…` → `51a1bd6a…`. The other four frozen content hashes are
+untouched. **No recorded baseline was invalidated**:
+`protocol/experiment-manifest.template.json` still carries
+`"prompt_hashes": "TO_BE_FILLED"` and no `.runtime` manifest baseline
+exists, so this is a **pre-freeze correction**, not a post-T+00 deviation.
+The post-T+00 procedure was not bypassed — it does not yet apply.
+
+**No parser alias, and that is now enforced.** `parse_accessibility` still
+passes an unrecognised citation through untouched and the severity policy
+still rates it INVALID. Both properties have tests, so a later pass cannot
+quietly add a mapping table.
+
+**The residual the amendment did not cover.** Fixing one example tells the
+reviewer nothing about the other sixteen identifiers, and the document the
+prompt sends it to carries source prose, not canonical IDs. Widening the
+frozen file would have exceeded the authorisation. Instead the full
+vocabulary is injected into the `{{evidence}}` substitution the Supervisor
+already owns and fills, rendered **from the registry** so it cannot drift
+from what the severity policy accepts. No further frozen-file change, no
+new prompt hash, no second source of truth.
+
+### 42.5 C-18 stage 7 — why the proposed table was not adopted
+
+§41.6's seven-row table priced each bound at **the worker's lease** —
+builder execute at `timeouts.builder` = 3600. That is wrong.
+`_execute_builder_dispatch` writes a prompt, makes a worktree, probes ports
+and calls `workers.start_job`, which `Popen`s and returns. **It never waits
+for the worker.** A 3660 s bound would let a wedged `workmux add` look
+healthy for an hour against a 120 s staleness threshold — precisely the
+failure `declare_busy` exists to prevent, and the same argument the table
+used to reject a single shared bound, turned on its own rows.
+
+What landed instead — each bound the sum of the external timeouts that
+phase can actually incur, **derived from the constants those calls use** so
+the two cannot drift:
+
+| Phase | Per item | Derivation |
+|---|---|---|
+| dispatch execute | **370** | `gh.TIMEOUT` 120 + `WORKMUX_TIMEOUT` 180 + `WORKMUX_PATH_TIMEOUT` 30 + 2×`TMUX_TIMEOUT` 20 |
+| security execute | **370** | same calls, same shape |
+| accessibility auto execute | **1080** | G3's governed attempt budget |
+| merges | **720** | six `gh` calls at 120 |
+| each notification drain | **30** | `DRAIN_BUDGET_SECONDS` 10 + one in-flight send |
+
+plus one `BUSY_MARGIN_SECONDS` (60) per phase, and **per item × count**
+because every one of these phases loops — a fixed number under-bounds a
+batch of two.
+
+Three things the proposal did not contain:
+
+1. **`execute_merges` was absent entirely.** Six `gh` calls per candidate,
+   and the phase where a false-positive Watchdog kill is least acceptable
+   because `gh.merge` is irreversible.
+2. **The stated rule is contradicted by its own only implementation.**
+   §41.6 says `observer_bound` is "own timeout + BUSY_MARGIN_SECONDS". It
+   is not — it also multiplies by the retry (330 × 2 + 60 = 720, not 390).
+3. **Accessibility was never stage-7 polish.** One attempt may use all
+   1080 s, nine times the staleness threshold. It has been harmless only
+   because no services factory existed to make it run.
+
+**Declaring cannot make detection stricter.** `watchdog.heartbeat_fresh`
+tests beat age first and the window second, so a declaration can only
+extend freshness. Expiry and recovery are verified against the real
+watchdog, including that a cleared 1140 s window does not outlive 120 s
+ordinary staleness.
+
+### 42.6 The notification amendment — and the one place it had to differ
+
+`merge_invariant.annunciate` no longer takes a `notifier`. It takes
+`announce`, a **required** sink with no default.
+
+- **Supervisor** → queues through `notify_out`, returns `delivered: None`,
+  and `drain_notifications` delivers later with bounded retries. This is
+  what removes the last synchronous outbound send from T1.
+- **Watchdog** → writes the durable intent **and sends immediately**, then
+  records the outcome against that intent.
+
+**The Watchdog exemption is not an oversight.** It is a separate process,
+it has no drain, and it exists for exactly the case where the Supervisor is
+not ticking. Queuing its escalation would have made the Watchdog's
+guarantee depend on the component it is watching, which the authorisation's
+"preserve the existing escalation guarantees" forbids. It still gains
+something: a failed Watchdog send used to vanish, and now stays PENDING for
+the Supervisor's drain to retry.
+
+`QUEUED` is never recorded as delivery. `annunciation_intent_id` links the
+violation event to the `NOTIFICATION` outcome that later reports delivery.
+The governing sentence lives in the **audit**, not in `protocol/` —
+"annunciat" appears in none of the nine protocol files — and the C-14 row's
+original "sent directly" wording is retained verbatim with the amendment
+appended, not rewritten.
+
+### 42.7 The services factory — the thing §41.5 said needed no decision
+
+§41.5 item 2 said a services factory "needs no decision — it resolves when
+a product exists to build". **Half true, and the half that was wrong
+mattered:** the plumbing is apparatus code, not product code, and leaving
+it to the product builder would have meant the first product PR arriving
+with nothing able to check it.
+
+`control/accessibility_services.py` implements `run_attempt`'s seven-service
+contract, wired in `Supervisor.__init__`. Notable properties:
+
+- **G3's clean isolated build, literally.** Each attempt gets its own
+  `git worktree add --detach` checkout of exactly `plan.sha`. Not the
+  Builder's worktree — that carries its `node_modules` and `.next`, and a
+  scan there judges artefacts rather than the commit.
+- **The server starts in its own process group**, so teardown can actually
+  finish. `npm run start` execs Next, which spawns workers; signalling only
+  npm would leave the real listener holding a governed port, and
+  `confirm_release` would then correctly refuse to release it forever.
+- **SIGTERM, then SIGKILL** if it survives. The kill is not politeness.
+- **Disposal after the verdict is durable**, in a `finally`, because a
+  failed attempt is exactly the one whose checkout would otherwise leak.
+
+Every external edge is injected with a real default, so the fixture tests
+exercise the real sequencing without running npm, binding a socket or
+reading `/proc`.
+
+### 42.8 A defect the new tests caught, worth not repeating
+
+The first version of `confirm_accessibility_review_spawn` set
+`claim_state = "DISPATCHED"` and `claim["worktree"]`. Both violate
+`accessibility_review_claim_is_valid`'s **closed key set and closed state
+set** (`PLANNED` | `COMPLETE` only). The claim silently failed its own
+validator, so `review_gate_fires` refused the leg forever and the task
+could never leave `WAITING_EVIDENCE`.
+
+Fixed by **conforming, not by widening the guard**. `PLANNED` already means
+"in flight" to `plan_accessibility_review`, and the worktree belongs on the
+worker record where every other role keeps it.
+
+### 42.9 Verification — what was actually demonstrated
+
+Through the **real Supervisor** with external services injected:
+
+| Required demonstration | Where |
+|---|---|
+| Required evidence failure blocks review/merge | `test_c05_3b_evidence_to_review`, `test_c05_3b_connected_merge_unblock::test_a_missing_evidence_class_never_even_reaches_review` |
+| Repair produces fresh evidence and independent review | `test_c05_3b_connected_lifecycle` |
+| A changed head rejects stale approvals/evidence | `test_c05_3b_connected_lifecycle`, `test_a_claim_that_moved_while_spawning_is_discarded` |
+| Restart preserves claims and cumulative deadlines | `test_c05_3b_qualitative_dispatch` (3 new cases, a genuinely new Supervisor over the same store) + `test_g3_g4_evidence_budget::test_a_restart_retains_both_the_total_and_the_open_interval` |
+| Owned processes cleaned up; ports not released while listening | `test_c05_3b_services_factory::ThroughTheRealAttemptCase` — including that a **failed** listener observation also holds the port |
+| Merge completion verified before task completion and dependency unblocking | `test_c05_3b_connected_merge_unblock` — **closes §41.5 item 3**, which was previously proved only in the JavaScript fixture |
+| Missing/malformed/untrusted evidence cannot authorize success | `test_an_unknown_citation_still_holds_rather_than_failing`, `test_a_failed_worker_is_not_a_verdict`, `test_a_non_list_checks_field_is_unusable_not_empty` |
+
+**Roughly twenty mutations** across the session, each proved red, restored,
+and the restoration verified byte-for-byte by SHA-256 or `diff`. One of
+them — reverting `control/supervisor.py` with `git checkout --` while the
+stage-7 work was still uncommitted — **destroyed uncommitted work** and the
+edits had to be re-applied. Use file copies for mutation backups, or commit
+first.
+
+**One test of mine was written on a false premise and went red.**
+`clear_busy` also rewrites `at`, which I had assumed it did not. The code
+was right and the test was wrong; the test was corrected to the real
+contract and a second case added for the property that actually matters.
+
+### 42.10 Environment — eight gates EXECUTED, read-only
+
+Eight side-effect-free, non-network, non-billable gates were run directly:
+
+```
+PASS  protocol_present              PASS  clean_baseline
+PASS  task_graph_valid              PASS  budget_configured_by_human
+PASS  manifest_readiness            PASS  migration_lock_free
+PASS  host_headroom                 FAIL  required_secrets
+```
+
+Two changes from §41.9 worth noting:
+
+- **`host_headroom` now PASSES** — inotify 48/128 = 37.5%, not the 60% on
+  record. The unrelated `rql serve` daemons are no longer running. **This
+  does not close the item**: the count tracks concurrent tooling, so a PASS
+  taken on a quiet host says nothing about the host at launch. If those
+  daemons return, it fails again. The ceiling must not be raised.
+- **`clean_baseline` has now actually been executed** and passes. §41.9 was
+  right to refuse to call an unexecuted gate a PASS.
+
+`required_secrets` fails exactly as recorded: the file is absent and 7 of 8
+names are unset. **Checked by name only — no value was read, printed or
+logged at any point in this session.**
+
+### 42.11 What remains, and who owns it
+
+| # | Item | Owner | Next action |
+|---|---|---|---|
+| 1 | **C-20a(C)** — GitHub App + worker UID | **OPERATOR** | Read `experiment/GITHUB-APP-WORKER-ISOLATION-PROPOSAL.md`. **Do not approve §41.7's permission set** — F1–F5 there show it produces a gate that denies every PR forever |
+| 2 | **Provision the eight secrets** | **HUMAN, on the host** | `~/.config/run-002/secrets.env`, mode 600. Unblocks three gates and supplies the paid gates' credentials |
+| 3 | **inotify headroom at launch** | **HUMAN, on the host** | Currently passing. Re-measure on a quiet host immediately before preflight; decide about unrelated indexers if they have returned |
+| 4 | **Run the real preflight** | ENGINEERING, after 2–3 | Produces `preflight.json`, without which `ctl start` refuses on all 24 as never-run. Cannot be done now: it would make paid calls and send a real notification |
+| 5 | **C-04a against real GitHub** | ENGINEERING, after 1 | The `gh` path, auth, rate limiting and pagination are all unexercised |
+| 6 | **Join or retire one of the two merge gates** | ENGINEERING | `live-gate.js` is still unreachable from a tick. Unchanged from §41 |
+| 7 | **`prompts/accessibility.md`'s stale disclosure** | **OPERATOR** (small) | Its text still says the automated pipeline's dispatch "is not yet implemented". That is now false. **Deliberately not amended** — the C-02a delegation covered the identifier only, and the instruction said it was "not permission to silently rewrite unrelated frozen requirements". It is fail-safe (it makes the reviewer more cautious, not less), but it is a false statement in a frozen file |
+
+### 42.12 What this section does not claim
+
+- **No real accessibility scan has ever run.** No product exists, every
+  service in every test is injected, and neither dispatch path has faced a
+  real PR, URL or provider call.
+- **No preflight record exists**, so every PASS above is an observation,
+  not a durable machine record, and `ctl start` would still refuse.
+- `live-gate.js` is still not called by the runtime.
+- No gate was weakened, no threshold lowered, no protection or credential
+  touched, no App or OS user created, no paid call made, no product worker
+  launched, no merge to `main`. Run 001 untouched. C-18a stands.
+- **T+00 remains NOT_STARTED.**
