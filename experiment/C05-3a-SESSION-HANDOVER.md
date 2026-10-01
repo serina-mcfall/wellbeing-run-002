@@ -2896,6 +2896,10 @@ remains **NOT YET EVALUATED**. T+00 remains **NOT_STARTED**.
 
 ## 26. C-19 live verification — ATTEMPTED, NOT PERFORMED (2026-10-01)
 
+> **Superseded by §27, which records the call actually being made.** This
+> section stands as the record of the first attempt and of the guard refusing
+> to spend without durable admission; §27 is the live result.
+
 One live `worker_health` request was authorised, through the existing
 budget-gated `jev_minimal_decision` gate, with no automatic retry. **The gate
 refused before sending, and no request was made.** No money was spent and
@@ -2967,6 +2971,96 @@ explicitly, and the single-call scope would then apply unchanged: one
 ambiguity with the exposure retained.
 
 T+00 remains **NOT_STARTED**. C-18 remains **OPEN at 3 of 7**.
+
+## 27. C-19 live verification — PERFORMED (2026-10-01)
+
+**Jev answered.** One live `worker_health` request, through the existing
+budget-gated gate, authorised with no retry. This is the first time this
+repository has ever reached Jev.
+
+### 27.1 Preconditions, verified before the call
+
+`ctl init` was run once, without `--force`, because §26's blocker was the
+absent state document. It created the state document, nine tasks, provider
+records AVAILABLE, the migration lock FREE and the $25 budget bucket; it
+appended one `CONTROL_PLANE_INITIALISED` ledger event. It did **not** touch
+`started_at`.
+
+| Check | Value |
+|---|---|
+| Branch / HEAD | `wip/c05-1-persistence` at `6880229`, in sync with origin |
+| `started_at` | **`None`** — T+00 **NOT_STARTED** |
+| `baseline_sha` / `frozen_at` | `None` / `None` |
+| Budget | $25.00 ceiling, $0.00 spent, $0.00 exposure, no `hard_stop` |
+| Reservations | none; `duplicate_blocked` False for the gate purpose |
+| Allowance | $0.002688 |
+| Model | `typesafe/jev-1.13` |
+| `OPENROUTER_API_KEY` | present — **by name only; no value read, printed or logged** |
+
+### 27.2 The result
+
+`Preflight.gate_jev()` invoked alone — not `Preflight.run()` — so nothing else
+ran and no `preflight.json` was written. `urlopen` was wrapped in a counting
+spy that delegates to the real transport and records the URL only, never the
+request object, which carries the Authorization header.
+
+| Record | Value |
+|---|---|
+| **Gate** | **PASS** — `jev_minimal_decision`, detail "Jev returned HEALTHY" |
+| Requests sent | **1**, to `https://openrouter.ai/api/alpha/decisions` |
+| Requested model | `typesafe/jev-1.13` |
+| **Returned model** | **`typesafe/jev-1.13-20260917`** |
+| Choice | `HEALTHY` — a member of the frozen enum, `source == "jev"` |
+| Confidence | **0.98** — carried through, advisory, acted on by nothing |
+| Cost | **$0.000022764, reported by the provider** — known, not unknown |
+| Tokens | 542 input, 55 output |
+| Duration | 487.5 ms |
+| Billing state | `BILLED` |
+| Reservation | created at $0.002688, **settled as actual spend and removed** |
+| Exposure after | **$0.000000**; `reservations` empty; no abandoned entries |
+| `spent_usd` after | $0.000023 |
+| `started_at` after | **still `None`** |
+
+### 27.3 What the real response confirms
+
+1. **The pricing basis in §24.5 is exact.** 542 × $0.000000042 =
+   $0.000022764, which is the cost the provider reported to the digit. The
+   bound's price input is confirmed against a real invoice line rather than a
+   worked example in documentation.
+2. **The reservation was conservative, as designed** — $0.002688 against an
+   actual $0.000022764, about 118× headroom. 542 tokens against the 64,000
+   ceiling the bound assumes.
+3. **The returned model is the dated build the docs describe**, and it begins
+   with the requested slug — §23.7's post-call abort conditions all pass, so
+   nothing bars a later call. This string is the value BOOTSTRAP item 6
+   requires recording before freeze. It still does **not** prove immutable
+   weights, and is not described as doing so.
+4. **Settlement behaved exactly as C-19 specifies**: known cost became actual
+   spend, the reservation was removed rather than counted twice, and exposure
+   returned to zero.
+
+**One honest observation, not introduced by C-19:** `budget.record` rounds to
+six decimal places, so $0.000022764 accumulates as $0.000023. The exact
+provider figure survives on the `Decision` and in gate evidence; only the
+running total is rounded. At this ceiling it is immaterial, but it is rounding,
+not truncation, so over many calls it can drift either way.
+
+### 27.4 What this does NOT establish
+
+- **Not launch readiness.** One gate passed. The full preflight has not been
+  run; the other 23 gates remain NOT YET EVALUATED, `host_headroom` was
+  failing when last measured, and `clean_baseline` depends on the tree.
+- **No `PREFLIGHT_GATE` ledger event exists for this**, because the gate was
+  invoked directly rather than through `Preflight.run()`, deliberately, so no
+  `preflight.json` was written over anything. The durable trace of the spend
+  is `state.json`'s `spent_usd`; this section is the evidence record.
+- **C-19 is not closed.** Its live-verification requirement is now satisfied,
+  but the alpha endpoint remains alpha, and four governance questions are
+  still open and unresolved: `model_routing` precedence,
+  `incident_classification` precedence, `queue_priority` criteria, and whether
+  the `finding_severity` reviewer path should use Jev at all.
+- C-18 remains **OPEN at 3 of 7**. C-05.3b has not begun. T+00 remains
+  **NOT_STARTED**.
 
 ## 16. Current status and next action
 
