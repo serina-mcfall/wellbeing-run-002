@@ -229,9 +229,11 @@ The flag is a **reported field**. It is never an input to `verified`, and
 > is no third rule for the flag to hide. **That is a load-bearing
 > invariant and it is not self-enforcing.** If anyone later adds a required
 > context, turns on conversation resolution, or restores the review count,
-> this flag silently becomes over-permissive in what it publishes. Add a
-> falsification step: on the throwaway repository, add a second required
-> context and confirm the flag goes true while the merge stays blocked.
+> this flag silently becomes over-permissive in what it publishes. **That
+> falsification step now exists as V12**: on the throwaway, add a second
+> required context and confirm the flag goes true **while the merge stays
+> blocked**. Both halves must be observed — the second is the one that
+> proves a true flag never produces a merge.
 
 **SHA binding, end to end:**
 
@@ -396,8 +398,10 @@ never `config.REPO_ROOT`, which is a mutable tree.
 > from the immutable export, but its *git facts* necessarily come from the
 > mutable checkout — there is no other place a real head SHA exists.
 > `.git/` therefore needs the same ownership treatment as `.runtime/`, and
-> it is listed in §6 for that reason. Add a verification step that runs the
-> invoker from the export and gets a real SHA back, **before** action 11.
+> it is listed in §6 for that reason. **That verification step now exists
+> as V13**: run the invoker against a real read-only export and get a real
+> SHA back, **before action 11**. Applying protection first would turn a
+> broken gate into a permanent deadlock.
 
 ---
 
@@ -443,7 +447,7 @@ rows are marked **ADDED**; two existing rows are marked **CORRECTED**.
 | 7 | Create the read-only gate export at the §7 pin | yes — delete |
 | 8 | Build the gate invoker that runs `live-gate.js` from that export. **Read the §7 box on `WORKSPACE_MISMATCH` first** — the obvious implementation denies every pull request | yes — code |
 | 9 | Wire `control/publisher.py` to the gate invoker and the gate credential, and give it a real transport | yes — code |
-| 10 | Run the falsification plan (V1–V11) on the THROWAWAY repository, including deliberately reproducing the F5 deadlock, **and the new second-required-context check in §4** | n/a |
+| 10 | Run the falsification plan on the THROWAWAY repository — **V1–V13**, including deliberately reproducing the F5 deadlock (V10). **V12 and V13 were added 2026-10-02**: V12 is the second-required-context check behind §4's box, and **V13 runs the gate from the read-only export, which is the step that would have caught the §7 trap.** V13 must pass before action 11 | n/a |
 | 10b | **STOP GATE.** Do not proceed unless every V-step passed. The proposal had two such gates; compressing to twelve actions lost both | n/a |
 | 10c | **CORRECTED. Only now install the three Apps on `serina-mcfall/wellbeing-run-002`** | yes — uninstall |
 | 11a | **ADDED. GET `/repos/{owner}/{repo}/branches/main/protection` and save the bytes.** THAT file is the rollback artefact, not `branch-protection-BEFORE.json` | n/a |
