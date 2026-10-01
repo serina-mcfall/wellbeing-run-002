@@ -1273,6 +1273,215 @@ CHECK_RESULTS = frozenset({"PASS", "FAIL"})
 # section 36.
 CHECK_REQUIREMENT: dict[str, str] = {}
 
+# =====================================================================
+# G6, approved 2026-10-01. Explicit reviewed mappings only.
+#
+# Every entry below was checked against the LITERAL text of the frozen
+# product/ACCESSIBILITY.md, not against intent. No wildcards, no new
+# requirement identifiers, no severity-policy change. A failure this does
+# not map stays uncited, which severity.py rates INVALID with
+# merge_blocked True - blocking, with its raw diagnostic preserved on the
+# finding so a human can see what actually failed.
+#
+# Three kinds of key, because one check does not equal one requirement:
+#
+#   WHOLE_CHECK_REQUIREMENT     check_id            -> requirement
+#   CONDITION_REQUIREMENT       (check_id, signal)  -> requirement
+#   AXE_RULE_REQUIREMENT        axe rule id         -> requirement
+# =====================================================================
+
+# Checks whose ONLY failure mode maps to one requirement.
+WHOLE_CHECK_REQUIREMENT: dict[str, str] = {
+    # "responsive layout"
+    "RESPONSIVE_375PX": "ACC-DOD-RESPONSIVE_LAYOUT",
+    "NO_OVERFLOW_CLIPPING_OVERLAP": "ACC-DOD-RESPONSIVE_LAYOUT",
+    # "sensible touch targets"
+    "TOUCH_TARGETS": "ACC-DOD-TOUCH_TARGETS",
+    # "keyboard operation" - both of this check's offender reasons,
+    # NOT_FOCUSABLE and NOT_ACTIVATABLE_VIA_KEYBOARD, are the same
+    # requirement, so it needs no sub-condition key.
+    "KEYBOARD_OPERATION": "ACC-DOD-KEYBOARD_OPERATION",
+}
+
+# Composite checks. The signal names are the finite fields run.js actually
+# emits in each check's `detail`; nothing is inferred from their absence.
+CONDITION_REQUIREMENT: dict[tuple[str, str], str] = {
+    # checkFocusOrderAndTraps emits forward.trapped, backward.trapped and
+    # noVisibleIndicatorCount. A trap is a KEYBOARD failure; an invisible
+    # focus ring is a VISIBLE FOCUS failure. Different requirements, and
+    # more than one can fire at once.
+    ("FOCUS_ORDER_VISIBLE_NO_TRAPS", "FORWARD_TRAPPED"):
+        "ACC-DOD-KEYBOARD_OPERATION",
+    ("FOCUS_ORDER_VISIBLE_NO_TRAPS", "BACKWARD_TRAPPED"):
+        "ACC-DOD-KEYBOARD_OPERATION",
+    ("FOCUS_ORDER_VISIBLE_NO_TRAPS", "NOT_ALL_REACHABLE"):
+        "ACC-DOD-KEYBOARD_OPERATION",
+    ("FOCUS_ORDER_VISIBLE_NO_TRAPS", "NO_VISIBLE_INDICATOR"):
+        "ACC-DOD-VISIBLE_FOCUS",
+    # checkLabelsAndTextErrors emits offender reasons. "meaningful labels"
+    # and "screen-reader understandable forms/errors" are two distinct
+    # frozen phrases, and this check can fail either.
+    ("LABELS_AND_TEXT_ERRORS", "NO_ACCESSIBLE_NAME"):
+        "ACC-DOD-MEANINGFUL_LABELS",
+    ("LABELS_AND_TEXT_ERRORS", "INVALID_WITHOUT_TEXT_ERROR"):
+        "ACC-DOD-SCREEN_READER_FORMS_ERRORS",
+    # checkReducedMotion measures three separate signals. Only the first
+    # is in the frozen list: "reduced motion". Flashing and autoplay are
+    # NOT stated requirements anywhere in product/ACCESSIBILITY.md, so
+    # they are deliberately absent here and stay blocking-but-uncited
+    # rather than being filed against a requirement that does not exist.
+    ("REDUCED_MOTION_NO_FLASHING_AUTOPLAY", "IGNORES_REDUCED_MOTION"):
+        "ACC-DOD-REDUCED_MOTION",
+}
+
+# axe-core rule ids. Explicitly reviewed, one at a time. Deliberately NO
+# aria-* or landmark-* wildcards: a wildcard sweeps dozens of unreviewed
+# rules into one requirement, and "semantic HTML" is a plausible stretch
+# for them rather than literal support.
+#
+# Notably ABSENT and intentionally so: `image-alt`. The frozen list states
+# no text-alternative requirement - "meaningful labels" is about labels and
+# "screen-reader understandable forms/errors" is about forms - so mapping
+# it would be inventing a requirement rather than reusing one.
+AXE_RULE_REQUIREMENT: dict[str, str] = {
+    "color-contrast": "ACC-DOD-SUFFICIENT_CONTRAST",
+    "label": "ACC-DOD-MEANINGFUL_LABELS",
+    "form-field-multiple-labels": "ACC-DOD-MEANINGFUL_LABELS",
+    "heading-order": "ACC-DOD-HEADING_STRUCTURE",
+    "page-has-heading-one": "ACC-DOD-HEADING_STRUCTURE",
+}
+
+
+def _focus_order_signals(detail) -> list[str]:
+    """Which FOCUS_ORDER_VISIBLE_NO_TRAPS sub-conditions actually fired."""
+    fired = []
+    for direction, token in (("forward", "FORWARD_TRAPPED"),
+                             ("backward", "BACKWARD_TRAPPED")):
+        leg = detail.get(direction)
+        if isinstance(leg, dict) and leg.get("trapped") is True:
+            fired.append(token)
+    count = detail.get("noVisibleIndicatorCount")
+    if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+        fired.append("NO_VISIBLE_INDICATOR")
+    focusable = detail.get("focusableCount")
+    forward = detail.get("forward")
+    if isinstance(focusable, int) and isinstance(forward, dict):
+        visited = forward.get("visitedCount")
+        if isinstance(visited, int) and visited < focusable:
+            fired.append("NOT_ALL_REACHABLE")
+    return fired
+
+
+def _offender_reason_signals(detail) -> list[str]:
+    """Distinct offender `reason` tokens, in first-seen order."""
+    offenders = detail.get("offenders")
+    if not isinstance(offenders, list):
+        return []
+    seen: list[str] = []
+    for offender in offenders:
+        if not isinstance(offender, dict):
+            continue
+        reason = offender.get("reason")
+        if isinstance(reason, str) and reason and reason not in seen:
+            seen.append(reason)
+    return seen
+
+
+def _reduced_motion_signals(detail) -> list[str]:
+    """The one reduced-motion signal the frozen list states.
+
+    The other two run.js measures - rapid cycling and autoplay - are
+    deliberately not translated into signals here. They are real
+    observations, but no frozen requirement states them, so emitting a
+    token for them would imply a mapping exists.
+    """
+    violations = detail.get("violations")
+    if not isinstance(violations, list):
+        return []
+    return ["IGNORES_REDUCED_MOTION"] if "ignoresReducedMotion" in violations \
+        else []
+
+
+def accessibility_check_signals(check_id: str, detail) -> list[str]:
+    """The finite sub-condition tokens a failing check reports.
+
+    An empty list means "this check reports no sub-condition we recognise",
+    which is NOT the same as "nothing failed" - the caller files one
+    uncited finding, which blocks. Absent or ambiguous detail therefore
+    never invents a finding, and never excuses one either.
+    """
+    if not isinstance(detail, dict):
+        return []
+    if check_id == "FOCUS_ORDER_VISIBLE_NO_TRAPS":
+        return _focus_order_signals(detail)
+    if check_id == "LABELS_AND_TEXT_ERRORS":
+        return _offender_reason_signals(detail)
+    if check_id == "REDUCED_MOTION_NO_FLASHING_AUTOPLAY":
+        return _reduced_motion_signals(detail)
+    return []
+
+
+def _axe_rule_ids(detail) -> list[str]:
+    violations = detail.get("violations") if isinstance(detail, dict) else None
+    if not isinstance(violations, list):
+        return []
+    ids: list[str] = []
+    for violation in violations:
+        if isinstance(violation, dict):
+            rule = violation.get("id")
+            if isinstance(rule, str) and rule and rule not in ids:
+                ids.append(rule)
+    return ids
+
+
+def accessibility_findings_for_check(check_id: str, detail=None) -> list[dict]:
+    """Every severity-policy finding one FAILING check asserts.
+
+    A list, not one finding: a composite check can fail two requirements at
+    once, and collapsing them would hide one. An unmapped failure still
+    produces a finding - uncited, therefore INVALID, therefore blocking -
+    carrying the raw diagnostic so a human can see what actually failed.
+    """
+    findings: list[dict] = []
+
+    def finding(requirement, signal=None):
+        record = {
+            "classification": "FAILURE",
+            # P1 because severity.py floors every accessibility FAILURE to
+            # P1 anyway; claiming lower would be overridden immediately and
+            # claiming P0 would assert a judgement a machine cannot make.
+            "jev_severity": "P1",
+            "unmet_requirement": requirement,
+            "check_id": check_id,
+        }
+        if signal is not None:
+            record["condition"] = signal
+        if detail is not None:
+            # The raw diagnostic, preserved. Apparatus-generated structured
+            # data - counts, booleans, finite tokens - never provider prose.
+            record["detail"] = detail
+        return record
+
+    if check_id == "AXE_SCAN":
+        rules = _axe_rule_ids(detail)
+        if not rules:
+            return [finding(None)]
+        for rule in rules:
+            findings.append(finding(AXE_RULE_REQUIREMENT.get(rule), rule))
+        return findings
+
+    whole = WHOLE_CHECK_REQUIREMENT.get(check_id)
+    if whole is not None:
+        return [finding(whole)]
+
+    signals = accessibility_check_signals(check_id, detail)
+    if not signals:
+        return [finding(None)]
+    for signal in signals:
+        findings.append(
+            finding(CONDITION_REQUIREMENT.get((check_id, signal)), signal))
+    return findings
+
 
 def accessibility_auto_finding(check_id: str) -> dict:
     """The severity-policy finding one FAILING automated check asserts.
