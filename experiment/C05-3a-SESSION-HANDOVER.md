@@ -7138,3 +7138,83 @@ head, and can correctly rate an accessibility **finding** — but nothing
 produces those findings yet.
 
 T+00 remains **NOT_STARTED**.
+
+## 40. C-05.3b completed: both halves, wired to the tick (2026-10-01)
+
+Recorded at audit rows **C-09a** (amended twice), **C-20** (a, partially
+closed) and **C-02a** (new, blocking).
+
+### 40.1 What exists now
+
+| Piece | Where | Reached from a tick? |
+|---|---|---|
+| The `WAITING_EVIDENCE` exit | `Supervisor.advance_if_evidence_complete` | **Yes** — from `ingest_security` and from `route_evidence` |
+| Automated attempt lifecycle | `control/accessibility_evidence.py` | **Yes** — `execute_accessibility` |
+| Automated claim / commit | `plan_accessibility_auto`, `ingest_accessibility_auto`, `commit_accessibility` | **Yes** |
+| Qualitative parse / adjudicate | `routing.parse_accessibility`, `accessibility_is_consistent` | via ingest |
+| Qualitative claim / commit | `plan_accessibility_review`, `ingest_accessibility_review` | helpers — no tick dispatch yet |
+| Claim validators (both legs) | `routing`, registered in `REVIEW_GATE_CLAIM_VALIDATORS` | **Yes** |
+| Severity floor | `routing.adjudicate_accessibility_finding` | **Yes** — via both ingests |
+| G6 maps | `routing` | **Yes** |
+
+### 40.2 Three defects found while building, each fixed rather than worked around
+
+**The port-release asymmetry.** An attempt that never STARTED a server
+never bound the port, so its claim must be released unconditionally.
+Applying the listener-gone rule there would strand the port permanently
+whenever something *else* happened to be listening on it. Once a server
+really ran, the rule applies in full.
+
+**The wrong dispatch control.** The first version gated new automated
+attempts on `_security_dispatch_block`, which also requires the security
+*provider* to be usable. The automated half consults no provider; that
+would have held accessibility evidence hostage to an unrelated outage. It
+now has its own block checking `frozen_at` and `stopping`.
+
+**The `getattr` default.** `route_evidence` reads the services factory
+through `getattr` because the safe default is *do not plan*. A Supervisor
+built without `__init__` — which several suites do deliberately — must not
+start claiming ports it cannot execute against.
+
+### 40.3 What blocks, and what is merely inert
+
+**BLOCKING, governance: C-02a.** `prompts/accessibility.md` is frozen and
+its required-output example cites `visible-focus-indicator`, a pre-C-02
+kebab-case identifier the registry does not contain. A reviewer following
+its own prompt is refused `CLASSIFICATION_INVALID`. The parser does **not**
+translate it: inventing that mapping would defeat the registry check,
+which is what C-02 exists for. Fail-closed and safe; the qualitative FAIL
+path cannot produce a usable finding until it is resolved. Three options
+and a recommendation are in the audit row.
+
+**INERT, not blocked: the services factory.** Nothing injects one, because
+no product exists to build before the first product PR. The automated half
+is wired and refuses to claim rather than minting claims it could never
+execute. This resolves itself when a product exists; it needs no decision.
+
+**NOT BUILT: the qualitative tick dispatch.** `plan_accessibility_review`
+and `ingest_accessibility_review` are proved through the Supervisor but
+are not yet called from `route_evidence`, because spawning that worker
+belongs on the C-18 stage-4 dispatch harness and spending a provider call
+is governed separately from building the path.
+
+### 40.4 Verification
+
+- **2,075 → 2,171 Python tests**, **218 apparatus**, both exit 0.
+- Demonstrated through the real Supervisor with injected services: failed
+  evidence blocking, repair then fresh evidence at a new head succeeding,
+  changed-head invalidation, restart recovery including a claim in flight
+  not being re-planned, server cleanup with the port returned, the path to
+  REVIEW, and the tick path end to end.
+- **Fifteen mutations** across this work, each proved red, restored, and
+  the restoration verified by `diff`. Two attempted mutations were
+  DISCARDED rather than reported because they produced `IndentationError`
+  and therefore tested nothing.
+
+### 40.5 What this section does not claim
+
+- It does not claim a real accessibility scan has ever run. No product
+  exists; every service is injected.
+- It does not claim the qualitative half is dispatched by a tick.
+- It does not claim C-02a is resolved.
+- T+00 remains **NOT_STARTED**.
