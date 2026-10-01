@@ -2630,6 +2630,12 @@ class Supervisor:
             if outcome is not None:
                 self.ingest_security(doc, task, pr_number, head, outcome)
                 continue
+            # The other way evidence completes: the security result landed
+            # on an earlier tick and an accessibility leg finished on this
+            # one. Without this the task would hold until the NEXT security
+            # ingest - which for a passing security review never comes.
+            if self.advance_if_evidence_complete(doc, task, pr_number, head):
+                continue
             identifiers = self.plan_security(
                 doc, task, pr_number, head, observation,
                 slots_free=self._security_slots_free(doc, pr_number))
@@ -3134,9 +3140,56 @@ class Supervisor:
             record["pending_findings"] = blocking
             self.transition(doc, task["id"], "FIX_REQUIRED",
                             f"security findings on {head[:12]}")
-        # SECURITY_PASS deliberately does NOT advance to REVIEW: accessibility
-        # is a required evidence class and is not implemented until C-05.3b,
-        # so the task holds in WAITING_EVIDENCE.
+        # C-05.3b: a SECURITY_PASS no longer holds unconditionally.
+        #
+        # It used to, and the comment here said so: "SECURITY_PASS
+        # deliberately does NOT advance to REVIEW: accessibility is a
+        # required evidence class and is not implemented until C-05.3b, so
+        # the task holds in WAITING_EVIDENCE." That hold WAS correct - but
+        # it was also unconditional, and WAITING_EVIDENCE had no exit at
+        # all, which is audit row C-20(a): every product PR deadlocked
+        # there forever with no diagnostic saying why.
+        #
+        # The hold is now a GATE rather than a stop. routing.review_gate_fires
+        # answers the question the hold was standing in for - is every
+        # required evidence class a completed pass at THIS head - so a task
+        # advances exactly when that is true and holds whenever it is not.
+        # Until the accessibility legs are dispatched the gate cannot fire,
+        # so behaviour is unchanged today; what changed is that the exit
+        # exists and is governed by evidence rather than by a comment.
+        self.advance_if_evidence_complete(doc, task, pr_number, head)
+
+    def advance_if_evidence_complete(self, doc: dict, task: dict,
+                                     pr_number: int, head: str) -> bool:
+        """WAITING_EVIDENCE -> REVIEW, when every class passes at `head`.
+
+        The exit C-20(a) recorded as missing. Returns whether it fired.
+
+        `review_gate_fires` is pure over (record, head) and compares every
+        leg to the head observed THIS tick, never to another leg - so a
+        unanimously stale evidence set, three claims agreeing perfectly
+        with each other about a superseded commit, does not advance.
+
+        FALSE IS NOT A FAILURE. It covers absent, stale, PLANNED, failed
+        and malformed alike, and none of those is a reason to route the
+        task anywhere; it simply keeps waiting, bounded by G4's cumulative
+        allowance rather than by nothing.
+        """
+        if task["state"] != state_mod.EVIDENCE_WAIT_STATE:
+            return False
+        record = doc["prs"].get(str(pr_number))
+        if not isinstance(record, dict):
+            return False
+        if not routing.review_gate_fires(record, head):
+            return False
+        self.transition(doc, task["id"], "REVIEW",
+                        f"every required evidence class passed on {head[:12]}")
+        self.log("EVIDENCE_COMPLETE", task_id=task["id"], pr_id=pr_number,
+                 activity_class="ORCHESTRATION", outcome="REVIEW",
+                 metadata_redacted={
+                     "head": head,
+                     "classes": [key for key, _ in routing.REVIEW_GATE_LEGS]})
+        return True
 
     # ---------------------------------------------------------- worker reaping
 
