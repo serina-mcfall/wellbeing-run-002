@@ -4,20 +4,27 @@ The second of C-05.3b's two producers. Unlike the automated half this one
 IS an agent - it consumes a provider, carries a lease from G1's
 `timeouts.accessibility`, and its worker name is SHA-bound.
 
-The case that matters most is `FrozenPromptContradictionCase`. The FROZEN
-`prompts/accessibility.md` shows `"unmet_requirement":
-"visible-focus-indicator"` in its required-output example - the pre-C-02
-kebab-case form the landed registry does NOT contain. A reviewer following
-its own prompt therefore produces a finding the severity policy rates
-INVALID, and the review is refused. That is fail-closed and safe, but it
-means the qualitative FAIL path cannot currently produce a usable finding.
-The parser deliberately does NOT translate kebab-case into ACC-DOD-*:
-inventing that mapping would defeat the registry check entirely.
+`AmendedPromptCase` covers C-02a. The FROZEN `prompts/accessibility.md`
+used to show `"unmet_requirement": "visible-focus-indicator"` in its
+required-output example - the pre-C-02 kebab-case form the landed registry
+does NOT contain - so a reviewer following its own prompt produced a
+finding the severity policy rated INVALID and the whole review was refused.
+Fail-closed and safe, but the qualitative FAIL path could never produce a
+usable finding. C-02a amended that one example to `ACC-DOD-VISIBLE_FOCUS`,
+the registry entry whose source phrase is "visible focus" - the same
+requirement, named canonically.
+
+The fix is in the frozen artefact, NOT in the parser. `parse_accessibility`
+still does not translate kebab-case into ACC-DOD-*: inventing that mapping
+would be a second source of truth for what a requirement is called, which
+is what C-02's registry exists to prevent. Both properties are asserted
+below, so neither can be lost later.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -127,31 +134,58 @@ class ParseCase(unittest.TestCase):
                          ac.CLASSIFICATION_INVALID)
 
 
-class FrozenPromptContradictionCase(unittest.TestCase):
-    """prompts/accessibility.md's own example cites an unknown identifier."""
+class AmendedPromptCase(unittest.TestCase):
+    """C-02a: the prompt's example now cites a real registry identifier.
 
-    def test_the_frozen_prompts_example_identifier_is_not_in_the_registry(self):
-        from control import accessibility_registry
-        self.assertNotIn(PROMPT_EXAMPLE_ID,
-                         accessibility_registry.REQUIREMENT_IDS)
+    The amendment replaced the single pre-C-02 kebab-case example with
+    `ACC-DOD-VISIBLE_FOCUS`, whose source phrase is "visible focus" - the
+    same requirement the old example named. These cases assert the
+    amendment landed AND that it did not weaken the registry check that
+    made the contradiction visible in the first place.
+    """
 
-    def test_the_frozen_prompt_really_does_contain_that_example(self):
-        # Asserted against the file, so this case cannot rot into a claim
-        # about a prompt that has since changed.
-        text = (config.REPO_ROOT / "prompts" / "accessibility.md").read_text(
+    def prompt_text(self) -> str:
+        return (config.REPO_ROOT / "prompts" / "accessibility.md").read_text(
             encoding="utf-8")
-        self.assertIn(PROMPT_EXAMPLE_ID, text)
 
-    def test_a_review_following_that_example_is_refused_not_accepted(self):
+    def test_every_identifier_the_prompt_cites_is_in_the_registry(self):
+        # Mechanical, not a spot-check: whatever the prompt puts in an
+        # `unmet_requirement` position must be a real registry identifier.
+        # A future edit that reintroduces ANY unknown form fails here,
+        # which is what makes this a drift guard rather than one assertion
+        # about one line.
+        from control import accessibility_registry
+        cited = re.findall(r'"unmet_requirement"\s*:\s*"([^"]+)"',
+                           self.prompt_text())
+        self.assertTrue(cited, "the prompt must keep a worked example")
+        for identifier in cited:
+            self.assertIn(identifier, accessibility_registry.REQUIREMENT_IDS)
+
+    def test_the_superseded_kebab_form_is_gone_from_the_prompt(self):
+        self.assertNotIn(PROMPT_EXAMPLE_ID, self.prompt_text())
+
+    def test_a_review_following_the_amended_example_is_accepted(self):
+        # The point of the amendment: a reviewer that copies its own
+        # prompt now produces a usable finding instead of being refused.
+        review = routing.parse_accessibility(
+            block({"verdict": "ACCESSIBILITY_FAIL",
+                   "findings": [finding(requirement=REAL_ID)]}))
+        self.assertEqual(routing.accessibility_is_consistent(review), (True, ""))
+
+    def test_an_unknown_identifier_is_still_refused(self):
+        # The registry check is unchanged. The amendment fixed the
+        # citation, not the enforcement.
         review = routing.parse_accessibility(
             block({"verdict": "ACCESSIBILITY_FAIL",
                    "findings": [finding(requirement=PROMPT_EXAMPLE_ID)]}))
         self.assertEqual(routing.accessibility_is_consistent(review)[1],
                          ac.CLASSIFICATION_INVALID)
 
-    def test_the_parser_does_not_translate_kebab_case(self):
-        # Translating it here would invent a mapping nobody governed and
-        # defeat the registry check. The citation passes through untouched.
+    def test_the_parser_still_does_not_translate_kebab_case(self):
+        # C-02a was fixed in the frozen artefact, NOT by teaching the
+        # parser a mapping. An alias table here would be a second source
+        # of truth for what a requirement is called, which is exactly what
+        # C-02's registry exists to prevent.
         review = routing.parse_accessibility(
             block({"verdict": "ACCESSIBILITY_FAIL",
                    "findings": [finding(requirement=PROMPT_EXAMPLE_ID)]}))
@@ -268,7 +302,10 @@ class DispatchCase(unittest.TestCase):
         # not put words in the product's mouth.
         self.assertFalse(record.get("pending_findings"))
 
-    def test_a_review_following_the_frozen_prompt_holds_rather_than_fails(self):
+    def test_a_review_citing_an_unknown_identifier_holds_rather_than_fails(self):
+        # Still fail-closed after C-02a: an unrecognised citation is the
+        # absence of a usable judgement, so the task waits rather than
+        # routing to FIX_REQUIRED on a finding nobody can resolve.
         doc, task, record = self.doc_with()
         plan = self.sv.plan_accessibility_review(doc, task, 7, HEAD)
         self.sv.ingest_accessibility_review(
@@ -278,6 +315,20 @@ class DispatchCase(unittest.TestCase):
         self.assertEqual(record["accessibility_review"]["reason"],
                          ac.CLASSIFICATION_INVALID)
         self.assertEqual(task["state"], "WAITING_EVIDENCE")
+
+    def test_a_review_following_the_amended_prompt_reaches_fix_required(self):
+        # C-02a's actual payoff, through the real Supervisor: a reviewer
+        # copying its own prompt's example now produces a finding that
+        # routes the task to repair instead of stalling it.
+        doc, task, record = self.doc_with()
+        plan = self.sv.plan_accessibility_review(doc, task, 7, HEAD)
+        self.sv.ingest_accessibility_review(
+            doc, task, 7, HEAD, plan,
+            block({"verdict": "ACCESSIBILITY_FAIL",
+                   "findings": [finding(requirement=REAL_ID)]}))
+        self.assertEqual(record["accessibility_review"]["reason"], "")
+        self.assertEqual(task["state"], "FIX_REQUIRED")
+        self.assertEqual(len(record["pending_findings"]), 1)
 
     def test_a_result_for_a_superseded_claim_is_discarded(self):
         doc, task, record = self.doc_with()

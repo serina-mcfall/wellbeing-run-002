@@ -1,0 +1,214 @@
+C-02a — FROZEN PROMPT AMENDMENT RECORD
+=======================================
+Date:      2026-10-01
+Authority: Explicit operator instruction, this session, quoted verbatim below.
+Scope:     ONE line of prompts/accessibility.md. Nothing else in the file.
+Applied by: integration owner, branch wip/c05-1-persistence.
+
+
+1. THE OPERATOR'S AUTHORISATION, VERBATIM
+-----------------------------------------
+    "C-02a — I authorize the smallest amendment correcting the frozen
+    accessibility prompt's example to an existing canonical requirement ID,
+    provided its meaning matches the actual requirement. Check the rest of
+    that prompt for the same identifier mismatch. Preserve the requirement
+    meanings and severity policy. Update affected governed hashes/manifest
+    references through the documented amendment procedure, retaining
+    before/after evidence. Do not bypass validation or add silent parser
+    aliases. If a mapping is genuinely ambiguous, isolate that particular
+    issue and continue all independent work."
+
+The same instruction adds, as a limit on this authority:
+
+    "These are explicit delegations for those setup decisions, not
+    permission to silently rewrite unrelated frozen requirements. If
+    repository governance requires a record of my decision, record this
+    instruction and your selected implementation."
+
+This file is that record.
+
+
+2. THE DEFECT
+-------------
+prompts/accessibility.md's required-output example showed:
+
+      "unmet_requirement": "visible-focus-indicator",
+
+That is the pre-C-02 kebab-case form. The requirement registry C-02 landed
+(apparatus/accessibility/requirement-registry.js, mirrored in
+control/accessibility_registry.py) does not contain it, and
+severity.apply_severity_policy accepts only identifiers the registry
+contains. A reviewer that copied the example in its own prompt therefore
+produced a FAILURE finding rated INVALID, and the entire review was refused
+as CLASSIFICATION_INVALID. Fail-closed and safe, but the qualitative FAIL
+path could never produce a usable finding.
+
+
+3. THE MAPPING — NOT AMBIGUOUS
+------------------------------
+Registry entry selected:
+
+    id:            ACC-DOD-VISIBLE_FOCUS
+    group:         definition-of-done
+    source_phrase: "visible focus"
+    derived from:  product/ACCESSIBILITY.md (frozen, UNCHANGED by this
+                   amendment)
+
+"visible-focus-indicator" and "visible focus" name the same definition-of-done
+requirement. No other registry entry concerns focus visibility:
+ACC-DOD-KEYBOARD_OPERATION covers operability by keyboard, not the
+visibility of the focus ring. The mapping is therefore one-to-one and the
+"genuinely ambiguous" escape in the authorisation was not reached.
+
+Requirement MEANINGS are unchanged. The SEVERITY POLICY is unchanged.
+product/ACCESSIBILITY.md is unchanged. The registry is unchanged.
+
+
+4. THE REST OF THE PROMPT — CHECKED
+-----------------------------------
+The authorisation required checking the rest of the prompt for the same
+class of mismatch. Result: the file contained exactly ONE requirement
+identifier, at line 80. There is no second occurrence and no other
+identifier-shaped citation anywhere in the file.
+
+This is no longer a one-time manual observation. It is now enforced
+mechanically by
+tests/test_c05_3b_qualitative_review.py::AmendedPromptCase::
+test_every_identifier_the_prompt_cites_is_in_the_registry
+which regex-extracts EVERY "unmet_requirement" value from the live file and
+asserts each is in the registry. Any future edit that reintroduces an
+unknown form fails the build.
+
+
+5. THE DIFF — COMPLETE
+----------------------
+diff --git a/prompts/accessibility.md b/prompts/accessibility.md
+@@ -77,7 +77,7 @@ A single fenced JSON block, exactly this shape:
+       "id": "A1",
+       "jev_severity": "P2",
+       "classification": "FAILURE",
+-      "unmet_requirement": "visible-focus-indicator",
++      "unmet_requirement": "ACC-DOD-VISIBLE_FOCUS",
+       "file": "app/checkin/page.tsx",
+       "summary": "one sentence naming the defect",
+       "evidence": "what in the diff proves it",
+
+One line. No other hunk.
+
+
+6. GOVERNED HASHES — BEFORE AND AFTER
+-------------------------------------
+control.manifest.prompt_hashes(), the five-frozen-content-hash field
+`prompt_hashes` over manifest.REQUIRED_PROMPT_FILES:
+
+BEFORE
+  accessibility.md  5aa0a2eab1d327797ffa7e1b7dc6a795835ccc312a478118d57721fa024090a4
+  builder.md        1bb021e12bfffc5362577ac7293c3a66d3844c53b0687a2d953915b6e9de9c65
+  fixer.md          7f9f2107165b60b2f4acd8f380ebeb00507e96766e08ea497753e6d7be0ff70c
+  observer.md       b699631242df2cf06ecb1cc370ae0b94ace904ca137b5b20f2a9d50d24b92b69
+  reviewer.md       aeb3761e4dbff5642e892611499ac6429bd8ea7919ddc5c157907136fa097710
+  security.md       6b7a4636d73e89d05819f5b4898a0fa67b74f4288202d235f259baa68cdabcb5
+
+AFTER
+  accessibility.md  51a1bd6aaae36cb8ba5fec426ae92b9f21eed0abd7ecb8bce21327ef1c3c88dd   <-- CHANGED
+  builder.md        1bb021e12bfffc5362577ac7293c3a66d3844c53b0687a2d953915b6e9de9c65
+  fixer.md          7f9f2107165b60b2f4acd8f380ebeb00507e96766e08ea497753e6d7be0ff70c
+  observer.md       b699631242df2cf06ecb1cc370ae0b94ace904ca137b5b20f2a9d50d24b92b69
+  reviewer.md       aeb3761e4dbff5642e892611499ac6429bd8ea7919ddc5c157907136fa097710
+  security.md       6b7a4636d73e89d05819f5b4898a0fa67b74f4288202d235f259baa68cdabcb5
+
+Exactly one of the six moved, which is the expected and intended footprint.
+
+The other four frozen content hashes — product_spec_sha, task_graph_hash,
+severity_policy_hash, pr_template_hash — are UNAFFECTED. None of their
+constituent files was touched.
+
+
+7. WHAT "AMENDMENT PROCEDURE" ACTUALLY APPLIES HERE
+---------------------------------------------------
+This matters, and the honest answer is narrower than the phrase suggests.
+
+experiment/FREEZE-PROTOCOL.md states the freeze happens AT T+00, and that
+the post-T+00 change procedure (explicit human authority, append-only
+deviation record, narrow scope, regression evidence, protected PR/CI
+landing, unchanged T+24) governs changes made AFTER that moment.
+
+T+00 is NOT_STARTED. Verified this session.
+
+Consequently:
+  - NO RECORDED BASELINE HASH WAS INVALIDATED BY THIS CHANGE.
+    protocol/experiment-manifest.template.json carries
+    "prompt_hashes": "TO_BE_FILLED". Checked: it is the only committed
+    artefact mentioning prompt_hashes, and it holds no real value. There is
+    no .runtime manifest baseline recording a prompt hash either.
+  - manifest.verify_against_baseline's "prompt_hashes drifted from the
+    recorded baseline" check therefore has no baseline to fire against, and
+    did not fire.
+  - The amendment changes WHAT WILL BE FROZEN at T+00, not what was frozen.
+
+So this is a PRE-FREEZE CORRECTION, not a post-T+00 deviation. The
+post-T+00 procedure is not bypassed; it does not yet apply. The elements of
+it that CAN be honoured before T+00 have been honoured anyway, deliberately:
+explicit human authority (section 1), a durable record (this file), narrow
+scope (one line), and regression evidence (section 8).
+
+If this amendment had instead been made after T+00 it would have required
+the full deviation record and protected landing. It was not.
+
+
+8. VERIFICATION
+---------------
+Command: python3 -m unittest tests.test_c05_3b_qualitative_review \
+                             tests.test_manifest \
+                             tests.test_c02_accessibility_registry_python
+Result:  Ran 71 tests — OK
+
+MUTATION PROOF of the new drift guard (a guard nobody has watched fail is
+not a guard):
+
+  Mutation:  prompts/accessibility.md reverted to the kebab-case form.
+  Result:    FAILED (failures=2)
+               AmendedPromptCase.test_every_identifier_the_prompt_cites_is_in_the_registry
+                 AssertionError: 'visible-focus-indicator' not found in
+                 frozenset({... 17 registry ids ...})
+               AmendedPromptCase.test_the_superseded_kebab_form_is_gone_from_the_prompt
+                 AssertionError: 'visible-focus-indicator' unexpectedly found
+  Restored:  sha256 51a1bd6aaae36cb8ba5fec426ae92b9f21eed0abd7ecb8bce21327ef1c3c88dd
+             — byte-identical to the post-amendment hash in section 6.
+  Re-run:    Ran 29 tests — OK
+
+
+9. WHAT WAS DELIBERATELY NOT DONE
+---------------------------------
+  - NO parser alias. control/routing.py's parse_accessibility still passes
+    unmet_requirement through untouched, and
+    AmendedPromptCase::test_the_parser_still_does_not_translate_kebab_case
+    asserts it. Teaching the parser a kebab->ACC-DOD mapping would create a
+    second source of truth for what a requirement is called, which is
+    precisely what C-02's registry exists to prevent. The authorisation
+    forbade it explicitly and the prohibition is now test-enforced.
+  - NO validation bypassed or weakened. An unrecognised citation is still
+    rated INVALID and still refuses the review
+    (test_an_unknown_identifier_is_still_refused, and through the real
+    Supervisor, test_a_review_citing_an_unknown_identifier_holds_rather_
+    than_fails).
+  - NO change to product/ACCESSIBILITY.md, the registry, the severity
+    policy, or any other prompt.
+
+
+10. RESIDUAL GAP — NOT CLOSED BY THIS AMENDMENT, CLOSED SEPARATELY
+------------------------------------------------------------------
+Correcting the example makes the prompt's one worked example valid. It does
+NOT tell the reviewer the other sixteen identifiers. The prompt instructs
+the reviewer to read product/ACCESSIBILITY.md, which contains the source
+PROSE ("visible focus"), not the canonical IDs — so a reviewer citing a
+requirement other than the example would still have to infer the
+ACC-DOD-*/ACC-COG-* form from a single sample, and a wrong inference is a
+CLASSIFICATION_INVALID hold.
+
+This was NOT solved by widening the frozen-file change, which would have
+exceeded the authorisation. It is solved at dispatch instead: the canonical
+identifier list is injected into the {{evidence}} substitution the
+Supervisor already owns and already fills. No further frozen-file change,
+no parser alias, one source of truth — the registry itself renders the
+list. See the qualitative dispatch work recorded in the handover.

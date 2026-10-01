@@ -77,7 +77,7 @@ A single fenced JSON block, exactly this shape:
       "id": "A1",
       "jev_severity": "P2",
       "classification": "FAILURE",
-      "unmet_requirement": "visible-focus-indicator",
+      "unmet_requirement": "ACC-DOD-VISIBLE_FOCUS",
       "file": "app/checkin/page.tsx",
       "summary": "one sentence naming the defect",
       "evidence": "what in the diff proves it",

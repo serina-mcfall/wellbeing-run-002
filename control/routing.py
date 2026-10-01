@@ -1760,16 +1760,20 @@ def parse_accessibility(text: str) -> AccessibilityReview:
     how an invalid review becomes a passing one.
 
     `unmet_requirement` IS NOT NORMALISED, and that is deliberate.
-    prompts/accessibility.md - a FROZEN file - shows
-    "unmet_requirement": "visible-focus-indicator" in its example, which is
-    the pre-C-02 kebab-case form the landed registry does not contain. A
-    reviewer following that example cites an identifier
-    severity.apply_severity_policy cannot recognise, and the finding is
-    rated INVALID and blocks. Translating kebab-case into ACC-DOD-* here
-    would be inventing a mapping nobody governed, and would defeat the
-    registry check entirely - so the citation is passed through untouched
-    and the contradiction is recorded in the audit rather than papered
-    over in the parser.
+    prompts/accessibility.md - a FROZEN file - used to show
+    "unmet_requirement": "visible-focus-indicator" in its example, the
+    pre-C-02 kebab-case form the landed registry does not contain, so a
+    reviewer following its own prompt cited an identifier
+    severity.apply_severity_policy cannot recognise and the review was
+    refused. That was audit row C-02a, and it was fixed WHERE THE DEFECT
+    WAS: the frozen example now reads "ACC-DOD-VISIBLE_FOCUS", under a
+    recorded freeze amendment.
+
+    It was NOT fixed here, and must not be. Translating kebab-case into
+    ACC-DOD-* would invent a mapping nobody governed and defeat the
+    registry check entirely, so an unrecognised citation still passes
+    through untouched and is still rated INVALID. The registry remains the
+    single source of truth for what a requirement is called.
     """
     excerpt = (text or "")[-1500:]
     for raw in reversed(_BLOCK.findall(text or "")):
