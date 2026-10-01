@@ -5068,3 +5068,221 @@ It does **not** discharge the row. Outstanding:
 and lives in the main checkout). It was symlinked in so `ajv` would resolve.
 The symlink is untracked and was **not** committed; a reviewer checking this
 branch out needs either that symlink or `npm install` under `apparatus/`.
+
+## 36. C-05.3b foundations — IMPLEMENTED, NOT WIRED (2026-10-01)
+
+**Status: the leaves are built and proved. Nothing is wired.** No dispatch
+path, no state transition, no ingest, no `Supervisor` change, no
+`config/experiment.json` change. A task in `WAITING_EVIDENCE` still holds
+exactly as it did before this branch, and §31.1's defect is still open. This
+section is not a claim that C-05.3b is implemented; it is stage 1 and stage 2
+of §31.16's six, and the four blocking governance answers are still blocking.
+
+Branch `wip/c05-3b-foundations`, based on `wip/c05-1-persistence` at `8425e32`.
+Section 31 is the specification this follows.
+
+### 36.1 What was built
+
+| Artefact | What it is |
+|---|---|
+| `control/accessibility_contract.py` | **new** — the verdict and failure-reason vocabulary, in `security_contract.py`'s exact shape |
+| `control/routing.py` — new functions only | `normalize_accessibility_auto`, `accessibility_auto_finding`, `review_gate_fires`, `_leg_passes`, and the check-id / leg tables |
+| `tests/test_c05_3b_accessibility_contract.py` | **new** — 36 tests |
+| `tests/test_c05_3b_review_gate.py` | **new** — 22 tests |
+
+**One existing line in `control/routing.py` was changed:** its import, to add
+`accessibility_contract`. No existing function in that file was touched —
+`evaluate_merge`, `parse_security`, `security_is_consistent`,
+`security_claim_is_valid` and the claim helpers are byte-identical.
+
+**The contract.** Five verdict tokens in two deliberately disjoint families
+(`ACCESSIBILITY_PASS` / `_FAIL` / `_UNPARSEABLE` for the qualitative half,
+`ACCESSIBILITY_AUTO_PASS` / `_FAIL` for the machine half), seven failure
+reasons defined here, ten aliased from `security_contract`, and two frozensets:
+`ACCESSIBILITY_FAILURE_REASONS` (seventeen) and
+`ACCESSIBILITY_AUTO_FAILURE_REASONS` (nine). The two verdict families do not
+overlap, and a test holds that line: a single shared `ACCESSIBILITY_PASS` would
+make a record carrying only the automated half indistinguishable from one
+carrying both, which is precisely the collapse `agents/ACCESSIBILITY.md:8`
+forbids.
+
+`SURFACES_INCOMPLETE` is deliberately **not** aliased in — §31.8's reasoning,
+held by a test that asserts the attribute does not exist.
+
+**The composite gate.** `review_gate_fires(record, head_sha)` — pure over
+`(record, head)`, reads no state, touches no file, mutates nothing. Every leg
+is compared to the head observed this tick and never to another leg. A
+unanimously stale evidence set — three claims agreeing perfectly with each
+other about a superseded commit — does not fire, and that case is a test, not
+a comment.
+
+Ordering inside the predicate is load-bearing and is explained in the source:
+the three structural checks run first, the one claim validator that exists
+second. See §36.5 D1 for why.
+
+**The automated normalisation.** `normalize_accessibility_auto(checks, head)`
+returns `(verdict, "")` or `(None, reason)`, never both and never neither, in a
+fixed precedence. It takes the check LIST, not the whole attempt outcome: a
+`FAILED` outcome already carries its own finite reason from `gate_evidence`,
+and re-deriving it would be a second opinion about something already
+adjudicated. A duplicated `check_id` is refused rather than last-wins — two
+disagreeing results for one check is unresolved evidence, and letting the later
+one win would make the order of a JSON array decide a gate.
+
+### 36.2 What was deliberately NOT built, and why
+
+- **Any `Supervisor` wiring.** Out of scope by instruction, and it depends on
+  G1/G3 and on the C-18 harness work. The gate predicate exists and is proved;
+  calling it is someone else's commit.
+- **`parse_accessibility` / `accessibility_is_consistent`** — the qualitative
+  parser. §31.16 puts it in stage 1, but it must run findings through
+  `severity.apply_severity_policy` against a requirement registry, and both
+  assumptions §31.10 recorded about that registry turned out to be false
+  (§36.3). Building a parser on a falsified assumption would have to be
+  rewritten rather than extended. The vocabulary it needs is defined and
+  waiting.
+- **The `CHECK_REQUIREMENT` map contents.** G6. The structure is built, the map
+  is empty, and a test pins the consequence: every automated FAIL yields a
+  finding with no citation, which `severity.py` rates `INVALID` with
+  `merge_blocked: True`. The gate holds. This is §31.10's designed
+  inert-but-safe state, not an oversight — and the test means filling the map
+  becomes a deliberate act with a visible consequence.
+- **Claim builders and claim validators** for either accessibility leg. They
+  belong with the claims, which belong with the wiring.
+- **The `gate_evidence._adjudicate` inline-literal repair** (§31.8). The four
+  literals now have an owner in `accessibility_contract`; `_adjudicate` still
+  spells them inline. The repair is four lines, but `gate_evidence.py` is owned
+  by another agent this cycle and a merge conflict there is more expensive than
+  the drift. **Behavioural agreement is pinned instead**: a test drives the real
+  `_adjudicate` down each of its six failure paths and asserts the reason it
+  emits is in `ACCESSIBILITY_AUTO_FAILURE_REASONS`. Rename either side and the
+  suite goes red. The repair itself is follow-up F1.
+- **The FAIL and hold rows of §31.11's precedence table.** `review_gate_fires`
+  answers only "may this advance to REVIEW". What a FAIL routes to is the
+  caller's, and how long a hold may last is G4.
+
+### 36.3 Two design assumptions that are now false — material, found while building
+
+§31.10 recorded three assumptions about C-02's requirement registry "stated so
+they can be checked". Two of them do not hold against what C-02 actually landed
+in `apparatus/accessibility/requirement-registry.js`:
+
+1. **Assumption 2 is wrong about the identifier form.** §31.10 assumed
+   kebab-case — `visible-focus-indicator`, `keyboard-focus-trap`. The registry
+   that landed uses `ACC-DOD-VISIBLE_FOCUS`, `ACC-COG-PREDICTABLE_NAVIGATION`:
+   a group prefix plus a SCREAMING_SNAKE semantic name, seventeen entries
+   (twelve definition-of-done, five cognitive). Anything written against the
+   assumed form would cite identifiers the registry does not contain, and
+   `severity.py` would rate every such finding `INVALID` — fail-closed, so
+   nothing unsafe, but a gate that can never open.
+
+2. **Assumption 1 is not met.** It required the registry to be "reachable from
+   `control/` as an in-memory collection of identifier strings, obtained
+   without a filesystem read at call time". What landed is a **JavaScript
+   module with no Python counterpart**. `grep` for `known_requirement_ids`
+   across `control/` and `tests/` returns only `severity.py`'s own definition —
+   there is no Python caller and no Python registry. §31.10 itself says what
+   follows: *"If C-02 lands as a file read, the read must move to Phase A
+   observation and this assumption breaks."* It has broken, in a stronger form:
+   there is nothing to read from Python at all.
+
+   Assumption 3 (set membership, no severity attached to the identifier) **does**
+   hold.
+
+This is a decision, not a defect to fix quietly — see D2 below.
+
+### 36.4 Verification
+
+- `python3 -m unittest discover -s tests` — **1722 tests, OK**, run standalone
+  and unpiped. 58 of those are new.
+- `python3 scripts/check_no_secrets.py` — clean. `git diff --check` — clean.
+- No paid call, no notification, no worker, no browser launch, no rehearsal.
+
+**Mutations, each applied to the real source, proved red, then restored with
+the restoration verified by checksum and a green re-run:**
+
+| Mutation | Result |
+|---|---|
+| Legs compared to each other instead of to the head (a mixed / unanimously stale evidence set is accepted) | 5 tests red |
+| A missing leg treated as passing | 3 tests red |
+| An unparseable verdict, and an unreadable check list, treated as a pass | 9 tests red |
+| The head comparison dropped in both the gate and the normalisation | 8 tests red |
+| The `isinstance(result, str)` guard removed from the normalisation | 4 tests red (errors) |
+
+The fifth was not on the required list. It was found by re-reading the diff
+before committing: `result in CHECK_RESULTS` hashes its left operand, so a
+check whose `result` holds a dict or a list — which durable JSON can carry —
+raised `TypeError` out of a function whose entire contract is to return a
+finite reason. Fixed, and the same hazard is covered for `check_id`. Failing
+closed means RETURNING a reason, never raising one.
+
+Two further guards are tested but were not required: an uncheckable head
+(`None`, `""`, a short hex string, uppercase) never fires the gate — without
+that guard an empty head and an empty claim sha compare equal and every leg
+passes vacuously — and one leg's verdict can never satisfy another leg.
+
+### 36.5 Material decisions still needed
+
+G1, G3, G4 and G7 are unchanged and still blocking; nothing here answers or
+pre-empts any of them. The four below are **new**, found while building. Each
+is phrased so it can be answered in a sentence.
+
+**D1 — `security_claim_is_valid` raises `TypeError` on a claim whose verdict is
+unhashable.** `routing.py:1039` evaluates `verdict in SECURITY_VERDICTS`; a
+verdict holding a `{}` or a `[]` — both of which durable JSON can carry —
+raises instead of returning a diagnostic, so a corrupt PR record crashes the
+tick rather than failing closed. This is a C-05.3a defect reachable from its
+existing call sites, not only from this work. It was recorded rather than
+patched because that function is C-05.3a's and is outside this branch's scope.
+`review_gate_fires` orders its checks so the crash is unreachable through the
+new gate, and a test pins both halves of that. **Decision needed: is this
+repaired in C-05.3a, or folded into C-05.3b?**
+
+**D2 — the requirement registry needs a Python reader, and nobody owns it.**
+Per §36.3 the registry is JavaScript-only. Something must make those seventeen
+identifiers reachable from `control/` before any accessibility FAIL can be
+adjudicated as anything but `INVALID`. **Decision needed: does C-02 export a
+Python-readable form (a generated JSON beside the JS module is the obvious
+shape), does C-04 own it, or does C-05.3b read `product/ACCESSIBILITY.md`
+itself?** The third option duplicates C-02's parser and would need its own
+drift test. Whichever is chosen, §31.10's "no filesystem read inside T1" rule
+means the read belongs in Phase A observation, not in the transaction.
+
+**D3 — G6's answer must be expressed in `ACC-DOD-*` / `ACC-COG-*`
+identifiers.** Not a new question, but the design's worked example for it is now
+wrong (§36.3), so answering G6 from §31.10 as written would produce a map that
+can never match. **Decision needed: confirm that the nine `check_id` →
+requirement map is to be written against the landed registry's identifier
+form.** Also still open from §31.10: whether `AXE_SCAN` maps coarsely to one
+requirement or whether axe violation ids become registry identifiers in their
+own right — the landed registry derives strictly from
+`product/ACCESSIBILITY.md` and has no room for axe ids, which makes the coarse
+option the only one available without widening C-02's charter.
+
+**D4 — the two accessibility legs' claim validators are not registered with the
+gate.** `_leg_passes` checks what can be checked about any leg — object,
+`COMPLETE`, bound to this head, carrying this leg's verdict, carrying no
+reason — and the security leg additionally gets `security_claim_is_valid`. The
+two accessibility legs have no validator because their claims do not exist yet.
+**Decision needed: whoever builds the `accessibility_auto` and
+`accessibility_review` claims must add their validators to `review_gate_fires`
+in the same commit** — a leg whose claim exists but whose validator is not
+wired in is checked more weakly than the security leg, and the difference is
+invisible at the call site. Flagged here so it is not discovered later.
+
+**F1 — follow-up, not a decision.** Fold the four inline literals in
+`gate_evidence._adjudicate` into `accessibility_contract` once that file is no
+longer contended. Behaviour-neutral; the agreement test already prevents drift
+in the meantime.
+
+### 36.6 What this section does not claim
+
+- It does not claim the accessibility gate is implemented. It is not wired; a
+  passing task still holds in `WAITING_EVIDENCE` forever.
+- It does not claim C-05.3b delivers a schema-valid Protocol v2 PR evidence
+  package. §31.9 is unchanged — no finding IDs are minted.
+- It does not answer G1 through G10.
+- It does not change `control/severity.py`, `control/state.py`,
+  `config/experiment.json`, any frozen source, or any existing function in
+  `control/routing.py`.
+- T+00 remains **NOT_STARTED**.
