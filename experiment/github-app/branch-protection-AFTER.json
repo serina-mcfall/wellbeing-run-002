@@ -1,0 +1,51 @@
+{
+  "_TEMPLATE_NOTICE": [
+    "TEMPLATE — UNAPPLIED. DEPLOYMENT IS NOT AUTHORISED.",
+    "Nothing has been applied and no protection setting was changed.",
+    "This is the proposed state from",
+    "experiment/GITHUB-APP-WORKER-ISOLATION-PROPOSAL.md §4.2 and §9.6.",
+    "",
+    "HARD PRECONDITION — F5. Applying this body BEFORE the publisher",
+    "deadlock is resolved and tested (runbook steps 10 and 11) deadlocks",
+    "every product pull request permanently: GitHub reports BLOCKED until",
+    "run-002/independent-review is posted, and live-gate.js denies on",
+    "BLOCKED, so the status is never posted. Do not apply this out of order.",
+    "",
+    "__GATE_APP_ID__ is a placeholder. Replace it with the numeric App ID of",
+    "run-002-independent-review — an INTEGER, not a string, and NOT the",
+    "installation ID — which does not exist until the App is created."
+  ],
+  "_preserves": {
+    "ci": "The 'ci' entry is byte-identical to branch-protection-BEFORE.json, including app_id 15368. The existing CI requirement is preserved, not replaced.",
+    "contexts_key": "The deprecated 'contexts' alias is deliberately ABSENT. Sending both 'contexts' and 'checks' is an error. GET will continue to echo a derived 'contexts' list.",
+    "required_pull_request_reviews": "Sent as an OBJECT with count 0, never as null. control/preflight.py:174 computes ok = bool(reviews is not None and ...); deleting the block makes the REQUIRED gate github_main_protection FAIL and ctl start refuse.",
+    "required_signatures": "Not part of this endpoint; unchanged at enabled=false."
+  },
+  "method": "PUT",
+  "endpoint": "repos/serina-mcfall/wellbeing-run-002/branches/main/protection",
+  "command": "gh api -X PUT repos/serina-mcfall/wellbeing-run-002/branches/main/protection --input <(jq .body experiment/github-app/branch-protection-AFTER.json)",
+  "body": {
+    "required_status_checks": {
+      "strict": true,
+      "checks": [
+        { "context": "ci", "app_id": 15368 },
+        { "context": "run-002/independent-review", "app_id": "__GATE_APP_ID__" }
+      ]
+    },
+    "enforce_admins": true,
+    "required_pull_request_reviews": {
+      "dismiss_stale_reviews": false,
+      "require_code_owner_reviews": false,
+      "required_approving_review_count": 0,
+      "bypass_pull_request_allowances": { "users": [], "teams": [], "apps": [] }
+    },
+    "restrictions": null,
+    "required_linear_history": false,
+    "allow_force_pushes": false,
+    "allow_deletions": false,
+    "block_creations": false,
+    "required_conversation_resolution": false,
+    "lock_branch": false,
+    "allow_fork_syncing": false
+  }
+}

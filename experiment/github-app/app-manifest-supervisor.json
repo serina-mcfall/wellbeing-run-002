@@ -1,0 +1,45 @@
+{
+  "_TEMPLATE_NOTICE": [
+    "TEMPLATE — UNAPPLIED. DEPLOYMENT IS NOT AUTHORISED.",
+    "No GitHub App was created, no credential exists, nothing was submitted.",
+    "Submit the value of the 'manifest' key only; '_TEMPLATE_NOTICE' and",
+    "'_principal' are documentation and MUST NOT be submitted.",
+    "Principal 2 of 3: the MERGER. This is the principal §41.7 omitted",
+    "entirely, which is finding F2: under §41.7's two-credential model no",
+    "principal could execute a merge at all.",
+    "It has NO statuses write, so it cannot publish the verdict it then acts",
+    "on (verification step V3d)."
+  ],
+  "_principal": {
+    "role": "supervisor / merger",
+    "runs_as_os_user": "run002-sup",
+    "private_key_mode": "0400",
+    "private_key_owner": "run002-sup",
+    "resolves_findings": ["F2 (a principal that can merge)", "F3 (administration:read)", "F4 (actions:read)"],
+    "must_not_have": ["statuses write"],
+    "unverified": [
+      "issues:write — gh pr comment posts an issue comment; GitHub may map it to 'issues' rather than 'pull_requests'. Declared here deliberately and flagged UNVERIFIED (§7 R7). Confirm on the App creation screen and remove if 'pull_requests: write' alone suffices.",
+      "contents:write — believed required for squash-merge commit creation and --delete-branch alongside pull_requests:write. Confirm on the App creation screen."
+    ]
+  },
+  "manifest": {
+    "name": "run-002-supervisor",
+    "url": "https://github.com/serina-mcfall/wellbeing-run-002",
+    "description": "The Run 002 Supervisor's own GitHub identity: marks ready, updates branches, comments and merges. Cannot post a commit status.",
+    "public": false,
+    "hook_attributes": {
+      "active": false
+    },
+    "default_events": [],
+    "default_permissions": {
+      "metadata": "read",
+      "administration": "read",
+      "actions": "read",
+      "checks": "read",
+      "statuses": "read",
+      "pull_requests": "write",
+      "contents": "write",
+      "issues": "write"
+    }
+  }
+}

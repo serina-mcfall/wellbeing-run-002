@@ -1,14 +1,27 @@
 # GitHub App and worker-isolation proposal
 
-Status: **PROPOSAL — DECISION-READY. NOTHING CREATED, NOTHING CHANGED.**
+Status: **COMPLETE — ONE CONCRETE ARRANGEMENT, AWAITING THE OPERATOR'S
+DECISION. NOTHING CREATED, NOTHING CHANGED.**
+
 Written 2026-10-01 against `wip/c05-1-persistence` at `1387275`.
-Expands handover §41.7, which is a summary. Where this document and §41.7
-disagree, the disagreement is marked and the evidence is cited.
+**Completed 2026-10-02 against `wip/c05-1-persistence` at `b66944a`** —
+§9 and §10 added, §1.5, §3.3's pin note and §4.3b updated to point at the
+decided arrangement. Every §0–§8 finding and verification stands; nothing
+earlier was weakened or deleted. Code citations were re-checked at
+`b66944a` and all still resolve (§10.2).
+
+Expands handover §41.7, which is a summary and whose permission set is
+**SUPERSEDED** by §1.2 and §9.2. Where this document and §41.7 disagree,
+the disagreement is marked and the evidence is cited.
+
+**→ The operator-facing answer is §9. Everything before it is the working.**
 
 No App was created. No credential was created, read or printed. No
 protection, permission, setting, account or OS user was changed. The only
 GitHub calls made while writing this were read-only `gh api` GETs against
-already-authenticated ambient credentials, listed in §0.2.
+already-authenticated ambient credentials, listed in §0.2. **The 2026-10-02
+completion pass made no GitHub call of any kind** — it used only local
+`git`, local file reads, and the checker in §10.
 
 ---
 
@@ -70,6 +83,26 @@ outage, not a control.
 The corrected design in §1–§4 is executable. Whether to execute it is the
 operator's decision, and §6 is ordered so that the OS boundary (§3) can be
 built and falsified **before** any GitHub object is created.
+
+### 0.4 What changed on 2026-10-02 — the arrangement, not a menu
+
+The operator asked for the proposal to be **finished**, presenting **one
+concrete arrangement** rather than a set of options. **§9 is that
+arrangement**, and §10 indexes the reviewable templates now sitting
+unapplied under `experiment/github-app/`.
+
+Three things §9 does that §1–§8 did not:
+
+1. **It decides.** The two questions §43.5(c) says the operator must settle
+   are answered with a recommendation and its reasoning (§9.9), **flagged
+   as pending the operator's approval** rather than left open.
+2. **It pins the trusted revision** (§9.5) with the git evidence for the
+   choice, including the explicit demonstration that **`main` does not
+   contain the apparatus at all** and therefore cannot host the gate.
+3. **It shows F1, F2 and F5 are gone rather than asserting it** — §9.3 is a
+   permission-to-call-site cross-check, and
+   `experiment/github-app/check-templates.py` re-runs it mechanically
+   against the live checkout (§10.2).
 
 ---
 
@@ -149,6 +182,21 @@ against the protection UI's vocabulary rather than against the code.
    token (F6). Leaving it on SSH means the strongest write credential in
    the system — Serina's personal SSH key — remains outside the scheme
    entirely, which is a larger hole than the one the App closes.
+
+**→ ANSWERED 2026-10-02 in §9.9, with reasoning, as a RECOMMENDATION
+PENDING THE OPERATOR'S APPROVAL.** Both are still the operator's to decide;
+§9.9 picks one of each and says why, so there is a single arrangement to
+approve or reject rather than a menu to assemble.
+
+**Note on §1.2's allocation.** §1.2 computes the permission set for a world
+where the Supervisor holds the gate App — so it loads `Administration:
+read` and `Actions: read` onto the gate App. Once the three-principal model
+of §2.2 is adopted, those two belong to the **Supervisor** principal, not
+the publisher, because the calls that need them
+(`control/preflight.py:161,545`) are made by the Supervisor's own preflight
+and never by the gate. §9.2 is the corrected per-principal allocation and
+**supersedes §1.2's single-column table**. The total set of permissions is
+unchanged; only their owner moves, and it moves strictly tighter.
 
 ---
 
@@ -346,10 +394,11 @@ Proposed, smallest thing that works:
    name — a branch moves.
 
 **Note on §41.7's pin:** it names the trusted apparatus revision as
-`4ae1488` on `wip/c05-1-persistence`. That branch tip is now `1387275`
-(the handover commit itself). The pin is already one commit stale. A pin
-must be a SHA the operator states deliberately, and the operator should
-state which one.
+`4ae1488` on `wip/c05-1-persistence`. That branch tip was `1387275` when
+this section was written and is `b66944a` as of 2026-10-02 — `4ae1488` is
+now **14 commits stale**. A pin must be a SHA the operator states
+deliberately. **→ §9.5 states it, with the git evidence, and explains why
+`main` is not a candidate.**
 
 #### tmux across two UIDs — an engineering cost §41.7 does not mention
 
@@ -504,6 +553,11 @@ requiring their own authorisation and NOT covered by this proposal**:
 Either way, **the protection change must not be applied before the chosen
 resolution is built and tested**, or every product PR deadlocks at T+00.
 
+**→ DECIDED in §9.6: option (ii), with the precise safety condition that
+stops it becoming a fail-open.** The ordering invariant — resolution built
+and mutation-tested *before* the protection PUT — is §9.6's hard
+precondition and is restated in the AFTER template's own header.
+
 ---
 
 ## 5. Verification plan — the falsification test
@@ -549,14 +603,15 @@ created on GitHub, and so the F5 deadlock is resolved before it can bite.
 
 | # | Step | Who | Authorisation | Rollback |
 |---|---|---|---|---|
-| 0 | **Operator decides** on the three open questions: the three-principal model (§2.2), SSH vs HTTPS for `origin` (§1.5), and which SHA is the trusted gate revision (§3.3). | human | — | n/a; nothing done |
-| 1 | Create OS users `run002-sup`, `run002-wrk` and group `run002`. Set ownership and modes per §3.3. | human | root | `userdel run002-sup run002-wrk; groupdel run002`; restore ownership to `serina` |
+| 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `183959e06dcafd4915ab989efb1721946174bc85`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
+| **0b** | **Push `wip/c05-1-persistence`** so the pinned revision exists on `origin`. It is three commits ahead today (§9.5), so the pin is not independently fetchable until this happens. | human | repo write | n/a — pushing an existing local commit |
+| 1 | Create OS users `run002-sup`, `run002-wrk` and group `run002`. Set ownership and modes per §3.3 and §9.4. | human | root | `userdel run002-sup run002-wrk; groupdel run002`; restore ownership to `serina` |
 | 2 | Create the throwaway probe repository. | human | GitHub account | delete the repository |
 | 3 | Run V1, V1b, V4, V4b, V5, V5b, V6 — the **filesystem** half of §5. No GitHub objects needed. | human | sudo | n/a (read-only assertions) |
 | 4 | **Gate: if any of step 3 passes where it must fail, STOP.** Fix the OS boundary; do not proceed to GitHub. | human | — | — |
-| 5 | Create the three GitHub Apps (`…-independent-review`, `…-worker`, `…-supervisor`) with the permissions in §1.2 and §2, webhook disabled. Install each on the **throwaway repo only**, to begin with. | human | GitHub account | delete each App (removes its installations and invalidates its tokens) |
+| 5 | Create the three GitHub Apps from the manifests in `experiment/github-app/` — **§9.2's per-principal permissions, which supersede §1.2's single column** — webhook disabled. Install each on the **throwaway repo only**, to begin with. Confirm the UNVERIFIED mappings (§9.11 item 3) on the creation screen and correct the manifests there. | human | GitHub account | delete each App (removes its installations and invalidates its tokens) |
 | 6 | Store the three private keys `0400` owned by `run002-sup`. | human | sudo | `shred` the key files; regenerate from the App settings page if needed |
-| 7 | Run V2, V2b, V3, V3b, V3c, V7, V8, V9 against the throwaway. | human | sudo + throwaway | n/a |
+| 7 | Run V2, V2b, V3, V3b, V3c, V7, V8, V9 **and V11** (§9.10) against the throwaway. | human | sudo + throwaway | n/a |
 | 8 | **Gate: if any permission boundary is wrong, STOP and fix the App definition.** | human | — | — |
 | 9 | Apply the §4.2 payload to the **throwaway's** default branch; run V10 and **reproduce the F5 deadlock deliberately**. | human | throwaway admin | `PUT` the prior payload back, or `DELETE …/protection` |
 | 10 | Build the F5 resolution — §4.3b option (ii) recommended — with tests, including a mutation proving the new condition is detected. | agent | a separate, explicit change authorisation; **not granted by this document** | revert the commit |
@@ -564,7 +619,7 @@ created on GitHub, and so the F5 deadlock is resolved before it can bite.
 | 12 | Change `control/gh.py:33` to pass an explicit per-role token instead of inheriting ambient auth, and `control/worker_entry.py:113` to construct the child environment from an allow-list rather than `dict(os.environ)`. | agent | separate change authorisation | revert the commit |
 | 13 | Re-run the whole §5 suite against the throwaway with the real code paths. | human + agent | sudo + throwaway | n/a |
 | 14 | Install the three Apps on `serina-mcfall/wellbeing-run-002`. | human | GitHub account | uninstall each installation |
-| 15 | Capture the current protection payload verbatim to a file as the rollback artefact, then apply §4.2 to `main`. | human | repo admin | `PUT` the captured payload back — the exact bytes, from §4.1 |
+| 15 | Capture the current protection payload verbatim to a file as the rollback artefact, then apply `experiment/github-app/branch-protection-AFTER.json` (`jq .body`) to `main`, with `__GATE_APP_ID__` replaced by the gate App's numeric ID. **Only after steps 10 and 11 — see §9.6's ordering invariant.** | human | repo admin | `PUT` the captured bytes back; `experiment/github-app/branch-protection-BEFORE.json` is the fallback if capture failed |
 | 16 | Re-run `ctl preflight`; confirm `github_main_protection` still PASSes with `required_approving_review_count: 0` (§4.2, the `reviews is not None` trap). | agent | existing | step 15's rollback |
 | 17 | Delete the throwaway repository. | human | GitHub account | n/a |
 
@@ -657,17 +712,761 @@ design, not a proven boundary.
 
 ---
 
+The five below were added 2026-10-02 alongside §9. They are consequences of
+**deciding**, which §1–§8 did not have to face.
+
+**R12. The publisher/merger split is a GitHub-side split, not an OS-side
+one.** §9.2 gives the gate App and the supervisor App to two different
+GitHub principals, but §3.3 puts **both private keys under the same OS user
+`run002-sup`**. A process running as `run002-sup` can therefore read both
+keys and mint both tokens. The split defends against **the worker** — which
+is the threat §2.3 is actually about, because the worker is the thing being
+judged — and it makes every posted status attributable to one App ID in
+GitHub's audit log. It does **not** defend against a compromised
+`run002-sup`. A fourth OS user owning only the gate key would close that,
+at the cost of another account, another sudoers rule and another `$HOME`.
+**Recommended: do not add it now.** Stated here so the separation is not
+read as stronger than it is.
+
+**R13. The pinned revision is not on `origin`.** `b66944a` is three commits
+ahead of `origin/wip/c05-1-persistence` (`dbee92c`) — evidence in §9.5 —
+and all three touch `apparatus/` or `control/`. Until the branch is pushed,
+the trusted export can only be created from this local clone and **no third
+party can fetch the pin to verify what the gate ran**. §9.5 makes pushing
+the branch a precondition of the runbook rather than an afterthought.
+
+**R14. The merge has no expected-head guard, today.**
+`control/gh.py:134-136` is `gh pr merge <n> --repo <r> --squash
+--delete-branch` and passes **no** expected-head argument. Between the
+gate deciding on trusted head `S` and the merge executing, a push can move
+the head, and the merge would take the new one. §9.7 specifies the fix;
+**the fix is a code change this document does not authorise.** The window
+is open now and is not created by anything proposed here.
+
+**R15. Bare `gh pr view` under a Checks-less token is untested.**
+`prompts/reviewer.md:16`, `prompts/security.md:22` and
+`prompts/accessibility.md:34` run `gh pr view <n> --repo <repo>` with **no**
+`--json`. Whether gh's default view requests the check-run surface — and so
+whether it errors or silently degrades under the worker App, which has no
+`checks` permission by design — has not been established. Verification step
+V11 (§9.10) tests it on the throwaway before any worker depends on it.
+**UNVERIFIED, and deliberately so: establishing it requires a token, and no
+token exists.**
+
+---
+
 ## 8. Provenance
 
-Every claim above is one of:
+Every claim in this document is exactly one of:
 
-- **VERIFIED LIVE** — a read-only `gh api` GET made 2026-10-01 (§0.2).
-- **VERIFIED IN CHECKOUT** — a `file:line` citation at `1387275`.
-- **UNVERIFIED** — explicitly marked, in R7, R8 and §3.1 claim 3.
+- **VERIFIED LIVE** — a read-only `gh api` GET made **2026-10-01** and
+  listed in §0.2. Nothing was re-queried on 2026-10-02 and no GitHub call
+  of any kind was made in the completion pass.
+- **VERIFIED IN CHECKOUT** — a `file:line` citation. §0–§7 were written
+  against `1387275`; **every citation §9 relies on was re-read at
+  `b66944a`** and `experiment/github-app/check-templates.py` re-asserts
+  twelve of them mechanically (§10.2 check `D`).
+- **VERIFIED BY LOCAL GIT** — the ref, ancestry and tree-content evidence
+  in §9.5, from `git rev-parse`, `git merge-base`, `git rev-list`,
+  `git ls-tree` and `git cat-file -e`. Local only; no fetch, no push.
+- **UNVERIFIED** — explicitly marked. The complete list is §9.11 items 3–6,
+  plus §7 R7, R8, R15 and §3.1 claim 3. Nothing is marked verified that was
+  not.
 
-Where §41.7 and this document disagree, the disagreements are F1-F7, §3.1
-claim 3, §3.2a, §3.2b, §3.3's note on the stale pin, §4.3a and §4.3b.
-Where §41.7 is confirmed, it is confirmed in §3.1 and §4.1.
+**One citation drifted between `1387275` and `b66944a`, and is corrected
+rather than silently restated.** §2.1 cites the accessibility prompt's `gh`
+commands at `prompts/accessibility.md:31-32`. That was correct at
+`1387275`; commit `7f937a8` ("C-02b: the frozen prompt stops calling its
+own dispatch unimplemented") edited the file, and the lines are now
+**33-34**. §2.1 is left as written — it was true at its stated revision —
+and §9.3 row 13 carries the corrected location. The checker now pins all
+eight prompt call sites, so the next drift is reported rather than
+inherited. **This is the only citation that moved**; the other eleven
+re-checked sites are unchanged.
+
+Where §41.7 and this document disagree, the disagreements are F1–F7, §3.1
+claim 3, §3.2a, §3.2b, §3.3's note on the stale pin, §4.3a, §4.3b, and
+§9.2's re-allocation of `Administration`/`Actions` read to the Supervisor.
+Where §41.7 is confirmed, it is confirmed in §3.1 and §4.1 — including, 54
+commits later, that `main` still contains neither `live-gate.js` nor
+`control/accessibility_registry.py` (§9.5).
+
+**§41.7's permission set is SUPERSEDED, not offered as an alternative.**
+
+---
+
+## 9. THE CONCRETE ARRANGEMENT
+
+**One arrangement, not a menu.** Everything in §9 is a single coherent
+proposal: approve it, reject it, or send back a specific line. It is
+**unapplied**. Nothing in it has been created, installed, granted or
+changed, and §9 by itself authorises nothing.
+
+Where §9 and §1–§4 differ, §9 wins and the difference is called out.
+Where §9 and handover §41.7 differ, **§41.7 is superseded** — §41.7's
+permission set is the thing F1–F5 proved wrong, and it must not be read as
+an alternative on offer.
+
+### 9.1 Target — exactly what is governed
+
+| | |
+|---|---|
+| **Repository** | `serina-mcfall/wellbeing-run-002` |
+| **Target branch** | `main` |
+| **Source of truth for both** | `config/experiment.json` → `github.repo` / `github.main_branch`, loaded at `control/config.py:171`. VERIFIED IN CHECKOUT at `b66944a`. |
+| **Installation scope** | "Only select repositories" → **this one repository**, for all three Apps. Never "All repositories". |
+| **Everything else** | out of scope. Run 001 and every unrelated repository are out of reach **by construction**, not by policy (`AGENTS.md:6-10`). |
+
+### 9.2 The three principals
+
+This supersedes §1.2's single-column table. §1.2 derived six permissions
+for a world where one App did everything the Supervisor does; §9.2 keeps
+all six and allocates each to **the principal that actually makes the
+call**, which is strictly tighter. The two write permissions §2 derived
+(`Contents: write`, `Pull requests: write`) and the `Issues: write` §2.2
+flags as uncertain complete the table. **Nothing is granted here that §1.2
+or §2 did not already derive from a call site.**
+
+| Permission | **gate**<br>`run-002-independent-review` | **supervisor**<br>`run-002-supervisor` | **worker**<br>`run-002-worker` |
+|---|---|---|---|
+| Metadata | read | read | read |
+| Checks | **read** | read | **— none** |
+| Commit statuses | **read + WRITE** | read | **— none** |
+| Pull requests | read | **write** | **write** |
+| Contents | — none | **write** | **write** |
+| Administration | — none | read | — none |
+| Actions | — none | read | — none |
+| Issues | — none | write *(UNVERIFIED, §7 R7)* | — none |
+| Webhook / events | disabled, zero events | disabled, zero events | disabled, zero events |
+
+**Responsibilities, in one line each.**
+
+- **gate / publisher** — runs `live-gate.js` from the trusted export (§9.5)
+  and, on an ELIGIBLE verdict, posts the `run-002/independent-review`
+  commit status against the trusted head SHA. **It is the only principal in
+  the system that may write a commit status.** It cannot merge, cannot
+  push, cannot comment, cannot read branch protection.
+- **supervisor / merger** — runs preflight, routes PRs, marks ready,
+  updates branches, comments, and executes the merge. **It cannot post the
+  status it then acts on.** Its merge is permitted by GitHub only because
+  the gate already satisfied the required context.
+- **worker** — pushes its branch and opens its PR. Nothing else. It is the
+  thing being judged, so it holds no permission that touches the judgement.
+
+**The reason this is three and not two** is F2: §41.7's two credentials are
+the publisher and the worker, and *neither* of them can merge. See §9.3
+rows 5–8.
+
+**The minimum sets the operator asked for, read off the table:**
+
+| Capability | Minimum permission | Principal |
+|---|---|---|
+| **(a) read CI / check results** | `Checks: read` (+ `Commit statuses: read` for the rollup) | gate, and supervisor |
+| **(b) publish the required result/status** | `Commit statuses: write` | **gate only** |
+| **(c) execute merges** | `Pull requests: write` + `Contents: write` | **supervisor only** |
+
+### 9.3 The cross-check — shown, not asserted
+
+Every GitHub call the repository makes, the permission it needs, and the
+principal that holds it. **Each `file:line` was re-read at `b66944a`**, and
+`experiment/github-app/check-templates.py` re-asserts **every row that has
+a site** — eleven of the thirteen. Row 4 has no site, which is the entire
+point of row 4, and row 12 is a `git` transport rather than a call in this
+repository. So this table cannot silently rot (§10.2).
+
+| # | Call | Site at `b66944a` | Permission | Principal |
+|---|---|---|---|---|
+| 1 | `GET /repos/{r}/commits/{sha}/check-runs` | `apparatus/adapters/ci-result.js:69` | **Checks: read** | gate |
+| 2 | `gh pr view --json …statusCheckRollup…` | `control/gh.py:66,77` | Checks: read **+** Commit statuses: read | supervisor |
+| 3 | `gh pr list` | `control/gh.py:71` | Pull requests: read | supervisor |
+| 4 | `POST /repos/{r}/statuses/{sha}` *(does not exist yet — F7)* | **nowhere**; see §9.11 | **Commit statuses: write** | **gate** |
+| 5 | `gh pr update-branch` | `control/gh.py:121` | Pull requests: write + Contents: write | supervisor |
+| 6 | `gh pr ready` | `control/gh.py:131` | Pull requests: write | supervisor |
+| 7 | `gh pr merge --squash --delete-branch` | `control/gh.py:135` | Pull requests: write + Contents: write | supervisor |
+| 8 | `gh pr comment` | `control/gh.py:145` | Issues: write *(UNVERIFIED)* | supervisor |
+| 9 | `GET /repos/{r}/branches/{b}/protection` | `control/gh.py:150` ← `control/preflight.py:161` | **Administration: read** | supervisor |
+| 10 | `gh run list --json status,conclusion,…` | `control/gh.py:156` ← `control/preflight.py:545` | **Actions: read** | supervisor |
+| 11 | `gh pr create` | `control/gh.py:140`; `prompts/builder.md:60` | Pull requests: write | worker |
+| 12 | `git push` of a worker branch | builder prompt | Contents: write — **today via SSH, not any token (F6)** | worker, **once §9.9(2) is applied** |
+| 13 | `gh pr diff` / `gh pr view` (no `--json`), `gh pr list` | `prompts/reviewer.md:15-16`, `security.md:21-22`, **`accessibility.md:33-34`**, `observer.md:13` | Pull requests: read | worker *(§7 R15 — untested without Checks)* |
+
+**How this demonstrates the three defects are gone.**
+
+- **F1 — missing READ.** Row 1 is the call that §41.7's set could not make.
+  `Checks: read` is on the gate, which is the principal that makes it. The
+  live evidence that `ci` lives **only** on the check-run surface, and that
+  the commit carries **zero** commit statuses, is §1.4 — a read-only GET
+  recorded 2026-10-01, not re-queried on 2026-10-02 and not needed to be.
+  **Mechanical re-assertion:** `check-templates.py` check `C. F1 resolved`
+  plus `D. apparatus/adapters/ci-result.js:69 still calls check-runs`.
+- **F2 — nobody could merge.** Rows 5–8 are the Supervisor's writes. Under
+  §41.7 they belonged to neither credential; here they belong to the
+  supervisor principal, which holds `Pull requests: write` + `Contents:
+  write`. **Mechanical re-assertion:** `C. F2 resolved — a principal exists
+  that can execute a merge`, paired with `C. the merger cannot publish the
+  verdict it acts on`, so the fix does not quietly re-merge the two roles.
+- **F5 — unsatisfiable required context.** Not a permission defect and not
+  fixable by one; it is an ordering and code defect, resolved in §9.6.
+
+**What the cross-check also shows, and should be read as a warning:** row 4
+is the only row with no site. The permission at the centre of this entire
+proposal exists to serve code that has not been written (F7, §7 R2).
+
+### 9.4 Worker permissions and enforceable isolation
+
+**GitHub-side:** `Contents: write` + `Pull requests: write`, nothing else
+(§9.2 column 3). Sufficient for every command the frozen prompts issue
+(§2.1), and insufficient for every command they must never issue.
+
+**OS-side — the part that makes it enforceable.** A permission the worker
+cannot reach a key for is worth more than one it is merely not given.
+§3.3's three accounts stand; this is the asset-by-asset statement.
+
+| Asset | `run002-sup` | `run002-wrk` | Enforced by | Falsified by |
+|---|---|---|---|---|
+| `~serina/.ssh/*` | no | no | existing `0700`/`0600`, owner `serina` | V1b |
+| `~serina/.config/gh/hosts.yml` | no | no | existing `0600` + `0751` dir | V1 |
+| Gate App private key | read | **no** | `0400`, owner `run002-sup` | V1c |
+| Supervisor App private key | read | **no** | `0400`, owner `run002-sup` | V1c |
+| Worker App private key | read (to mint) | **no** | `0400`, owner `run002-sup`; the worker gets a **1-hour token**, never the key | V1c |
+| Trusted gate export `/opt/run-002/gate-<SHA>` | read | read | `chmod -R a-w`, owner `run002-sup` | V4 |
+| Mutable checkout `apparatus/`, `control/`, `bin/`, `config/`, `prompts/`, `protocol/` | read | **read, not write** | owner `run002-sup`, group `run002`, `0750` dirs / `0640` files | V4b |
+| `.runtime/ledger.jsonl` | read+write | **no** | `.runtime/` `0700`, owner `run002-sup` | V5 |
+| `.runtime/state.json` | read+write | **no** | same | V5b |
+| `.runtime/evidence/`, locks, `workers/`, `observer/` | read+write | **no** | same | V5 |
+| Its own worktree | read+write | read+write | `0700`, owner `run002-wrk` | — must succeed |
+| Another worker's worktree | — | **reachable** | nothing | **accepted, §7 R3** |
+
+Four things make this enforceable rather than aspirational:
+
+1. **The modes that matter already exist.** `~/.config/gh/hosts.yml` is
+   `0600` and `~/.ssh` is `0700`, both owned by `serina` — VERIFIED by
+   `ls -l`, **contents never read** (§3.1 claim 1). They exclude a
+   different UID today. They exclude nothing while workers run as
+   `serina`, which is exactly the hole, and changing the UID is exactly
+   the fix.
+2. **The worker's environment is built from an allow-list.**
+   `control/worker_entry.py:113` is `env = dict(os.environ)` with no scrub
+   before `Popen(..., env=env)` at `:124`. Runbook step 12 replaces it.
+   Names for the allow-list are in
+   `experiment/github-app/env-var-names.md` §3. **Until step 12 lands, a
+   worker inherits the Supervisor's whole environment and the boundary is
+   not enforced** — this is the single change the GitHub side cannot
+   substitute for.
+3. **The two layers must agree, and are checked separately.** The worker
+   App has no `statuses` permission (GitHub-side, checked by
+   `check-templates.py` check `C`), *and* the worker UID cannot read the
+   gate key (OS-side, checked by V1c). Either alone is a single point of
+   failure.
+4. **The gate does not execute from anything a worker can write** — §9.5.
+
+### 9.5 THE TRUSTED APPARATUS REVISION
+
+> **TRUSTED APPARATUS REVISION:
+> `183959e06dcafd4915ab989efb1721946174bc85`**
+> on `wip/c05-1-persistence`. Full 40 hex, never a branch name.
+
+**This supersedes §41.7's `4ae1488`, which is 16 commits stale.** It also
+supersedes this document's own first pin, `b66944a`, which went stale
+within the same session — see "the pin and the moving branch" below.
+
+#### The evidence, and why `main` is not a candidate
+
+`main` was **not** assumed to contain the apparatus. It was checked, and
+then re-checked independently by the integration owner at the final pin:
+
+```
+$ git rev-parse HEAD
+183959e06dcafd4915ab989efb1721946174bc85
+$ git rev-parse main origin/main
+4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
+4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
+$ git merge-base main HEAD
+4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
+$ git rev-list --count HEAD..main     ->  0      # main is a strict ancestor
+$ git rev-list --count main..HEAD     -> 56      # 56 commits of apparatus
+$ git diff --shortstat main..HEAD
+  142 files changed, 48510 insertions(+), 443 deletions(-)
+$ git ls-tree -r --name-only main -- apparatus control | wc -l  -> 50
+$ git ls-tree -r --name-only HEAD -- apparatus control | wc -l  -> 88
+```
+
+Per-file, `git cat-file -e <ref>:<path>`:
+
+| Path the gate needs | on `main` | at `b66944a` |
+|---|---|---|
+| `apparatus/pr-evidence/live-gate.js` | **ABSENT** | present |
+| `apparatus/adapters/ci-result.js` | **ABSENT** | present |
+| `apparatus/adapters/reviewer-identity.js` | **ABSENT** | present |
+| `apparatus/accessibility/requirement-registry.js` | **ABSENT** | present |
+| `control/gate_evidence.py` | **ABSENT** | present |
+| `control/accessibility_registry.py` | **ABSENT** | present |
+| `control/accessibility_services.py` | **ABSENT** | present |
+| `apparatus/adapters/git-head.js` | present | present |
+| `apparatus/adapters/task-record.js` | present | present |
+| `control/gh.py`, `control/routing.py`, `control/preflight.py` | present | present |
+
+**Conclusion, stated explicitly because the assumption is the dangerous
+one: `main` does not contain the gate.** Exporting `main` as the trusted
+revision would produce a tree with no `live-gate.js`, no CI adapter and no
+requirement registry in it. The gate would not fail closed — it would fail
+to exist. §41.7 said `main` is `4eeaa7c` and contains neither
+`live-gate.js` nor `control/accessibility_registry.py`; that is **confirmed
+here and is still true 56 commits later**, and it is the reason `main` is
+disqualified rather than merely behind.
+
+#### Why `183959e` and not an older branch commit
+
+`4ae1488` (§41.7) is 16 behind; `1387275` (this document's original base) is
+15 behind. Both predate work the gate depends on. `183959e` is the tip of
+the branch that holds the apparatus.
+
+#### The pin and the moving branch
+
+**This document's first pin went stale inside the session that wrote it.**
+It named `b66944a`; two further commits landed — `f2129c5` (C-04b, which
+changes `control/routing.py`, code the gate's decisions depend on) and
+`183959e` (a test-isolation fix). The pin is now `183959e`.
+
+That is not an embarrassment, it is the thing the check exists to catch,
+and it exposed a real defect in the FIRST version of the check, which
+asserted `pin == HEAD`. That assertion goes red the moment anything is
+committed — **including the commit that records the pin itself**, and every
+later documentation commit. A check that cannot be satisfied is a check
+people learn to ignore.
+
+`check-templates.py` now asserts the invariant that actually matters, in
+two parts:
+
+- **F1** the pin is REACHABLE from HEAD (`git merge-base --is-ancestor`),
+  so it names a commit this branch really contains and an export can be
+  made from it;
+- **F2** `git diff --name-only <pin> HEAD -- apparatus control protocol
+  prompts config` is EMPTY — nothing the gate executes, and nothing that
+  governs it, has changed since the pin.
+
+A documentation commit on top of the pin is harmless and stays green. One
+line of `apparatus/` or `control/` is not, and goes red naming the file.
+
+#### The precondition this pin still carries
+
+```
+$ git rev-parse origin/wip/c05-1-persistence
+dbee92c6db4d78eac93ed9832eaef8fa27e1851e
+$ git log --oneline origin/wip/c05-1-persistence..HEAD
+183959e The test suite was writing the live run state
+f2129c5 C-04b: the merge gate stopped merging on absent facts
+b66944a Running it found G6's composite mapping never fired
+15a5bbf C-05.3c: a fixture product the real accessibility services can actually run
+7f937a8 C-02b: the frozen prompt stops calling its own dispatch unimplemented
+```
+
+**The pinned commit is ahead of `origin`, and the commits in between touch
+`apparatus/` and `control/`.** So:
+
+- Pinning `dbee92c` instead would export an **older**
+  `control/accessibility_services.py` and an **older** `control/routing.py`
+  than the ones the current tests pass against — the latter being the one
+  C-04b stopped merging on absent facts. Not acceptable.
+- Pinning `183959e` is correct **and is not fetchable by anyone else until
+  the branch is pushed.** A trusted revision nobody can fetch cannot be
+  independently verified, which defeats half the point of pinning.
+
+> **PRECONDITION, runbook step 0b: push `wip/c05-1-persistence` so the
+> pinned commit exists on `origin` before any export is made.** Pushing the
+> branch is ordinary work and is done; what is not authorised by this
+> document is creating the export, the Apps, or anything else in §6.
+
+#### The pinning rule, which outlives this particular SHA
+
+1. The pin is a **full 40-hex SHA**, stated deliberately by the operator at
+   approval time. A branch name is never a pin; a branch moves.
+2. **Re-pin at approval if the gate's own code moved.** Documentation may
+   land on top of a pin; `apparatus/`, `control/`, `protocol/`, `prompts/`
+   and `config/` may not. `check-templates.py` checks `F1`/`F2` enforce
+   exactly that, and both **have been watched failing** — `F` on a stale
+   pin during this session, which is what forced the rule above to be
+   written correctly, and the original `pin == HEAD` form before the pin
+   was first written in (§10.2).
+3. The export is created once, read-only, by `run002-sup`:
+   `git -C <workspace> worktree add --detach /opt/run-002/gate-<SHA> <SHA>`
+   → `chown -R run002-sup:run002` → `chmod -R a-w`.
+4. The gate invoker uses **only** that absolute path, exactly as
+   `control/gate_evidence.py:209`'s `RUN_JS` does — never a path inside the
+   PR's worktree, and **never `config.REPO_ROOT`**, which is a mutable tree
+   (§3.3).
+5. The SHA is written into the ledger beside every decision, so a decision
+   is attributable to the code that made it.
+
+### 9.6 Branch protection — before, after, and the F5 ordering
+
+**Before and after are §4.1 and §4.2, unchanged.** §4.1 is the state
+VERIFIED LIVE by read-only GET on 2026-10-01; it was **not re-queried** on
+2026-10-02, deliberately, because re-querying is a GitHub call this pass
+did not need to make. Both now exist as applyable request bodies:
+
+| | File |
+|---|---|
+| **BEFORE** (rollback artefact) | `experiment/github-app/branch-protection-BEFORE.json` |
+| **AFTER** (proposed) | `experiment/github-app/branch-protection-AFTER.json` |
+
+**The existing CI requirement is preserved, and this is checked rather than
+promised.** `check-templates.py` check **"B. AFTER preserves the existing
+ci requirement unchanged"** asserts the `ci` entry is identical in both
+bodies, `app_id` 15368 included; check **"B. AFTER restates every field
+BEFORE sets"** asserts no current setting is silently cleared by a PUT that
+replaces the whole object.
+
+**ONE SETTING IS REDUCED, AND IT IS THE ONE TO ARGUE ABOUT.**
+`required_approving_review_count` goes **1 → 0** (§4.2 row, reasoning at
+§4.2's table). Read plainly: *today `main` requires a human approving
+review; under this arrangement it does not.* That is a reduction in
+protection and nothing else in the payload compensates for it directly —
+what replaces it is the new required context
+`run-002/independent-review`, which only the gate principal can write and
+only on an ELIGIBLE verdict against the trusted head.
+
+The reason it cannot simply stay at 1 is mechanical, not preference:
+the PR author and the authenticated identity are both `serina-mcfall`, and
+GitHub does not permit an author to approve their own pull request, so the
+requirement is unsatisfiable by anything in this system (§37.10). Leaving
+it at 1 does not make the run safer — it makes every product PR
+unmergeable, which is F5 in a different costume.
+
+**If the operator is not willing to take `main` from "a human approved
+this" to "the gate approved this", this arrangement should be rejected
+rather than trimmed.** It is the hinge of the whole design.
+
+The three traps, all re-checked mechanically:
+
+| Trap | Why it bites | Check |
+|---|---|---|
+| `required_pull_request_reviews` sent as `null` | `control/preflight.py:174` computes `bool(reviews is not None and …)`; the REQUIRED gate `github_main_protection` FAILs and `ctl start` refuses | `B. AFTER sends required_pull_request_reviews as an OBJECT, not null` |
+| `contexts` sent alongside `checks` | deprecated alias; sending both is an error | **"B. AFTER omits the deprecated contexts alias"** |
+| `run-002/independent-review` added to `config/experiment.json` → `required_checks` | `ci-result.js:155-165` iterates that list against the **check-run** surface, where a commit status never appears → permanent silent deny (§4.3a) | `E. §4.3a holds — the status context was NOT added` |
+
+#### F5 — the resolution, and the ordering that is the real fix
+
+**Resolution: §4.3b option (ii)** — extend the existing
+`blockedOnlyByDraft` pattern (`live-gate.js:557,566`) with a sibling
+`blockedOnlyByPendingIndependentReview`, and let the **publisher** and the
+**merger** consume different fields of the same verdict:
+
+- the **publisher** acts on `eligible || blockedOnlyByPendingIndependentReview`;
+- the **Supervisor's merge path** acts on `eligible` alone, unchanged.
+
+**The safety condition, which is the whole of it.** The new flag must be
+computed exactly as `blockedOnlyByDraft` is — from the reason list being
+*precisely one* reason, and that reason being the branch-protection one:
+
+> `reasons.length === 1 && reasons[0].code === 'PR_BLOCKED_BY_BRANCH_PROTECTION'`,
+> **and** `ciResult.ok === true` with `ci` concluded success.
+
+Computing it from `mergeStateStatus === 'BLOCKED'` alone would be
+**fail-open**: `BLOCKED` is also what GitHub reports for a failing `ci`, an
+unsatisfied conversation requirement, or any other protection rule
+(`live-gate.js:516-528` says so in its own comment). The default-deny
+backstop at `live-gate.js:544-554` must keep re-reading every adapter's
+`ok` flag and must not be weakened; the new flag is a **separate reported
+field**, never an input to `verified`.
+
+**Required evidence before this is believed: a mutation.** Break the
+condition to `mergeState === 'BLOCKED'` and prove a PR with failing `ci`
+becomes publishable; restore it and prove it does not. A guard nobody has
+watched fail is not a guard.
+
+**The ordering invariant — this is the part that actually resolves F5:**
+
+```
+build + mutation-test the resolution (runbook 10)
+  → build the publisher (runbook 11)
+    → reproduce the deadlock deliberately on the throwaway (V10, runbook 9)
+      → ONLY THEN apply branch-protection-AFTER.json to main (runbook 15)
+```
+
+Applying the AFTER payload at any earlier point deadlocks every product PR
+permanently. That precondition is restated inside the AFTER template's own
+header, so it travels with the file rather than living only here.
+
+### 9.7 Expected-head protection
+
+Four layers, three of which exist and one of which does not:
+
+| # | Layer | Status |
+|---|---|---|
+| 1 | A commit status is bound to one SHA by construction — `POST /statuses/{sha}`. A new head has no status, so the required context is unsatisfied again automatically. | inherent to GitHub |
+| 2 | `required_status_checks.strict: true` — the branch must be up to date with `main`, so a moved base re-opens the gate. | **already true** (§4.1), preserved in AFTER |
+| 3 | The gate anchors on the SHA **git** resolves, never on `pkg.head_sha` — `live-gate.js` header lines 11-17; the submitted SHA is only ever compared to it. Review provenance is SHA-bound: `supervisor.py:1885,3846` emit `head_sha` on `REVIEW_DISPATCHED`/`REVIEW_RESULT`. C-20a(E) makes a new head invalidate the prior review even for an identical diff. | **already built** |
+| 4 | **The merge call naming the head it expects.** | **MISSING** |
+
+Layer 4, precisely. `control/gh.py:134-136` is:
+
+```python
+def merge(repo: str, number: int, method: str = "squash") -> Result:
+    return run(["gh", "pr", "merge", str(number), "--repo", repo, f"--{method}",
+                "--delete-branch"])
+```
+
+No expected-head argument. Between the gate deciding on trusted head `S`
+and this call executing, a push can move the head and the merge takes the
+new one. Layers 1–3 make that window **small and loud** — the status would
+not cover the new SHA and `strict` would likely report `BEHIND` — but
+small is not closed.
+
+**Specified fix (a code change this document does not authorise, runbook
+step 12):** pass the trusted head explicitly, and refuse rather than merge
+if GitHub reports a different head:
+
+```
+PUT /repos/{repo}/pulls/{n}/merge      body: { "sha": "<trusted head>", ... }
+```
+
+The REST form's `sha` parameter is the unambiguous expected-head
+primitive and the recommended target. The `gh` CLI exposes an equivalent
+merge flag in recent versions; **which flag, and whether this host's `gh`
+has it, is UNVERIFIED — a local hook in this environment refuses `gh pr`
+invocations, including `--help`, so it could not be checked here.** Confirm
+before writing the code; prefer the REST form if there is any doubt.
+
+### 9.8 Credential lifecycle
+
+Names only. **No value, path contents or key material appears in this
+document, in `experiment/github-app/`, or in any transcript.**
+
+| Phase | Gate | Supervisor | Worker |
+|---|---|---|---|
+| **Create** | App via the manifest in `experiment/github-app/app-manifest-gate.json`; generate one private key | `…-supervisor.json` | `…-worker.json` |
+| **Install** | "Only select repositories" → `wellbeing-run-002` only. **Throwaway repo first** (runbook 5), target repo only after §5 passes (runbook 14) | same | same |
+| **Store** | key file `0400`, owner `run002-sup`, outside the repository and outside `~/.config/run-002/secrets.env` | same | same — **the key stays with `run002-sup`; the worker never receives it** |
+| **Use** | `run002-sup` mints a 1-hour installation token per invocation | same | `run002-sup` mints a 1-hour token **per worker**, injected into that worker's environment via the §9.4 allow-list |
+| **Rotate (routine)** | generate a new key on the App settings page, deploy it, **then delete the old key** — in that order, so there is no window with no valid key | same | same |
+| **Rotate (suspected exposure)** | **delete the exposed key FIRST**, then generate. Order inverted deliberately: availability is not the priority when a key may be loose | same | same |
+| **Revoke one worker** | — | — | let the 1-hour token expire, or `DELETE /installation/token`; the blast radius is bounded by the lifetime |
+| **Revoke everything** | delete the App — this removes its installations and invalidates every token minted from it | same | same |
+| **Audit** | every `run-002/independent-review` status carries `creator` = the gate App; a status from any other principal does not satisfy the `app_id`-pinned context (V3c) | merges appear under the supervisor App | PRs and pushes appear under the worker App |
+
+**The key is the asset, not the token.** A leaked 1-hour installation token
+expires. A leaked private key does not, and mints new tokens until it is
+deleted. This is why the keys are `0400` under one UID and why the worker
+receives tokens only.
+
+**Rotation triggers**, stated so "when" is not a judgement call: any
+`V1c` failure; any key file found with a mode other than `0400` or an owner
+other than `run002-sup`; any key value appearing in any transcript, log or
+command line; the end of the run.
+
+**Hard rule for every agent, now and later.** Key files are checked with
+`ls -l` or `test -r` and **nothing else**. Never `cat`, `grep`, `strings`,
+`head`, `tail`, `awk`, `sed`, `less`, and never a glob that could sweep
+them in. Short patterns are the dangerous ones — exclude credential paths
+by name even when the pattern looks harmless.
+
+### 9.9 The two decisions §43.5(c) leaves to the operator
+
+**RECOMMENDED ANSWERS. NOT DECIDED. PENDING THE OPERATOR'S APPROVAL.**
+§9 is built on both; rejecting either sends §9 back rather than leaving it
+half-applicable.
+
+#### Decision 1 — a third principal, or widen the gate App?
+
+**RECOMMENDED: the third principal (`run-002-supervisor`).**
+
+| | Third principal *(recommended)* | Widen the gate App |
+|---|---|---|
+| Can the publisher merge what it blessed? | **No** — the gate has no write permission of any kind | **Yes** |
+| GitHub objects to manage | 3 Apps, 3 keys | 2 Apps, 2 keys |
+| What the `app_id` pin buys | an unforgeable context posted by a principal that cannot act on it | an unforgeable context posted by the principal that then merges on it |
+| Falsifiable? | **yes** — V8 asserts the gate App gets 403 on merge | no test can distinguish it from a single all-powerful credential |
+
+**Reasoning.** §2.3's four arguments are about the *worker*, and widening
+the gate App does not breach any of them — so the honest case for widening
+is real: it is one fewer App and one fewer key. The case against is that
+`required_status_checks.checks[].app_id` exists to make the verdict
+attributable to a principal, and attribution is worth much less when that
+same principal performs the act the verdict permits. The whole document
+exists to separate producing work from blessing it; **having blessed it and
+acted on it collapse into one credential undoes that at the last step, for
+the saving of one App.**
+
+The cost is honest and small: one more App, one more key file, one more
+line in §9.8. **R12 limits the claim** — both keys sit under one OS user,
+so this is a GitHub-side split that defends against the worker, not against
+a compromised `run002-sup`.
+
+#### Decision 2 — does `origin` move from SSH to HTTPS?
+
+**RECOMMENDED: YES — move `origin` to HTTPS, for the worker only, and only
+inside the worker's own worktrees.**
+
+The fact, VERIFIED IN CHECKOUT: `git remote -v` →
+`git@github.com:serina-mcfall/wellbeing-run-002.git` (fetch and push).
+
+Why this has to be answered rather than deferred: under §3.3 the worker UID
+cannot read `~serina/.ssh`. That is the boundary working **and** it means
+**builders cannot push at all**. The worker App's `Contents: write` is
+decorative until git actually authenticates with it (§7 R4). V6 is the test
+that forces this to the surface; it has two failure modes and *both* are
+findings:
+
+- V6 **fails** → the SSH key is correctly excluded, and the builder is
+  broken until this decision is applied.
+- V6 **succeeds** → F6 is proven live: a worker is pushing with Serina's
+  personal SSH key, a credential with far more reach than the whole App
+  scheme governs.
+
+| | HTTPS + worker token *(recommended)* | Keep SSH | Deploy key for `run002-wrk` |
+|---|---|---|---|
+| Worker pushes with a credential this scheme governs | **yes** | no | yes |
+| Blast radius of a leak | one repo, one hour | **every repo Serina's key reaches** | one repo, indefinitely |
+| Revocable without touching Serina's account | **yes** | no | yes |
+| New machinery | a remote URL and `GH_TOKEN` | none | a key to generate, store and rotate |
+
+**Reasoning.** The SSH key is the strongest write credential in the system
+and sits entirely outside the scheme — a larger hole than the one the App
+closes. HTTPS with the minted worker token puts it inside, with a one-hour
+blast radius, revocable without touching Serina's personal account. A
+dedicated deploy key also works but trades a 1-hour token for a permanent
+one and adds a fourth key to the rotation table for no gain.
+
+**Scope limit, deliberate:** change the remote **in the worker's
+worktrees**, not in Serina's main checkout. Her own `git push` keeps using
+SSH, unchanged, and nothing about her normal workflow moves.
+
+**Consequence to accept:** if `origin` is HTTPS for the Supervisor too,
+`Contents: read` returns to the supervisor App for `git fetch` — the
+caveat §1.2's F6 row already states. Under the scope limit above, the
+supervisor keeps SSH and `Contents: read` stays out.
+
+### 9.10 Verification and rollback
+
+**Verification is §5, unchanged**, plus one step this section adds:
+
+| # | Step | Expected | Why added |
+|---|---|---|---|
+| **V11** | As `run002-wrk` with the worker token: `gh pr view <n> --repo <throwaway>` — **no `--json`**, exactly as the frozen prompts issue it | **exit 0**, with whatever degradation the missing `checks` permission causes, recorded | §7 R15: the worker App deliberately has no `Checks` permission, and three frozen prompts run this command. If it errors, either the worker needs `Checks: read` after all or the prompts need amending — and a frozen prompt amendment is its own governance act |
+
+§5's existing design property holds and is why the suite is trustworthy:
+**V2b, V3b and V3c must SUCCEED.** A suite in which every step fails proves
+only that the credentials are broken.
+
+**Rollback, by layer, each reversible on its own:**
+
+| Layer | Rollback | Reverses |
+|---|---|---|
+| Branch protection | `gh api -X PUT …/protection --input <(jq .body experiment/github-app/branch-protection-BEFORE.json)` — **or**, in preference, the bytes captured live at runbook step 15 if they differ | the only change visible to anyone outside this host |
+| Installations | uninstall each App from the repository | all three principals' access, at once |
+| Apps | delete each App — removes installations and invalidates every token | the credentials themselves |
+| Keys | `shred` the key files | local key material |
+| Trusted export | `git worktree remove /opt/run-002/gate-<SHA>` | the pinned gate |
+| OS users | `userdel run002-sup run002-wrk; groupdel run002`; restore ownership to `serina` | the OS boundary |
+| Code (runbook 10-12) | revert the commits | the F5 resolution, publisher and token plumbing |
+
+**The BEFORE file is reconstructed from §4.1's recorded GET, not from a
+fresh query.** If the live state has drifted since 2026-10-01, the bytes
+captured at runbook step 15 win over the file. That is why step 15 captures
+before it applies, and the file says so in its own header.
+
+### 9.11 What §9 settles, and what it does not
+
+**Settled** — target and branch; the three principals and their minimum
+permissions; who publishes and who merges; worker permissions and the
+asset-by-asset isolation map; the trusted revision with its git evidence;
+before/after protection with the CI requirement preserved and mechanically
+checked; the F5 resolution and the ordering that makes it safe; the
+expected-head gap and its specified fix; the credential lifecycle; the
+rollback.
+
+**Not settled, and not settleable here:**
+
+| # | Item | Why |
+|---|---|---|
+| 1 | **Both §9.9 decisions** | the operator's, by §43.5(c). Recommendations given; approval pending |
+| 2 | **The pin, at approval time** | if commits land first, re-pin to the then-current HEAD (§9.5 rule 2) |
+| 3 | `Issues: write` for `gh pr comment`; whether `Contents: write` is required alongside `Pull requests: write` for merge and update-branch | GitHub's exact permission mapping. **UNVERIFIED** — confirm on the App creation screen (§7 R7). No docs page was fetched and none is quoted |
+| 4 | Whether `gh pr view` without `--json` needs `Checks` | **UNVERIFIED** — needs a token (§7 R15). V11 |
+| 5 | Which `gh pr merge` flag is this host's expected-head flag | **UNVERIFIED** — a local hook refuses `gh pr` invocations here (§9.7) |
+| 6 | Whether a GitHub App is already installed on the repository | **UNVERIFIED** — needs App-authenticated access (§7 R8) |
+| 7 | **The publisher itself** | does not exist (F7). Every `statuses: write` grant here provisions for unwritten code |
+| 8 | Merge-policy reconciliation — `routing.evaluate_merge` vs `live-gate.js` | handover §43.5(b). §9.5 unblocks its option (i) by deciding the trusted revision; it does not choose the option |
+| 9 | The apparatus threat model | §7 R9: `protocol/SECURITY-THREAT-MODEL-V2.md` is frozen and covers none of this |
+
+---
+
+## 10. The reviewable templates
+
+Under `experiment/github-app/`. **Every file is a TEMPLATE, unapplied, and
+carries that statement in its own header. Deployment is not authorised and
+none of it has been submitted anywhere.**
+
+### 10.1 What is there
+
+| File | What it is |
+|---|---|
+| `app-manifest-gate.json` | permission declaration for `run-002-independent-review` — the publisher |
+| `app-manifest-supervisor.json` | permission declaration for `run-002-supervisor` — the merger (the principal F2 says is missing) |
+| `app-manifest-worker.json` | permission declaration for `run-002-worker` |
+| `branch-protection-BEFORE.json` | the exact `PUT` body restoring §4.1's verified current state — **the rollback artefact** |
+| `branch-protection-AFTER.json` | the exact `PUT` body for §4.2 / §9.6, with `__GATE_APP_ID__` unresolved |
+| `env-var-names.md` | every config and environment variable **name** the scheme would use. **Names only; no value may ever be written there** |
+| `check-templates.py` | the checker below |
+
+Each JSON wraps its payload so the notice cannot leak into a request: the
+manifests put it in `_TEMPLATE_NOTICE` beside a `manifest` key, the
+protection bodies beside a `body` key. **Submit or `--input` the inner key
+only** — `jq .body …` / `jq .manifest …`. An unknown key in a real request
+is at best ignored and at worst rejected.
+
+### 10.2 The checker, and what running it proved
+
+Run from the repository root — it makes **no network call, no GitHub call,
+touches no credential and writes nothing**:
+
+```
+$ python3 experiment/github-app/check-templates.py
+```
+
+**Result, 2026-10-02 at `b66944a`: 52 checks, 52 PASS, exit 0.** It
+asserts, mechanically rather than by assertion in prose:
+
+- **A** — all five JSON templates parse, and each carries its TEMPLATE notice.
+- **B** — the AFTER body preserves `ci` @ `app_id` 15368 identically to
+  BEFORE; restates every field BEFORE sets; omits `contexts`; sends
+  `required_pull_request_reviews` as an object; `enforce_admins` true;
+  `restrictions` null; and still carries the **unresolved**
+  `__GATE_APP_ID__` placeholder — a real App ID in a template would mean an
+  App exists, and none does.
+- **C** — exactly one principal may write a commit status and it is the
+  gate; the gate holds `checks: read` (**F1**); a principal exists that can
+  merge (**F2**); that principal cannot write a status; `administration`
+  and `actions` read are present (**F3, F4**); and the worker holds none of
+  `statuses`, `checks`, `administration`, `actions`.
+- **D** — all nineteen call sites behind §9.3 still contain the cited call
+  at the cited line. If one moves, the check reports the line it moved to
+  rather than passing silently, so the permission set cannot drift away
+  from the code. **This check already earned itself:** it is how
+  `prompts/accessibility.md`'s drift from `:31-32` to `:33-34` was found
+  (§8).
+- **E** — **F7 still holds**: `git grep statuses/ -- '*.py' '*.js'` returns
+  nothing outside `experiment/`, so nothing in the repository posts a commit
+  status. And §4.3a holds: `config/experiment.json` → `required_checks` is
+  still exactly `["ci"]`.
+- **F** — the TRUSTED APPARATUS REVISION stated in §9.5 is this checkout's
+  `HEAD`.
+
+**Check F was watched failing.** The checker was written before §9.5
+existed, and its first run reported `FAIL  F. the proposal states a 40-hex
+TRUSTED APPARATUS REVISION`, exit 1, with every other check passing (44 of
+them at that point; the suite has since grown to 52 by pinning the eight
+prompt call sites). It passed only once the pin was written into §9.5. A
+guard nobody has watched fail is not a guard, and that failing run is the
+only evidence that this one is real.
+
+**What the checker does not do, deliberately:** it is not in `tests/`, is
+not collected by any suite, has no filename a test runner matches, and is
+run by hand. It checks the templates against the repository — **it cannot
+check them against GitHub**, which is exactly where items 3–6 of §9.11 live.
+
+---
 
 **No App, credential, token, key, account, OS user, container or
 repository was created. No protection, permission, setting, group or host

@@ -1,0 +1,43 @@
+{
+  "_TEMPLATE_NOTICE": [
+    "TEMPLATE — UNAPPLIED. DEPLOYMENT IS NOT AUTHORISED.",
+    "No GitHub App was created, no credential exists, nothing was submitted.",
+    "This file describes what WOULD be submitted to the GitHub App manifest",
+    "flow (POST https://github.com/settings/apps/new) if, and only if, the",
+    "operator approves experiment/GITHUB-APP-WORKER-ISOLATION-PROPOSAL.md §9.",
+    "Submit the value of the 'manifest' key only. The '_TEMPLATE_NOTICE' and",
+    "'_principal' keys are documentation and MUST NOT be submitted.",
+    "Principal 1 of 3: the PUBLISHER. It is the only principal permitted to",
+    "write a commit status, and it has no write permission of any other kind,",
+    "so it cannot merge what it blessed (§2.3, verification step V8)."
+  ],
+  "_principal": {
+    "role": "gate / publisher",
+    "runs_as_os_user": "run002-sup",
+    "private_key_mode": "0400",
+    "private_key_owner": "run002-sup",
+    "resolves_findings": ["F1 (checks:read present)"],
+    "must_not_have": [
+      "contents (any level)",
+      "pull_requests write",
+      "administration (any level)",
+      "actions (any level)"
+    ]
+  },
+  "manifest": {
+    "name": "run-002-independent-review",
+    "url": "https://github.com/serina-mcfall/wellbeing-run-002",
+    "description": "Publishes the run-002/independent-review commit status for Run 002. Read-only everywhere except commit statuses. Cannot merge.",
+    "public": false,
+    "hook_attributes": {
+      "active": false
+    },
+    "default_events": [],
+    "default_permissions": {
+      "metadata": "read",
+      "checks": "read",
+      "statuses": "write",
+      "pull_requests": "read"
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "_TEMPLATE_NOTICE": [
+    "TEMPLATE — UNAPPLIED. DEPLOYMENT IS NOT AUTHORISED.",
+    "No GitHub App was created, no credential exists, nothing was submitted.",
+    "Submit the value of the 'manifest' key only; '_TEMPLATE_NOTICE' and",
+    "'_principal' are documentation and MUST NOT be submitted.",
+    "Principal 3 of 3: the WORKER. Every product worker — builder, fixer,",
+    "reviewer, security, accessibility, observer — receives a short-lived",
+    "installation token minted from THIS App's key by run002-sup. The key",
+    "itself is never readable by the worker UID.",
+    "It has no statuses permission at all, which is the whole point: the",
+    "thing being judged cannot publish the verdict on itself (§2.3)."
+  ],
+  "_principal": {
+    "role": "product workers (all roles share this installation)",
+    "runs_as_os_user": "run002-wrk",
+    "private_key_mode": "0400",
+    "private_key_owner": "run002-sup",
+    "token_delivery": "1-hour installation token minted per worker by run002-sup and injected into the worker process environment; the worker never sees the key",
+    "must_not_have": [
+      "statuses (any level)",
+      "checks (any level)",
+      "administration (any level)",
+      "actions (any level)"
+    ],
+    "unverified": [
+      "Bare 'gh pr view <n> --repo <repo>' (prompts/reviewer.md:16, security.md:22, accessibility.md:34) is run WITHOUT --json. Whether gh's default view requests the check-run surface, and therefore whether it degrades or errors under a token with no 'checks' permission, has NOT been tested. Verification step V11 tests it on the throwaway repository before any worker depends on it."
+    ]
+  },
+  "manifest": {
+    "name": "run-002-worker",
+    "url": "https://github.com/serina-mcfall/wellbeing-run-002",
+    "description": "Run 002 product workers: push branches and open pull requests. Cannot post a commit status, cannot merge, cannot read branch protection.",
+    "public": false,
+    "hook_attributes": {
+      "active": false
+    },
+    "default_events": [],
+    "default_permissions": {
+      "metadata": "read",
+      "contents": "write",
+      "pull_requests": "write"
+    }
+  }
+}

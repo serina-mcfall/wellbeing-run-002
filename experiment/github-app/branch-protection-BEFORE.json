@@ -1,0 +1,41 @@
+{
+  "_TEMPLATE_NOTICE": [
+    "TEMPLATE — UNAPPLIED. DEPLOYMENT IS NOT AUTHORISED.",
+    "Nothing has been applied and no protection setting was changed.",
+    "This is the ROLLBACK artefact: the request body that restores",
+    "serina-mcfall/wellbeing-run-002 main to the state VERIFIED LIVE",
+    "(read-only GET) on 2026-10-01 and recorded in",
+    "experiment/GITHUB-APP-WORKER-ISOLATION-PROPOSAL.md §4.1.",
+    "It is reconstructed FROM that recorded GET, not from a fresh query.",
+    "Before applying the AFTER payload, capture the live GET output to a file",
+    "as well (runbook step 15) — if the live state has drifted since",
+    "2026-10-01, the captured bytes win over this file."
+  ],
+  "_note_required_signatures": "required_signatures is NOT part of this endpoint. It is managed by PUT/DELETE /repos/{repo}/branches/{branch}/required_signatures and is currently enabled=false. This PUT neither reads nor changes it.",
+  "method": "PUT",
+  "endpoint": "repos/serina-mcfall/wellbeing-run-002/branches/main/protection",
+  "command": "gh api -X PUT repos/serina-mcfall/wellbeing-run-002/branches/main/protection --input <(jq .body experiment/github-app/branch-protection-BEFORE.json)",
+  "body": {
+    "required_status_checks": {
+      "strict": true,
+      "checks": [
+        { "context": "ci", "app_id": 15368 }
+      ]
+    },
+    "enforce_admins": false,
+    "required_pull_request_reviews": {
+      "dismiss_stale_reviews": false,
+      "require_code_owner_reviews": false,
+      "required_approving_review_count": 1,
+      "require_last_push_approval": false
+    },
+    "restrictions": null,
+    "required_linear_history": false,
+    "allow_force_pushes": false,
+    "allow_deletions": false,
+    "block_creations": false,
+    "required_conversation_resolution": false,
+    "lock_branch": false,
+    "allow_fork_syncing": false
+  }
+}
