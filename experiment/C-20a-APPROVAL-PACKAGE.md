@@ -11,8 +11,8 @@ the decision.
 | Branch | `wip/c05-1-persistence` |
 | State | **NOTHING CREATED. NOTHING CHANGED. NOTHING PUBLISHED.** |
 | Supersedes | handover §41.7's permission set, entirely |
-| Also supersedes | the proposal's §7 R2 and runbook step 11, both of which say the publisher "does not exist". It exists — `control/publisher.py`. It still has no transport, which is the half of F7 that remains |
-| Revised | 2026-10-02, after an independent review. Eight corrections are marked **CORRECTED** or **ADDED** in place; two of them (actions 3a/3b and the protection capture) change the deployment sequence |
+| Also supersedes | the proposal's §7 R2 and runbook step 11, both of which say the publisher "does not exist". It exists — `control/publisher.py` — and so does its transport (`status_transport.py`). **F7 is closed.** What replaces it is narrower and still true: no request has ever been sent |
+| Revised | 2026-10-02, across three passes: an independent review of this document, an adversarial review of the code it describes, and an attempt to actually RUN the export. Every change is marked **CORRECTED**, **ADDED** or **UPDATED** in place. Four change the deployment sequence: throwaway-first installation (3a/10c), the protection capture (11a), the dependency install (7b), and `gh.py`'s token (6b) |
 
 **What approving this authorises:** the twenty actions in §9, in that
 order. Nothing else, and nothing until you say so.
@@ -39,13 +39,16 @@ this" to "the gate approved this".** If that trade is unacceptable, reject
 the arrangement rather than trimming it — every part of it exists to make
 that single substitution safe.
 
-**Three things to read before deciding, because each is a claim the code
-did not originally support and now does:** the `Commit statuses: write`
-permission still has **no call site** (§2); the
-`blockedOnlyByPendingIndependentReview` flag **cannot tell its own missing
-context from any other unmet protection rule**, though it can never cause
-a merge (§4); and two adapters **deny every pull request when run from the
-export** unless action 8 is built the way §7 specifies.
+**Four things to read before deciding. Each was a claim this document
+made that the code did not support, found by checking rather than by
+reasoning:** the `blockedOnlyByPendingIndependentReview` flag **cannot
+tell its own missing context from any other unmet protection rule**,
+though it can never cause a merge (§4); two adapters **deny every pull
+request when run from the export** unless action 8 is built the way §7
+specifies; the export **cannot load the gate at all** without action 7b,
+reproduced as `Cannot find module 'ajv/dist/2020'`; and the transport now
+exists but **has never sent a request**, which is what `Commit statuses:
+write` is being approved for (§2).
 
 ---
 
@@ -77,7 +80,7 @@ Never "All repositories". Webhooks disabled, zero events subscribed, all three.
 |---|---|---|---|
 | Metadata | read | read | read |
 | Checks | **read** | read | — |
-| Commit statuses | **read + write** *(no call site — see below)* | read | — |
+| Commit statuses | **read + write** *(call site: `status_transport.py` — see below)* | read | — |
 | Pull requests | read | write | write |
 | Contents | — | write *(unverified, §8)* | write |
 | Administration | — | read | — |
