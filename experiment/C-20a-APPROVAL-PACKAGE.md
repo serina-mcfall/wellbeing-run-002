@@ -372,9 +372,25 @@ never `config.REPO_ROOT`, which is a mutable tree.
 > patched in place. This is the F5 deadlock again, in a different
 > component, and it would have been found on launch day.
 >
+> **IT IS TWO ADAPTERS, NOT ONE.** `apparatus/adapters/reviewer-identity.js:252-253`
+> derives `RUNTIME_DIR` from `__dirname` the same way. `.runtime/` is
+> gitignored, so `git worktree add` creates none in the export —
+> `resolveRun002ReviewerIdentity` returns `LEDGER_UNREADABLE` →
+> `REVIEWER_UNVERIFIED` → **also a permanent deny, also unpatchable under
+> `chmod -R a-w`.** Verified independently, not inherited.
+>
+> The other two wrappers are **not** traps, and the distinction is the
+> rule: `task-record.js` and `ci-result.js` derive roots that feed only
+> **config** (`config/tasks.json`, `config/experiment.json`), and reading
+> config from the pinned export is exactly right.
+>
+> > **THE RULE, FOR WHOEVER BUILDS ACTION 8: config from the export, facts
+> > from the live checkout.**
+>
 > **The invoker must therefore call the low-level
 > `resolveTrustedHeadSha(identity, { repoRoot })`** with the LIVE checkout
-> as `repoRoot`, not the convenience wrapper.
+> as `repoRoot`, not the convenience wrapper — and the same for the
+> reviewer adapter's low-level form.
 >
 > **Which forces something to be said out loud:** the gate's *code* comes
 > from the immutable export, but its *git facts* necessarily come from the
@@ -477,6 +493,10 @@ before 8–10 deadlocks every product PR permanently.
 | **C-04c**, the ledger cross-check that narrows C-22 without closing it | `control/routing.py`, `control/supervisor.py`, 26 tests |
 | The pin, and a check that fails when gate code moves under it | `check-templates.py` `F1`/`F2` — drift set now also covers `bin/` and `.github/` |
 | **The worker environment allow-list** for action 6, written and tested, **deliberately not wired** — a test pins the unwired status so taking action 6 is a decision, not a drift | `control/worker_entry.py::worker_child_env`, `tests/test_c22_worker_env_allowlist.py` (10 tests) |
+| **The gate invoker** (action 8, Python half): required+undefaulted export path, the live repo root refused if it is the export, the export's actual revision compared to the pin, 11 finite fail-closed outcomes, never raises | `control/gate_invoker.py` |
+| **The publication path** (action 9, the join): gate invoker → publisher, same environment switch checked **before** any subprocess, no default transport. Placed in `experiment/github-app/` on purpose, so `control/` and `bin/` stay publisher-free and that guarantee survives literally | `experiment/github-app/publication_path.py` |
+| Both of the above **verified as a connected path against simulated services** — real `node`, a real throwaway export, a real throwaway git repo, and a gate program the test writes. 60 tests, 10 mutations | `tests/test_c20a_publication_path.py` |
+| **The sixth provenance condition**, which C-04c recorded as unmatchable. It closed a real hole: the merge path never required a `REVIEW_DISPATCHED` at all, so one appended `REVIEW_RESULT` attributed to nobody satisfied the whole code-review leg | `control/routing.py::_review_worker_attests`, `tests/test_c04c_merge_attestation.py` |
 | The recursive protection-restatement check, and the nested field it immediately caught | `check-templates.py` check B, `branch-protection-AFTER.json` |
 
 ---

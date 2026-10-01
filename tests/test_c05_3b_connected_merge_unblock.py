@@ -67,7 +67,7 @@ from control import clock, config, providers, routing  # noqa: E402
 from control import state as state_mod  # noqa: E402
 from control import supervisor as supervisor_mod  # noqa: E402
 from mergeable_evidence import (  # noqa: E402
-    accessibility_review_leg, security_leg)
+    accessibility_review_leg, review_worker, security_leg)
 from test_merge_boundary import (  # noqa: E402
     BRANCH_FMT, DIFF_HASH, MERGED_SHA, REVIEWED_HEAD, MergeBoundaryCase, TZ)
 
@@ -79,6 +79,10 @@ MERGING = "TASK-001"
 UNBLOCKS = ("TASK-002", "TASK-004")
 STAYS_BLOCKED = "TASK-006"
 PR = 100
+# The reviewer worker this chain's injected review is attributed to - the
+# name `dispatch_reviewer` would mint for cycle 1, which is what `approve()`
+# records as `review_cycles`.
+REVIEW_WORKER = review_worker(MERGING, 1)
 # A commit the pull request no longer points at, used to express staleness.
 STALE_HEAD = "9" * 40
 
@@ -221,9 +225,21 @@ class ConnectedMergeUnblockCase(MergeBoundaryCase):
             if drop_leg == "accessibility_review" and \
                     event_type == "ACCESSIBILITY_REVIEW_RESULT":
                 continue
+            # The review leg is a PAIR. `ledger_attests_merge` requires a
+            # REVIEW_DISPATCHED bound to this head and requires the verdict
+            # to name a worker that dispatch names, so injecting the result
+            # alone would describe a verdict for a commit nothing was ever
+            # dispatched against - which the gate now refuses, correctly.
+            extra = ({"agent_id": REVIEW_WORKER}
+                     if event_type == routing.REVIEW_RESULT_EVENT else {})
             self.sup.ledger.append(
                 event_type, task_id=MERGING, pr_id=PR, outcome=outcome,
-                metadata_redacted={"head": REVIEWED_HEAD})
+                metadata_redacted={"head": REVIEWED_HEAD}, **extra)
+            if event_type == routing.REVIEW_RESULT_EVENT:
+                self.sup.ledger.append(
+                    routing.REVIEW_DISPATCH_EVENT, task_id=MERGING, pr_id=PR,
+                    outcome="DISPATCHED", agent_id=REVIEW_WORKER,
+                    metadata_redacted={"head": REVIEWED_HEAD})
 
         self.store._write(doc)
         return doc

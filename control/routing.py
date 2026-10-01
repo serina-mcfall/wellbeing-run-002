@@ -497,12 +497,22 @@ MERGE_ATTESTATIONS: tuple[tuple[str, str], ...] = (
     ("ACCESSIBILITY_REVIEW_RESULT", accessibility_contract.ACCESSIBILITY_PASS),
 )
 
+# The dispatch half of the review pair. NOT named MERGE_* on purpose: the
+# differential inventory harvests every MERGE_* string constant in this
+# module as a condition code, and this is an event type, not a condition.
+REVIEW_DISPATCH_EVENT = "REVIEW_DISPATCHED"
+REVIEW_RESULT_EVENT = "REVIEW_RESULT"
+
 MERGE_ATTESTATION_EVENTS: tuple[str, ...] = tuple(
-    event for event, _ in MERGE_ATTESTATIONS)
+    event for event, _ in MERGE_ATTESTATIONS) + (REVIEW_DISPATCH_EVENT,)
 
 MERGE_ATTESTATION_MISSING = "LEDGER_ATTESTATION_MISSING"
 MERGE_ATTESTATION_UNREADABLE = "LEDGER_UNREADABLE"
 MERGE_ATTESTATION_CONTRADICTED = "LEDGER_ATTESTATION_CONTRADICTED"
+# C-04c follow-up. live-gate.js's REVIEW_PROVENANCE_WORKER_MISMATCH, matched
+# on this side. See `_review_worker_attests` for exactly what it proves and
+# what it does not.
+MERGE_ATTESTATION_WORKER_MISMATCH = "LEDGER_ATTESTATION_WORKER_MISMATCH"
 
 
 def _attested_head(event) -> str | None:
@@ -527,6 +537,113 @@ def _attested_head(event) -> str | None:
     return None
 
 
+def _agent_id(event) -> str | None:
+    """The worker an event attributes itself to, or None if it names none.
+
+    An absent, blank or non-string `agent_id` is None rather than a value
+    that could compare equal to another absent one. Two events that both
+    name nobody must not be read as two events that name the same worker -
+    that is precisely how an identity check becomes a tautology.
+    """
+    if not isinstance(event, dict):
+        return None
+    value = event.get("agent_id")
+    return value if isinstance(value, str) and value else None
+
+
+def _review_worker_attests(events, head_sha: str) -> tuple[bool, str]:
+    """Whether the passing review at this head came from a worker this
+    control plane dispatched AGAINST THIS HEAD.
+
+    THE DIFFERENCE THIS CLOSES. Until this existed the Python merge path
+    required only that SOME `REVIEW_RESULT` at this head carried
+    `REVIEW_PASS`. It never required a `REVIEW_DISPATCHED` for the head at
+    all, and it never looked at `agent_id` - so a single appended result
+    event, attributed to nobody, satisfied the whole review leg.
+    live-gate.js has always required the pair AND the identity
+    (REVIEW_PROVENANCE_MISSING, REVIEW_PROVENANCE_WORKER_MISMATCH); this is
+    the same two requirements on this side.
+
+    TWO CHECKS, DELIBERATELY:
+
+      * A `REVIEW_DISPATCHED` bound to this head must exist. A verdict for
+        a commit nothing was ever dispatched against is not a review of
+        that commit, whatever it says about itself.
+      * EVERY `REVIEW_RESULT` at this head must name a worker that appears
+        on one of those dispatches. Membership, not "the last one": at ONE
+        head a re-dispatch reviews the same commit, so an earlier pass of
+        that same commit is still a pass of that commit. What membership
+        rules out is the thing that matters - a verdict attributed to a
+        worker this head's review was never dispatched to, including a
+        builder, a fixer, or nobody at all.
+
+    WHAT THIS DOES NOT PROVE, STATED SO THE CHECK CANNOT READ STRONGER
+    THAN IT IS. The reviewer's worker name is `<task>-review-<cycle>` and
+    is NOT SHA-bound the way `security_worker_name` and
+    `accessibility_review_worker_name` are, so the name itself carries no
+    commit. The head binding here comes from the two events' own
+    `head_sha`, never from the name. And the ledger has no hash chain and
+    is writable by the UID that runs the workers, so a forger who appends
+    BOTH events consistently still passes. This raises the cost and the
+    visibility of a forgery; it does not prevent one. C-22 stays open.
+
+    WHY THE NAME WAS NOT SHA-BOUND HERE, so the next reader does not have
+    to re-derive it. Length is not the obstacle: "<task>-review-<40>-0001"
+    is 61 characters for this run's eight-character task ids, inside
+    SECURITY_WORKER_RE's 64, with the same overhead arithmetic
+    SECURITY_NAME_OVERHEAD does. The obstacles are two.
+
+      * THE DEFECT SHAPE IS NOT THE SAME ONE. The reason the security name
+        had to carry its sha is that the ordinal RESTARTS AT 1 FOR A NEW
+        HEAD, so the name repeats across a head change by construction.
+        The reviewer's number is `record["review_cycles"] + 1`, a counter
+        that is initialised once by `blank_pr_record`, incremented only in
+        `_commit_reviewer_dispatch` and never reset, so within one pull
+        request record the name cannot repeat across heads. A repeat
+        needs a SECOND PR RECORD for one task - `attach_pr` minting a
+        fresh record at a new number - which the transition table permits
+        (REVIEW/PR_OPEN -> STALE -> READY, or HUMAN_REQUIRED -> READY,
+        then a second build that opens a new pull request on the branch)
+        but which no automated routing path drives on its own. It is
+        therefore NOT reproduced here, and must not be recorded as
+        reproduced.
+      * THE NAME FORMAT IS A CROSS-LANGUAGE CONTRACT.
+        apparatus/adapters/reviewer-identity.js matches
+        `^<task>-review-[0-9]+$` and
+        apparatus/fixture-preflight/production-gate.js re-derives the same
+        string. Changing the Python spelling alone would make the
+        JavaScript reviewer adapter reject every real worker name, so the
+        change is a coordinated two-language edit, not a one-line one.
+
+    That is why the head binding here is taken from the events rather than
+    from the name. The asymmetry with `security_worker_name` and
+    `accessibility_review_worker_name` is REAL AND STILL OPEN; what this
+    function changes is that the merge gate no longer depends on it.
+    """
+    dispatched = {
+        _agent_id(e) for e in events
+        if isinstance(e, dict)
+        and e.get("event_type") == REVIEW_DISPATCH_EVENT
+        and _attested_head(e) == head_sha
+    }
+    dispatched.discard(None)
+    if not dispatched:
+        # No dispatch names this head. The review leg is unattested for the
+        # same reason an absent REVIEW_RESULT leaves it unattested, so it
+        # reports the same condition rather than inventing a second one.
+        return False, MERGE_ATTESTATION_MISSING
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("event_type") != REVIEW_RESULT_EVENT:
+            continue
+        if _attested_head(event) != head_sha:
+            continue
+        if _agent_id(event) not in dispatched:
+            return False, MERGE_ATTESTATION_WORKER_MISMATCH
+    return True, ""
+
+
 def ledger_attests_merge(inspection, head_sha: str) -> tuple[bool, str]:
     """Whether the durable record independently attests all four legs.
 
@@ -534,7 +651,7 @@ def ledger_attests_merge(inspection, head_sha: str) -> tuple[bool, str]:
     the caller does the reading, which keeps the merge transaction's one
     file read at the call site rather than hidden in a predicate.
 
-    FAIL CLOSED, THREE WAYS:
+    FAIL CLOSED, FOUR WAYS:
 
       * an INCOMPLETE inspection denies. A truncated line is not an
         absent event, and treating "we could not read all of it" as "it
@@ -547,6 +664,9 @@ def ledger_attests_merge(inspection, head_sha: str) -> tuple[bool, str]:
         also exists. Two disagreeing attestations about one commit are
         unresolved evidence, and taking the convenient one is how a
         re-run that failed becomes a merge.
+      * a review at this head whose verdict is attributed to a worker no
+        dispatch for this head names denies - see `_review_worker_attests`
+        for what that proves and what it does not.
     """
     if inspection is None:
         return False, MERGE_ATTESTATION_UNREADABLE
@@ -577,7 +697,10 @@ def ledger_attests_merge(inspection, head_sha: str) -> tuple[bool, str]:
             return False, MERGE_ATTESTATION_MISSING
         if outcomes - {passing}:
             return False, MERGE_ATTESTATION_CONTRADICTED
-    return True, ""
+    # Last, so it is reachable only with every leg already attested: a
+    # worker-identity complaint about a review that is missing anyway would
+    # name the wrong fault.
+    return _review_worker_attests(events, head_sha)
 
 
 @dataclass(frozen=True)

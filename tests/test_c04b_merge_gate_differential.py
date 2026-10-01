@@ -47,10 +47,23 @@ write. Measured, then reproduced: see ThreatModelCase in
 tests/test_c04c_merge_attestation.py, where six field writes turn a pull
 request with no review and no evidence into MERGE_OK.
 
-Five of the six provenance conditions are now matched on the Python side
-by `routing.ledger_attests_merge`, enforced in `supervisor.attempt_merge`.
-The sixth, WORKER_MISMATCH, is recorded in JS_ONLY with why it cannot be
-matched today.
+All six provenance conditions are now matched on the Python side by
+`routing.ledger_attests_merge`, enforced in `supervisor.attempt_merge`.
+
+The sixth, WORKER_MISMATCH, was recorded in JS_ONLY as unmatchable because
+the reviewer's worker name `<task>-review-<cycle>` is not SHA-bound. That
+reason was about the NAME and the check does not depend on it: both
+REVIEW_DISPATCHED and REVIEW_RESULT carry their own `head_sha`, so the
+head binding comes from the events. `routing._review_worker_attests`
+requires a dispatch bound to this head and requires every result at this
+head to name a worker that dispatch names. The Python gate previously
+required NO dispatch event at all, so a lone appended REVIEW_RESULT
+attributed to nobody satisfied the whole review leg.
+
+WHAT STAYS TRUE. The reviewer's name is still not SHA-bound, and that
+asymmetry with `security_worker_name` and
+`accessibility_review_worker_name` is unchanged - it is recorded in
+`routing._review_worker_attests` rather than closed here.
 
 WHAT THAT CHANGES, AND WHAT IT DOES NOT. A forged merge now requires
 editing state.json AND appending four consistent events to the durable
@@ -113,6 +126,9 @@ PYTHON_CONDITIONS = frozenset({
     "LEDGER_ATTESTATION_MISSING",
     "LEDGER_UNREADABLE",
     "LEDGER_ATTESTATION_CONTRADICTED",
+    # The sixth provenance condition, matched after C-04c recorded it as the
+    # one that could not be. See SHARED and routing._review_worker_attests.
+    "LEDGER_ATTESTATION_WORKER_MISMATCH",
 })
 
 JS_CONDITIONS = frozenset({
@@ -177,6 +193,24 @@ SHARED = {
     "two attestations about one commit do not disagree":
                                        ("LEDGER_ATTESTATION_CONTRADICTED",
                                         "REVIEW_PROVENANCE_CONFLICT"),
+    # The sixth, matched after C-04c recorded it as the one that could not
+    # be. The reason recorded then was that the reviewer's worker name is
+    # not SHA-bound, so "a check over it would be weaker than it looks".
+    # That was true about the NAME and false about the CHECK: the head
+    # binding does not have to come from the name, because both review
+    # events carry their own head_sha. `routing._review_worker_attests`
+    # requires a REVIEW_DISPATCHED bound to this head and requires every
+    # REVIEW_RESULT at this head to name a worker that dispatch names -
+    # exactly the comparison live-gate.js makes, with the binding taken
+    # from the events rather than from the spelling of a name.
+    #
+    # The limit is written into that function's docstring rather than
+    # implied here: the name is still not SHA-bound, and the ledger is
+    # still writable by the UID that runs the workers, so this is tamper
+    # evidence and not prevention. C-22 stays open.
+    "the verdict came from a worker dispatched against this head":
+                                       ("LEDGER_ATTESTATION_WORKER_MISMATCH",
+                                        "REVIEW_PROVENANCE_WORKER_MISMATCH"),
 }
 
 # Policy ONLY the Python gate has, with why the JavaScript one does not.
@@ -225,14 +259,30 @@ JS_ONLY = {
     "HEAD_SHA_UNVERIFIED":
         "An INDEPENDENT git resolution of the head, cross-checked against "
         "GitHub's. NOT PORTED, and this is the most substantive of these. "
-        "The Python gate anchors on pr['headRefOid'] alone, so a GitHub "
-        "observation that disagreed with git would not be caught. The "
-        "Supervisor pushes the branch itself and re-observes under its own "
-        "lock, so a divergence means something broader is already wrong; "
-        "adding a git call per merge candidate inside the merge "
-        "transaction buys a second opinion at the cost of another external "
-        "call in the one transaction C-14 wants shortest. Recorded as a "
-        "known, accepted difference.",
+        "RE-EXAMINED and still not ported, for a reason about the "
+        "REQUIREMENT rather than about the two gates having different "
+        "inputs. What git-head.js resolves is a LOCAL ref - a registered "
+        "worktree's HEAD, or a run-002/ branch ref in this checkout "
+        "(apparatus/adapters/git-head.js). Nothing in control/ ever "
+        "fetches: `grep -rn 'git fetch' control/` is empty, and every "
+        "gh.git call in the control plane is rev-parse, status, "
+        "worktree or branch work on refs this repository already has. So "
+        "a local ref is not a second observation of the same commit; it "
+        "is a ref the control plane never updates. Two consequences, and "
+        "the first is disqualifying on its own: `gh.update_branch` "
+        "reconciles a BEHIND branch ON GITHUB, producing a head this "
+        "checkout has never seen, so an unconditional cross-check would "
+        "make every reconciled pull request permanently unmergeable - it "
+        "would deny the reconciliation path the gate is required to "
+        "allow. And the reviewer's own worktree, the one checkout that "
+        "did hold the reviewed commit, is deliberately released at "
+        "on_reviewer_finished so review cycles do not accumulate "
+        "checkouts, so by merge time it is gone. A second opinion worth "
+        "having would have to come from a DIFFERENT remote surface (the "
+        "git protocol rather than the REST API), which is a new external "
+        "call inside the one transaction C-14.1 requires shortest. "
+        "Recorded as a known, accepted difference; the thing that would "
+        "change the decision is a control plane that fetches.",
     "EVIDENCE_SHA_MISSING":
         "A package field. review_gate_fires compares EVERY leg's claim sha "
         "to the observed head directly, which is the same rule applied to "
@@ -243,9 +293,22 @@ JS_ONLY = {
         "Supervisor reached this record THROUGH the task; there is no "
         "claimed identifier to resolve.",
     "REVIEWER_UNVERIFIED":
-        "Which worker produced the review. The Supervisor dispatched that "
-        "worker and read its output under its own lock, so the identity is "
-        "known by construction rather than asserted by a document.",
+        "reviewer-identity.js's own refusal: no REVIEW_RESULT in the "
+        "package's ledger slice resolves to a worker whose NAME matches "
+        "the <task>-review-<cycle> shape. The reason recorded here before "
+        "- that the identity is 'known by construction' because the "
+        "Supervisor dispatched the worker under its own lock - is struck: "
+        "that is the same sentence C-04c measured and found false, "
+        "because a worker can write the state the construction rests on. "
+        "The Python side now reaches BOTH of this condition's outcomes "
+        "through the ledger instead: no reviewer resolves at this head is "
+        "LEDGER_ATTESTATION_MISSING, and a verdict from a worker no "
+        "dispatch at this head names is "
+        "LEDGER_ATTESTATION_WORKER_MISMATCH. It stays listed here because "
+        "the two gates reach it through one code rather than two, not "
+        "because the policy is unmatched - and because the Python check "
+        "compares against an actual dispatch for the head rather than "
+        "against a name SHAPE, which is the stronger comparison.",
     "REVIEW_PROVENANCE_UNBOUND":
         "An attestation that names NO head. The Python side reaches the "
         "same refusal through LEDGER_ATTESTATION_MISSING: an event whose "
@@ -255,15 +318,6 @@ JS_ONLY = {
         "An attestation naming a DIFFERENT head. Same as "
         "REVIEW_PROVENANCE_UNBOUND - it does not match, so the leg is "
         "unattested and LEDGER_ATTESTATION_MISSING fires.",
-    "REVIEW_PROVENANCE_WORKER_MISMATCH":
-        "STILL NOT PORTED, and the only part of the provenance group that "
-        "is not. live-gate.js checks WHICH WORKER produced the review. The "
-        "Python side cannot do the equivalent for all four legs: only "
-        "REVIEW_RESULT logs agent_id, and the code reviewer's worker name "
-        "(<task>-review-<cycle>) is not SHA-bound, so a check over it "
-        "would be weaker than it looks while reading as if it were not. "
-        "C-04 already records that asymmetry as an open defect. This is a "
-        "recorded gap, not an oversight.",
     "PR_UNOBSERVED":
         "The Supervisor refuses before reaching the gate: execute_merges "
         "logs MERGE_BLOCKED and continues when gh.pr_view returns None, so "

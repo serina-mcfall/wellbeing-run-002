@@ -123,9 +123,19 @@ def with_complete_evidence(record: dict, sha: str,
 # docstring gives: copies drift independently, and a fixture that drifts
 # from the shape under test stops exercising anything.
 
+def review_worker(task_id: str = "TASK-001", cycle: int = 1) -> str:
+    """The reviewer worker name `supervisor.dispatch_reviewer` would mint.
+
+    `f"{task['id'].lower()}-review-{cycle}"`, reproduced here rather than
+    imported because the Supervisor builds it inline. It is NOT SHA-bound -
+    see `routing._review_worker_attests` for what that costs.
+    """
+    return f"{task_id.lower()}-review-{cycle}"
+
+
 def attestation_events(sha: str, task_id: str = "TASK-001",
-                       pr_id: int = 100) -> tuple[dict, ...]:
-    """The four ledger events a real run writes alongside the record.
+                       pr_id: int = 100, cycle: int = 1) -> tuple[dict, ...]:
+    """The ledger events a real run writes alongside the record.
 
     `task_id` here is the LEDGER's spelling - `self.log(task_id=task["id"])`
     uses the uppercase task identifier, while `complete_evidence` takes the
@@ -134,27 +144,43 @@ def attestation_events(sha: str, task_id: str = "TASK-001",
     silently stops matching.
 
     The head is carried in `metadata_redacted`, which is where
-    `Ledger.append` puts it for all four: `head_sha` is not in
+    `Ledger.append` puts it for all four results: `head_sha` is not in
     `ledger.FIELDS`, and the three accessibility/security legs pass
     `metadata_redacted={"head": ...}` directly.
+
+    THE REVIEW PAIR. `REVIEW_DISPATCHED` is emitted too, and both review
+    events carry `agent_id`, because `ledger_attests_merge` now requires a
+    dispatch bound to this head and requires the verdict to name a worker
+    that dispatch names. A real run writes exactly this pair
+    (`_commit_reviewer_dispatch` and `on_reviewer_finished`), so a fixture
+    without it was describing a run that cannot happen.
     """
-    return tuple(
+    worker = review_worker(task_id, cycle)
+    events = [
         {"event_type": event_type, "task_id": task_id, "pr_id": pr_id,
-         "outcome": outcome, "metadata_redacted": {"head": sha}}
+         "outcome": outcome, "metadata_redacted": {"head": sha},
+         **({"agent_id": worker}
+            if event_type == routing.REVIEW_RESULT_EVENT else {})}
         for event_type, outcome in routing.MERGE_ATTESTATIONS
-    )
+    ]
+    events.append({"event_type": routing.REVIEW_DISPATCH_EVENT,
+                   "task_id": task_id, "pr_id": pr_id, "outcome": "DISPATCHED",
+                   "agent_id": worker, "metadata_redacted": {"head": sha}})
+    return tuple(events)
 
 
 def attest(ledger, sha: str, task_id: str = "TASK-001",
-           pr_id: int = 100) -> None:
-    """Append those four events to a real `Ledger`.
+           pr_id: int = 100, cycle: int = 1) -> None:
+    """Append those events to a real `Ledger`.
 
     Uses `Ledger.append` rather than writing lines directly, so the events
     go through the same stamping, redaction and locking a live one would -
     a fixture that bypassed `append` could pass while the real writer was
     broken.
     """
-    for event in attestation_events(sha, task_id, pr_id):
+    for event in attestation_events(sha, task_id, pr_id, cycle):
+        extra = {"agent_id": event["agent_id"]} if "agent_id" in event else {}
         ledger.append(event["event_type"], task_id=event["task_id"],
                       pr_id=event["pr_id"], outcome=event["outcome"],
-                      metadata_redacted=dict(event["metadata_redacted"]))
+                      metadata_redacted=dict(event["metadata_redacted"]),
+                      **extra)

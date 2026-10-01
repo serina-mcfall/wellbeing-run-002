@@ -37,8 +37,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from control import config, ledger as ledger_mod, routing
-from mergeable_evidence import attest, complete_evidence
-from test_merge_boundary import MergeBoundaryCase
+from mergeable_evidence import attest, complete_evidence, review_worker
+from test_merge_boundary import REVIEWED_HEAD, MergeBoundaryCase
 
 HEAD = "a" * 40
 OTHER = "b" * 40
@@ -124,14 +124,32 @@ class _Inspection:
         self.error = None
 
 
-def event(event_type, outcome, head=HEAD):
+REVIEWER = review_worker(TASK, 1)
+
+
+def event(event_type, outcome, head=HEAD, agent_id=None):
     meta = {} if head is None else {"head": head}
-    return {"event_type": event_type, "task_id": TASK, "pr_id": PR,
-            "outcome": outcome, "metadata_redacted": meta}
+    built = {"event_type": event_type, "task_id": TASK, "pr_id": PR,
+             "outcome": outcome, "metadata_redacted": meta}
+    if agent_id is not None:
+        built["agent_id"] = agent_id
+    return built
 
 
-def all_four(head=HEAD):
-    return [event(e, o, head) for e, o in routing.MERGE_ATTESTATIONS]
+def all_four(head=HEAD, reviewer=REVIEWER):
+    """The four result legs PLUS the dispatch half of the review pair.
+
+    The name is kept: it is the four EVIDENCE legs this set attests. The
+    fifth event is not a fifth leg - it is the other half of the review
+    leg, which `ledger_attests_merge` now requires because a verdict for a
+    commit nothing was dispatched against is not a review of that commit.
+    """
+    events = [event(e, o, head,
+                    reviewer if e == routing.REVIEW_RESULT_EVENT else None)
+              for e, o in routing.MERGE_ATTESTATIONS]
+    events.append(event(routing.REVIEW_DISPATCH_EVENT, "DISPATCHED", head,
+                        reviewer))
+    return events
 
 
 class PredicateCase(unittest.TestCase):
@@ -266,11 +284,18 @@ class AgainstARealLedgerCase(unittest.TestCase):
         for event_type, outcome in routing.MERGE_ATTESTATIONS:
             if event_type == "REVIEW_RESULT":
                 self.ledger.append(event_type, task_id=TASK, pr_id=PR,
-                                   outcome=outcome, head_sha=HEAD)
+                                   outcome=outcome, head_sha=HEAD,
+                                   agent_id=REVIEWER)
             else:
                 self.ledger.append(event_type, task_id=TASK, pr_id=PR,
                                    outcome=outcome,
                                    metadata_redacted={"head": HEAD})
+        # REVIEW_DISPATCHED uses the same bare-kwarg spelling in
+        # `_commit_reviewer_dispatch`, so the dispatch half of the pair is
+        # written the way production writes it too.
+        self.ledger.append(routing.REVIEW_DISPATCH_EVENT, task_id=TASK,
+                           pr_id=PR, outcome="DISPATCHED", head_sha=HEAD,
+                           agent_id=REVIEWER)
         ok, why = self._attests()
         self.assertTrue(ok, why)
 
@@ -291,6 +316,138 @@ class AgainstARealLedgerCase(unittest.TestCase):
         ok, why = self._attests()
         self.assertFalse(ok)
         self.assertEqual(why, routing.MERGE_ATTESTATION_UNREADABLE)
+
+
+class TheReviewPairCase(unittest.TestCase):
+    """live-gate.js's REVIEW_PROVENANCE_WORKER_MISMATCH, matched here.
+
+    Two separate requirements, and the first one is the hole the second
+    was recorded as not closing. Before this existed the Python path
+    required only that SOME REVIEW_RESULT at the head carried REVIEW_PASS:
+    no REVIEW_DISPATCHED was consulted at all, and `agent_id` was never
+    read, so one appended line attributed to nobody satisfied the whole
+    code-review leg.
+    """
+
+    def _attests(self, events, head=HEAD):
+        return routing.ledger_attests_merge(_Inspection(events), head)
+
+    def test_the_pair_at_this_head_attests(self):
+        """The control. Everything below removes exactly one thing."""
+        ok, why = self._attests(all_four())
+        self.assertTrue(ok, why)
+
+    def test_a_verdict_with_no_dispatch_for_this_head_is_not_a_review(self):
+        """THE HOLE. A result alone used to satisfy the leg completely."""
+        events = [e for e in all_four()
+                  if e["event_type"] != routing.REVIEW_DISPATCH_EVENT]
+        ok, why = self._attests(events)
+        self.assertFalse(
+            ok, "a REVIEW_RESULT with no dispatch for this head attested a "
+                "review of a commit nothing was ever dispatched against")
+        self.assertEqual(why, routing.MERGE_ATTESTATION_MISSING)
+
+    def test_a_dispatch_for_another_commit_does_not_carry_this_one(self):
+        events = [e for e in all_four()
+                  if e["event_type"] != routing.REVIEW_DISPATCH_EVENT]
+        events.append(event(routing.REVIEW_DISPATCH_EVENT, "DISPATCHED",
+                            OTHER, REVIEWER))
+        ok, why = self._attests(events)
+        self.assertFalse(ok)
+        self.assertEqual(why, routing.MERGE_ATTESTATION_MISSING)
+
+    def test_a_verdict_from_another_worker_is_refused(self):
+        events = [e for e in all_four()
+                  if e["event_type"] != routing.REVIEW_RESULT_EVENT]
+        events.append(event(routing.REVIEW_RESULT_EVENT, routing.REVIEW_PASS,
+                            HEAD, "task-001-builder"))
+        ok, why = self._attests(events)
+        self.assertFalse(ok)
+        self.assertEqual(why, routing.MERGE_ATTESTATION_WORKER_MISMATCH)
+
+    def test_a_verdict_attributed_to_nobody_is_refused(self):
+        """Absence is not a match.
+
+        An absent `agent_id` must not compare equal to the dispatch's, or
+        the check would pass for exactly the event a forger finds easiest
+        to write.
+        """
+        for missing in (None, "", 7, [], {}):
+            with self.subTest(agent_id=missing):
+                events = [e for e in all_four()
+                          if e["event_type"] != routing.REVIEW_RESULT_EVENT]
+                result = event(routing.REVIEW_RESULT_EVENT,
+                               routing.REVIEW_PASS, HEAD)
+                result["agent_id"] = missing
+                events.append(result)
+                ok, why = self._attests(events)
+                self.assertFalse(ok)
+                self.assertEqual(why,
+                                 routing.MERGE_ATTESTATION_WORKER_MISMATCH)
+
+    def test_two_events_naming_nobody_do_not_vouch_for_each_other(self):
+        """The tautology this check must not become.
+
+        If an absent agent_id were taken as a value, a dispatch and a
+        result that both name nobody would agree with each other and the
+        identity check would assert nothing at all.
+        """
+        events = [e for e in all_four()
+                  if e["event_type"] not in (routing.REVIEW_RESULT_EVENT,
+                                             routing.REVIEW_DISPATCH_EVENT)]
+        events.append(event(routing.REVIEW_RESULT_EVENT, routing.REVIEW_PASS,
+                            HEAD))
+        events.append(event(routing.REVIEW_DISPATCH_EVENT, "DISPATCHED", HEAD))
+        ok, why = self._attests(events)
+        self.assertFalse(ok)
+        self.assertEqual(why, routing.MERGE_ATTESTATION_MISSING)
+
+    def test_every_result_at_this_head_must_be_accounted_for(self):
+        """Not "one of them matches". A second verdict at this head from a
+        worker no dispatch names is an unexplained attestation about this
+        commit, and picking the convenient one is the same mistake the
+        contradiction branch refuses."""
+        events = all_four() + [event(routing.REVIEW_RESULT_EVENT,
+                                     routing.REVIEW_PASS, HEAD, "someone-else")]
+        ok, why = self._attests(events)
+        self.assertFalse(ok)
+        self.assertEqual(why, routing.MERGE_ATTESTATION_WORKER_MISMATCH)
+
+    def test_a_re_dispatch_at_the_same_head_still_attests(self):
+        """Membership, not "the last dispatch wins".
+
+        At ONE head a second dispatch reviews the same commit, so a pass
+        from either worker is a pass of that commit. Requiring the latest
+        would refuse a sound review for a reason that is about bookkeeping
+        order rather than about the commit.
+        """
+        events = all_four() + [event(routing.REVIEW_DISPATCH_EVENT,
+                                     "DISPATCHED", HEAD, "task-001-review-2")]
+        ok, why = self._attests(events)
+        self.assertTrue(ok, why)
+
+    def test_the_condition_is_finite_and_distinct(self):
+        codes = {name: value for name, value in vars(routing).items()
+                 if name.startswith("MERGE_") and isinstance(value, str)}
+        self.assertEqual(codes["MERGE_ATTESTATION_WORKER_MISMATCH"],
+                         "LEDGER_ATTESTATION_WORKER_MISMATCH")
+        self.assertEqual(
+            sum(1 for value in codes.values()
+                if value == "LEDGER_ATTESTATION_WORKER_MISMATCH"), 1)
+
+    def test_the_event_type_constants_are_not_harvested_as_conditions(self):
+        """`REVIEW_DISPATCH_EVENT` is an event type, not a condition code.
+
+        The differential inventory harvests every MERGE_* string in
+        routing as a condition, so naming these MERGE_* would silently
+        file two event types as merge conditions.
+        """
+        for name in ("REVIEW_DISPATCH_EVENT", "REVIEW_RESULT_EVENT"):
+            self.assertFalse(name.startswith("MERGE_"))
+        self.assertIn(routing.REVIEW_DISPATCH_EVENT,
+                      routing.MERGE_ATTESTATION_EVENTS,
+                      "the dispatch event is required but is not fetched by "
+                      "the inspection the Supervisor passes in")
 
 
 class ThroughTheRealSupervisorCase(MergeBoundaryCase):
@@ -350,6 +507,47 @@ class ThroughTheRealSupervisorCase(MergeBoundaryCase):
         attest(self.sup.ledger, OTHER, "TASK-001", 100)
         self.run_tick()
         self.assertEqual(self.merged_numbers(), [])
+
+    def test_a_lone_forged_verdict_does_not_merge(self):
+        """The pair requirement, through the real merge path.
+
+        The ledger carries every leg this head needs EXCEPT the reviewer
+        dispatch - the state a writer reaches by appending the result
+        line it wants and nothing else. Before the pair was required this
+        merged.
+        """
+        self.seed()
+        self.ledger_path.write_text("", encoding="utf-8")
+        for event_type, outcome in routing.MERGE_ATTESTATIONS:
+            extra = ({"agent_id": REVIEWER}
+                     if event_type == routing.REVIEW_RESULT_EVENT else {})
+            self.sup.ledger.append(event_type, task_id="TASK-001", pr_id=100,
+                                   outcome=outcome,
+                                   metadata_redacted={"head": REVIEWED_HEAD},
+                                   **extra)
+        self.run_tick()
+        self.assertEqual(self.merged_numbers(), [],
+                         "a verdict with no dispatch for this head merged")
+        blocked = [fields for name, fields in self.events
+                   if name == "MERGE_BLOCKED"]
+        self.assertEqual(blocked[-1]["metadata_redacted"]["condition"],
+                         routing.MERGE_ATTESTATION_MISSING)
+
+    def test_a_verdict_from_an_undispatched_worker_does_not_merge(self):
+        """The identity half, through the real merge path."""
+        self.seed()
+        self.ledger_path.write_text("", encoding="utf-8")
+        attest(self.sup.ledger, REVIEWED_HEAD, "TASK-001", 100)
+        self.sup.ledger.append(
+            routing.REVIEW_RESULT_EVENT, task_id="TASK-001", pr_id=100,
+            outcome=routing.REVIEW_PASS, agent_id="task-001-builder",
+            metadata_redacted={"head": REVIEWED_HEAD})
+        self.run_tick()
+        self.assertEqual(self.merged_numbers(), [])
+        blocked = [fields for name, fields in self.events
+                   if name == "MERGE_BLOCKED"]
+        self.assertEqual(blocked[-1]["metadata_redacted"]["condition"],
+                         routing.MERGE_ATTESTATION_WORKER_MISMATCH)
 
     def test_the_check_runs_before_the_gate(self):
         """Ordering is the contract: an unattested merge must never reach
