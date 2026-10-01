@@ -59,10 +59,13 @@ def security_leg(sha=HEAD, *, state="COMPLETE", verdict=DEFAULT, reason=""):
     }
 
 
-def auto_leg(sha=HEAD, *, state="COMPLETE", verdict=DEFAULT, reason=""):
-    """An accessibility_auto claim in the seven-key shape section 31.5
-    specifies. Its own validator belongs with the claim builder, which is
-    a later stage; the gate must still refuse a malformed one."""
+def auto_leg(sha=HEAD, *, state="COMPLETE", verdict=DEFAULT, reason="",
+             port_released=True):
+    """An accessibility_auto claim in the EIGHT-key shape.
+
+    Section 31.5 specified seven; G2 added `port_released`, because a claim
+    could otherwise say the scan had finished without saying whether the
+    product server was still bound to its port."""
     if verdict is DEFAULT:
         verdict = routing.ACCESSIBILITY_AUTO_PASS if state == "COMPLETE" else None
     return {
@@ -71,6 +74,7 @@ def auto_leg(sha=HEAD, *, state="COMPLETE", verdict=DEFAULT, reason=""):
         "claim_state": state,
         "claimed_at": CLAIMED_AT,
         "port": 3200,
+        "port_released": port_released,
         "verdict": verdict,
         "reason": reason,
     }

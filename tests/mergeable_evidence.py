@@ -61,6 +61,10 @@ def accessibility_auto_leg(sha: str) -> dict:
         "claim_state": "COMPLETE",
         "claimed_at": CLAIMED_AT,
         "port": 3200,
+        # G2: the scan has finished AND its product server has been torn
+        # down with the listener observed gone. A mergeable record is one
+        # whose port is back in the pool.
+        "port_released": True,
         "verdict": routing.ACCESSIBILITY_AUTO_PASS,
         "reason": "",
     }

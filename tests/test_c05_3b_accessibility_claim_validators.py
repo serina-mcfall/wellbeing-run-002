@@ -49,6 +49,7 @@ def auto(**over):
         "claim_state": "COMPLETE",
         "claimed_at": CLAIMED_AT,
         "port": 3200,
+        "port_released": True,
         "verdict": ac.ACCESSIBILITY_AUTO_PASS,
         "reason": "",
     }

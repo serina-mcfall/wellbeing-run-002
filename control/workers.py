@@ -272,6 +272,88 @@ def _reserved_job_file_ports() -> set[int]:
     return reserved
 
 
+def claimed_product_server_ports(doc: dict) -> dict[int, str]:
+    """Ports held by an accessibility product-server claim (G2).
+
+    THE THIRD EXCLUSION SOURCE. C-09 knew two owners of a port: a committed
+    worker record, and a job file written before spawn. The accessibility
+    automated half owns a port through neither - it runs a product server
+    under an `accessibility_auto` claim on the PR record - so without this
+    a Builder could be handed the port a scan is mid-way through using.
+
+    OWNERSHIP ENDS AT RELEASE, NOT AT EXPIRY. A claim holds its port until
+    `port_released` is True, which `release_claimed_port` sets only after
+    the listener has been OBSERVED GONE. A lease that merely ran out, a
+    COMPLETE verdict, a failure and a cancellation all leave the port held:
+    the server may still be bound, and handing a still-listening port to a
+    Builder is how two processes end up fighting over one socket.
+
+    Returns {port: owner label}. Pure: reads durable state only, performs no
+    network operation and writes nothing, so it is safe under the state lock.
+    """
+    held: dict[int, str] = {}
+    for number, record in (doc.get("prs") or {}).items():
+        if not isinstance(record, dict):
+            continue
+        claim = record.get("accessibility_auto")
+        if not isinstance(claim, dict):
+            continue
+        if claim.get("port_released") is True:
+            continue
+        port = claim.get("port")
+        if isinstance(port, int) and not isinstance(port, bool):
+            held[port] = f"accessibility_auto:pr-{number}"
+    return held
+
+
+PORT_STILL_LISTENING = "PORT_STILL_LISTENING"
+PORT_OBSERVATION_FAILED = "PORT_OBSERVATION_FAILED"
+PORT_NOT_CLAIMED = "PORT_NOT_CLAIMED"
+
+
+def port_release_permitted(port: int,
+                           listening: set[int] | None) -> tuple[bool, str]:
+    """Whether a claimed product-server port may be returned to the pool.
+
+    `listening` is `proc.listening_ports(...)`'s answer, and `None` means
+    the observation itself failed.
+
+    FAIL CLOSED, TWICE OVER:
+
+    * a port still in the LISTEN set is NOT releasable - something is bound
+      to it, whatever the claim says about having finished;
+    * a FAILED observation is not an absence. "We could not look" must
+      never read as "nothing is there", because the whole point of the
+      check is to prove the listener gone before another process is told
+      the port is free.
+
+    Returns (True, "") or (False, one finite diagnostic).
+    """
+    if not isinstance(port, int) or isinstance(port, bool):
+        return False, PORT_NOT_CLAIMED
+    if listening is None:
+        return False, PORT_OBSERVATION_FAILED
+    if port in listening:
+        return False, PORT_STILL_LISTENING
+    return True, ""
+
+
+def release_claimed_port(claim: dict,
+                         listening: set[int] | None) -> tuple[bool, str]:
+    """Mark one accessibility_auto claim's port released, if permitted.
+
+    Mutates the claim ONLY on success, so a refused release leaves the
+    record exactly as it found it and the port stays excluded. The caller
+    is expected to have stopped the owned process first; this is the check
+    that the stop actually worked, not a substitute for making it.
+    """
+    permitted, why = port_release_permitted(claim.get("port"), listening)
+    if not permitted:
+        return False, why
+    claim["port_released"] = True
+    return True, ""
+
+
 def select_port_candidates(doc: dict, lo: int | None = None,
                            hi: int | None = None) -> tuple[list[int], str]:
     """C-18 stage 3. The ports this state permits, in order - NO BIND.
@@ -298,10 +380,16 @@ def select_port_candidates(doc: dict, lo: int | None = None,
     owned = {meta.get("port") for meta in doc.get("workers", {}).values()
              if isinstance(meta.get("port"), int)}
     reserved = _reserved_job_file_ports()
+    # G2: the third source. An accessibility product-server claim owns its
+    # port until the listener has been observed gone, so a Builder can
+    # never be handed a port a scan is still bound to.
+    claimed = set(claimed_product_server_ports(doc))
     candidates = [port for port in range(lo, hi + 1)
-                  if port not in owned and port not in reserved]
+                  if port not in owned and port not in reserved
+                  and port not in claimed]
     return candidates, (f"no bindable unowned port in [{lo}, {hi}] "
-                        f"(owned={len(owned)}, reserved={len(reserved)})")
+                        f"(owned={len(owned)}, reserved={len(reserved)}, "
+                        f"claimed={len(claimed)})")
 
 
 def probe_port(port: int) -> bool:

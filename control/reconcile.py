@@ -441,6 +441,15 @@ def detect_orphans(doc: dict, *, repo_root=None) -> tuple[list[OrphanFinding],
                 port = meta.get("port")
                 if isinstance(port, int):
                     owners.setdefault(port, []).append(worker)
+            # G2: an accessibility product-server claim is a real owner.
+            # Without this a running scan's port has no live worker record
+            # behind it and would be reported as FOREIGN_OR_ORPHAN_LISTENER
+            # - a false orphan, which sends a human to look at a correctly
+            # working system. Added to the SAME map as worker ownership so
+            # the duplicate-assignment check below sees claim-versus-worker
+            # collisions too, which is the conflict that actually matters.
+            for port, owner in workers_mod.claimed_product_server_ports(doc).items():
+                owners.setdefault(port, []).append(owner)
             for port, names in sorted(owners.items()):
                 if len(names) > 1:
                     findings.append(OrphanFinding(

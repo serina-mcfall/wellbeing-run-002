@@ -1453,9 +1453,14 @@ REVIEW_GATE_LEGS = (
 
 ACCESSIBILITY_CLAIM_STATES = frozenset({"PLANNED", "SPAWNED", "COMPLETE"})
 
+# G2 added the eighth key, `port_released`. Section 31.5 specified seven;
+# the claim could then say a scan had FINISHED but not whether the product
+# server it started was still bound to the port, and those are different
+# facts. Ownership of the port ends at release, never at expiry or at a
+# verdict - see workers.claimed_product_server_ports.
 ACCESSIBILITY_AUTO_CLAIM_KEYS = frozenset({
     "sha", "attempt_id", "claim_state", "claimed_at", "port",
-    "verdict", "reason",
+    "verdict", "reason", "port_released",
 })
 ACCESSIBILITY_REVIEW_CLAIM_KEYS = frozenset({
     "sha", "ordinal", "attempt_id", "worker", "claim_state",
@@ -1541,6 +1546,11 @@ def accessibility_auto_claim_is_valid(claim) -> tuple[bool, str]:
     if not isinstance(port, int) or isinstance(port, bool) or \
             not ACCESSIBILITY_PORT_MIN <= port <= ACCESSIBILITY_PORT_MAX:
         return False, "CLAIM_PORT_INVALID"
+    # G2. A strict bool, not a truthy value: the port exclusion keys on
+    # `is True`, so a string or a number here would be read as "not
+    # released" by the allocator while looking released to a human.
+    if not isinstance(claim["port_released"], bool):
+        return False, "CLAIM_PORT_RELEASED_INVALID"
     if _canonical_moment(claim["claimed_at"]) is None:
         return False, "CLAIM_TIMESTAMP_INVALID"
     return _claim_outcome_is_valid(
