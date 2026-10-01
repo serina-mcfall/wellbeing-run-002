@@ -4812,3 +4812,259 @@ discovered during implementation.
   package. It does not (§31.9).
 - It does not answer G1–G10. Ten questions are escalated; none is guessed.
 - C-05.3b remains **not begun**. T+00 remains **NOT_STARTED**.
+
+## 35. C-04a realistic multi-cycle FIXTURE preflight harness — BUILT (2026-10-01)
+
+Branch `wip/c04a-fixture-preflight`, cut from `wip/c05-1-persistence` @ `4eeaa7c`.
+Worked in an isolated worktree.
+
+**Document-provenance note.** Same situation as §29. This handover document is
+untracked in the main checkout and did not exist in this worktree, so the main
+checkout's copy (4814 lines, no sections 32-34 present at the time) was copied
+in verbatim and this section appended. Sections 1-31 on this branch are a
+point-in-time snapshot and are **not authoritative**; reconcile by hand before
+merge if another agent appended in the meantime.
+
+### 35.1 The requirement, verified before building to it
+
+`experiment/CONTRADICTION-AUDIT.md` row C-04a, verbatim:
+
+> (1) Pre-T+00: tested adapter code plus a realistic multi-cycle preflight
+> (Protocol v2 "Preflight"; BOOTSTRAP deliverable 4) — Builder→PR→Review
+> FAIL→Fix→CI→Accessibility/Security→fresh re-review→merge, at least two
+> review cycles, exercised against an isolated FIXTURE PR/worktree with real
+> git mechanics and real (not simulated) schema/validator/adapter calls. A
+> real product task PR is explicitly NOT required for this.
+
+Cross-checked against `protocol/RUN-002-PROTOCOL-v2.0.md` §"Preflight —
+realistic, not synthetic" (lines 329-332), which adds "exact-SHA evidence
+invalidation/regeneration" and "P2 demonstrably non-blocking" to the same
+bullet list. Both quotes match the task brief exactly.
+
+### 35.2 What was built
+
+New directory `apparatus/fixture-preflight/`. **No existing file under
+`control/` or `apparatus/` was modified** — parallel agents own those.
+
+| File | Role |
+|---|---|
+| `fixture-repo.js` | REAL git. Creates a throwaway repository under the OS temp dir and drives the real `git` binary: real branches, real commits, real head SHAs, a real registered worktree, and its own `config/isolation.json` so the git-head adapter's worktree branch is exercised for real. |
+| `fake-github.js` | INJECTED FAKE GitHub. In-memory. No network, no `gh`, no token, no real PR. Models exactly four forge behaviours: a draft cannot be merged; a merge naming a non-current head is refused; a merged/closed PR cannot be merged again; a push does **not** retroactively rebind an earlier review's SHA. |
+| `evidence.js` | Builds real PR-EVIDENCE-V2 packages bound to REAL fixture SHAs (never `'a'.repeat(40)`), including all ten Protocol v2 accessibility checks and all twelve security surfaces. |
+| `merge-eligibility.js` | **THE SEAM.** Local merge-eligibility composition, pending the parallel work stream that owns the production layer. See §35.4. |
+| `scenario.js` | The two scenario drivers and their event transcripts. |
+| `multi-cycle.test.js` | The Protocol v2 preflight scenario (12 tests). |
+| `lifecycle.test.js` | The operator-required autonomous lifecycle acceptance scenario (8 tests). |
+
+Run with:
+
+```
+cd apparatus && node --test fixture-preflight/*.test.js
+```
+
+20 tests, 20 passed, 0 failed.
+
+### 35.3 REAL vs STUBBED — the honest split
+
+**Real, not simulated:**
+
+- **git** — every branch, commit, head SHA and worktree, created by invoking
+  the real `git` binary. Commit identity is asserted independently
+  (`git cat-file -t`), and SHAs are re-resolved by the adapter rather than
+  trusted from the fixture.
+- **`apparatus/adapters/git-head.js`** — `resolveTrustedHeadSha` is called for
+  real, on both its branch identity path (with the mandatory `run-002/` prefix)
+  and its worktree identity path (real `config/isolation.json`, real
+  `git worktree list --porcelain` registration check).
+- **`apparatus/adapters/task-record.js`** — called against this repository's
+  real committed `config/tasks.json` to resolve dependent tasks. The
+  "unblock dependent tasks" step is therefore driven by real task-graph data,
+  not an invented dependency list.
+- **`apparatus/pr-evidence/validate.js`** — called for real, which really
+  compiles `protocol/PR-EVIDENCE-V2.schema.json` under Ajv strict mode and
+  really applies `apparatus/severity/severity-floor.js`. **P0/P1 blocking and
+  P2/P3 non-blocking are therefore decided by production code, not by anything
+  in this harness.**
+
+**Stubbed, and deliberately so:**
+
+- **GitHub** — `fake-github.js`. C-04a explicitly does not require a real
+  product PR, and the brief forbids live GitHub, real PRs, real merges, paid
+  calls, workers and notifications. None occur.
+- **The merge-eligibility composition** — `merge-eligibility.js`. See §35.4.
+- **The content of the evidence** — no axe run, no CI job and no reviewer
+  produced the check results. That is the agreed shape of a *fixture*
+  preflight: the mechanics and the calls are real, the subject is a fixture.
+
+### 35.4 The seam, and the interface expected from the parallel layer
+
+A parallel work stream owns the production merge-eligibility composition.
+`apparatus/fixture-preflight/merge-eligibility.js` is a stand-in so this
+harness could be driven end to end without blocking on it. The tests are
+written against the **interface**, not the implementation, so the swap is a
+one-line change per test setup:
+
+```js
+decideMergeEligibility({
+  repoRoot,     // string  — repository the git adapter resolves in
+  identity,     // object  — { kind: 'branch', ref } | { kind: 'worktree', path }
+  evidence,     // object  — a PR-EVIDENCE-V2 package
+  pullRequest,  // object  — { number, state, draft, headSha,
+                //             reviews: [{ producer, sha, verdict }] }
+}) -> {
+  eligible:       boolean,
+  reasons:        string[],   // stable codes, empty iff eligible
+  trustedHeadSha: string | null,
+}
+```
+
+Reason codes emitted: `GIT_HEAD_UNRESOLVED:<adapter reason>`,
+`OFFLINE_POLICY_FAILED`, `NO_EVIDENCE`, `EVIDENCE_SHA_STALE`,
+`EVIDENCE_SECTION_SHA_STALE:<section>`, `NO_PULL_REQUEST`, `PR_NOT_OPEN`,
+`PR_IS_DRAFT`, `PR_HEAD_DIVERGED`, `NO_APPROVING_REVIEW_AT_HEAD`.
+
+Inside it, the git-head adapter call and the validator call are **real**; the
+pull-request state rules (draft, open, head agreement, approval freshness) and
+the composition order are the stubbed part. It fails closed: anything it cannot
+establish becomes a reason, never a pass.
+
+**Change needed in a file this agent does not own.**
+`apparatus/pr-evidence/validate.js:74-79` cross-checks only `ci.sha` and
+`review.sha` against `head_sha`. It never compares `accessibility.sha` or
+`security.sha`, so an evidence package can carry accessibility or security
+evidence from a different commit and still pass the offline policy. It also has
+no access to a trusted head at all, by its own design. Both gaps are closed in
+`merge-eligibility.js` rather than in the validator, because another agent owns
+that file. The exact change wanted there is: extend the `INTERNAL_SHA_MISMATCH`
+loop to cover `accessibility` and `security` whenever those blocks carry a
+`sha`.
+
+### 35.5 Scenario 1 — the Protocol v2 multi-cycle preflight
+
+`runMultiCycleScenario`, in `scenario.js`:
+
+1. Builder commits on a real `run-002/fixture-task-001` branch → **SHA1**.
+2. PR opened at SHA1 (fake forge).
+3. CI reported PASS at SHA1.
+4. **Review cycle 1 → REVIEW_FAIL** on a P1 code finding. Eligibility refuses:
+   `OFFLINE_POLICY_FAILED`, `NO_APPROVING_REVIEW_AT_HEAD`.
+5. Fixer commits → **SHA2**. The head really moves; the fake forge is told.
+6. **Exact-SHA invalidation.** The unchanged cycle-1 evidence is re-decided
+   against the new trusted head and refused.
+7. **Regeneration.** CI, accessibility and security re-run at SHA2;
+   **review cycle 2 → REVIEW_PASS** at SHA2.
+8. Eligible → merged at SHA2.
+
+The isolating test matters more than step 6 does on its own: the cycle-1
+package also carries a P1 and a REVIEW_FAIL, so its refusal cannot prove
+*staleness* was the cause. A separate test builds an **otherwise-clean**
+package at SHA1, asserts `checkOfflinePolicy` passes it on its own terms, then
+asserts eligibility refuses it with `EVIDENCE_SHA_STALE` present and
+`OFFLINE_POLICY_FAILED` **absent**.
+
+**P2 demonstrably non-blocking.** The merging package carries three open P2
+findings at once — a P2 `ACCEPTED_NONBLOCKING` code finding, a P2
+`ACCEPTED_NONBLOCKING` security finding, and a P2 `NON_FAILURE` accessibility
+finding with an affirmative rationale — and still merges. Two controls stop
+that from degenerating into "nothing ever blocks": the same scenario with a P1
+instead does **not** merge, and a test flips only the code finding's severity
+between P2 and P1 on an otherwise byte-identical package and asserts the real
+validator's verdict flips with it.
+
+### 35.6 Scenario 2 — the autonomous lifecycle (operator acceptance requirement)
+
+`runAutonomousLifecycle`. Full shape: **create PR → independent review →
+required evidence/checks → mark ready if drafted → merge when eligible →
+confirm merge → unblock dependent tasks.**
+
+**(a) DRAFT → READY → MERGED, no human step.**
+The PR opens as a draft. Eligibility is consulted *first* and returns exactly
+`['PR_IS_DRAFT']` — everything else already passes. The driver marks ready
+**only when being a draft is the sole remaining obstacle**, so a failing PR is
+never un-drafted to force it through. It re-decides, merges, then **confirms
+the merge by reading the forge back** rather than trusting the merge call's
+return. Dependents are then resolved from the real task graph:
+merging `TASK-001` unblocks `TASK-002`, `TASK-003`, `TASK-004`. The test
+asserts the stage order `pr_created → check_reported → review_submitted →
+pr_marked_ready → pr_merged` and that **no transcript event carries
+`actor: 'human'`**.
+
+**(b) CHANGED HEAD — a stale approval must not authorize a merge.**
+An approving review lands at SHA1, then an unreviewed commit lands at SHA2.
+Eligibility refuses with `NO_APPROVING_REVIEW_AT_HEAD`; the PR stays OPEN; no
+`pr_merged` event is emitted; nothing downstream unblocks.
+
+Mutation 4 (§35.7) exposed a weakness in the first version of case (b): the
+evidence was *also* stale, so the approval-freshness rule was not independently
+load-bearing. A test was therefore **added** — the dangerous real-world shape,
+where CI/accessibility/security are all regenerated at the new head and the
+package is clean, but **nobody re-reviewed**. Eligibility must refuse with
+`['NO_APPROVING_REVIEW_AT_HEAD']` as the *only* reason. Under mutation 4 that
+test reports `eligible: true`, i.e. a stale approval would genuinely have
+authorized a merge.
+
+### 35.7 Mutation testing — each proved red, restored, restoration verified
+
+A fixture that passes by construction proves nothing. Every required mutation
+was applied, the suite run, the red observed, the mutation reverted, and the
+green re-observed. Baseline throughout: 20 passed / 0 failed.
+
+| # | Mutation | Where | Result |
+|---|---|---|---|
+| 1 | Stale-SHA evidence set accepted — drop the `EVIDENCE_SHA_STALE` check | `merge-eligibility.js` | **2 red** — EXACT-SHA INVALIDATION, EXACT-SHA REGENERATION. Restored → 19/19. |
+| 2 | Second review cycle skipped — reuse cycle 1's review after the fix | `scenario.js` | **4 red** — incl. "AT LEAST TWO review cycles" (`got 1`) and the P2 test (the merge never happened). Restored → 19/19. |
+| 3 | P2 treated as blocking — block on any finding regardless of severity | `merge-eligibility.js` | **7 red** — incl. "P2 IS DEMONSTRABLY NON-BLOCKING" and the draft lifecycle (the ready step never fired). Restored → 19/19. |
+| 4 | Changed head does not invalidate approval — accept any approval at any SHA | `merge-eligibility.js` | **2 red** — both case-(b) tests. The added test reported `eligible: true`. Restored → 20/20. |
+| 5 | Draft PR merged without the ready step — drop the `PR_IS_DRAFT` hold | `merge-eligibility.js` | **2 red** — incl. `missing lifecycle stage: pr_marked_ready`. Restored → 20/20. |
+
+Mutation 4 was run twice: once before the §35.6 test was added (1 red) and once
+after (2 red), to confirm the new test catches it independently of the evidence
+staleness that was masking it.
+
+No `MUTATION` marker survives in the tree; verified by grep after restoration.
+
+### 35.8 What remains before C-04a could be called satisfied
+
+This harness discharges the *fixture preflight* half of C-04a requirement (1).
+It does **not** discharge the row. Outstanding:
+
+1. **The production merge-eligibility composition layer does not exist.** The
+   decision this harness proves correct is made by a stub
+   (`fixture-preflight/merge-eligibility.js`), not by shipping code. Until the
+   parallel layer lands and the tests are re-pointed at it, what is proven is
+   the *scenario*, not the *system*. **This is the single largest gap.**
+2. **The CI-result and reviewer-identity adapters are not driven here.** §28
+   reports them implemented on `wip/c04-adapters`; they were not present in
+   this worktree. The harness still reads the submitted `ci.status` field,
+   which is exactly the self-attestation `validate.js:11-19` warns about. Once
+   those adapters merge, the harness should call them in place of the submitted
+   fields.
+3. **The accessibility requirement registry is not driven here.** §29 reports
+   C-02 built and wired. The harness's accessibility finding is deliberately
+   `NON_FAILURE`, which does not exercise the registry path at all; a
+   `FAILURE`-classified finding citing a real registry identifier should be
+   added once that lands, together with its negative (an unknown identifier
+   must fail closed).
+4. **`validate.js` still does not SHA-bind accessibility or security
+   evidence.** See §35.4. Closed in the stub only.
+5. **CI does not invoke any of this.** `.github/workflows/ci.yml` still does
+   not run `apparatus/pr-evidence/validate.js`, the apparatus test suite, or
+   this harness — the C-04 closure criterion that "the schema, validator, and
+   adapters existing is not sufficient if CI never actually calls any of it"
+   applies verbatim to the fixture harness too.
+6. **The audit row has not been updated.** `experiment/CONTRADICTION-AUDIT.md`
+   C-04a and `experiment/PREFLIGHT-FINDINGS.md` still read as though the
+   multi-cycle preflight has not been run. Updating them is deliberately left
+   to whoever reconciles the parallel branches, because items 1-5 above mean
+   the row should move from PARTIAL to PARTIAL-with-better-evidence, **not** to
+   GREEN.
+7. **Requirement (2) is untouched and should stay that way** — per-product-PR
+   checking after T+00 needs no pre-launch demonstration by the row's own
+   wording.
+
+### 35.9 Environment note
+
+`apparatus/node_modules` does not exist in a fresh worktree (it is gitignored
+and lives in the main checkout). It was symlinked in so `ajv` would resolve.
+The symlink is untracked and was **not** committed; a reviewer checking this
+branch out needs either that symlink or `npm install` under `apparatus/`.
