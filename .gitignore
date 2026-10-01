@@ -10,3 +10,12 @@ apparatus/accessibility/artifacts/
 .tmp/
 *.log
 run-002-protocol-v2.0-draft.zip
+
+# Python bytecode. Never committed; `clean_baseline` (control/preflight.py)
+# fails on ANY untracked path, so leaving these unignored fails a launch gate.
+__pycache__/
+*.py[cod]
+
+# Per-session agent machinery: worklog, test-change declarations, local
+# settings. Local to one operator's session, never part of the apparatus.
+.claude/
