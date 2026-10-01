@@ -55,6 +55,76 @@ JEV_INTERVAL_SECONDS = 900
 JEV_BOUND_SECONDS = 60
 BUSY_MARGIN_SECONDS = 60
 
+# ====================================================================
+# C-18 stage 7: the declare_busy bounds for the post-T1 phases
+# ====================================================================
+#
+# WHY EVERY POST-T1 PHASE NEEDS ONE. The heartbeat is written inside T1.
+# `watchdog.heartbeat_fresh` is an OR: fresh if the last beat is younger
+# than `heartbeat_stale_seconds` (120) OR if now is inside a declared
+# `busy_until`. `declare_busy` does NOT refresh `at` - it only adds the
+# window. So the 120 s of ordinary freshness is spent by EVERYTHING after
+# T1 together: dispatch execution, security execution, accessibility
+# execution, the merges, the drains, Jev and the Observer. A phase that
+# can outlast what is left of that window and does not declare one is a
+# healthy supervisor that looks dead.
+#
+# Because the test is an OR, a declaration can only ever EXTEND freshness.
+# It cannot shorten it, so declaring never makes detection stricter than
+# the plain 120 s - which is why adding these is safe in the direction
+# that matters.
+#
+# THE BOUND IS THE PHASE'S OWN WORST CASE, NOT THE WORKER'S LEASE. This is
+# the correction that matters, and an earlier proposal got it wrong: it
+# priced builder execution at `timeouts.builder` (3600). The builder lease
+# is how long the WORKER may run. `_execute_builder_dispatch` writes a
+# prompt, creates a worktree, probes ports, writes a job file and calls
+# `workers.start_job`, which `Popen`s and returns - it never waits for the
+# worker. Bounding it at 3660 s would let a wedged `workmux add` look
+# healthy for an hour against a 120 s threshold, which is precisely the
+# failure declare_busy exists to prevent. Every bound below is the sum of
+# the external timeouts the phase can actually incur, read from the
+# constants those calls use, so raising a timeout raises its bound too.
+#
+# THEY ARE PER ITEM, AND EVERY PHASE IS A BATCH. `execute_dispatches`,
+# `execute_security`, `execute_accessibility` and `execute_merges` each
+# loop. A single fixed number would under-bound a batch of two. The bound
+# is `per item x count + margin`, and it stays finite because the item
+# count is capped by the governed concurrency limits.
+
+# One dispatch or security execution: `git worktree list` inside
+# acquire_worktree, a `workmux add`, a `workmux path`, and start_job's
+# `tmux list-panes` + `tmux send-keys`.
+DISPATCH_EXECUTE_BOUND_PER_PLAN = (
+    gh.TIMEOUT                      # 120 - git worktree list
+    + workers.WORKMUX_TIMEOUT       # 180 - workmux add
+    + workers.WORKMUX_PATH_TIMEOUT  # 30  - workmux path
+    + 2 * workers.TMUX_TIMEOUT      # 40  - list-panes, send-keys
+)                                   # = 370
+
+# One merge candidate: route_prs' pr_view, then attempt_merge's
+# update_branch, pr_view, merge and the post-merge pr_view.
+MERGE_EXECUTE_BOUND_PER_CANDIDATE = 6 * gh.TIMEOUT   # = 720
+
+# One notification drain. DRAIN_BUDGET_SECONDS bounds when a send may
+# START, not when the drain returns: `drain_notifications`' own docstring
+# records the honest bound as "the budget, plus at most one in-flight
+# send", because http.post_json's timeout is per socket operation rather
+# than per request. That is what this adds, and it is the stated honest
+# bound rather than a hard cap - tightening it needs a different
+# transport, not a smaller number here.
+DRAIN_BOUND_SECONDS = 10.0 + 20.0   # DRAIN_BUDGET_SECONDS + http.post_json default
+
+
+def batch_bound(per_item: float, count: int) -> float:
+    """A declared bound for a phase that loops: per item, plus one margin.
+
+    Never open-ended, and never zero-width: a batch of nothing is not
+    declared at all by the call sites, so `count` is always at least one
+    where this is used.
+    """
+    return per_item * max(count, 1) + BUSY_MARGIN_SECONDS
+
 
 # ====================================================================
 # C-18: the dispatch harness
@@ -4840,7 +4910,15 @@ class Supervisor:
         # worker with no committed record is the one outcome worth shortening
         # the window on. It holds no transaction, so it cannot roll back a
         # merge and C-14.1's guarantee is unaffected.
-        self.confirm_dispatches(self.execute_dispatches(self._dispatch_plans))
+        # C-18 stage 7: declared, because acquire_worktree, workmux and tmux
+        # can together outlast what T1's heartbeat has left. The confirm is
+        # outside the window - it is a fast transaction, not slow work.
+        if self._dispatch_plans:
+            self.confirm_dispatches(self.run_declared(
+                "dispatch",
+                batch_bound(DISPATCH_EXECUTE_BOUND_PER_PLAN,
+                            len(self._dispatch_plans)),
+                lambda: self.execute_dispatches(self._dispatch_plans)))
 
         # C-05.3a Phase C runs next - materialise the claimed attempt, write
         # the job file, spawn - with no state lock held, then Phase D caches
@@ -4853,19 +4931,45 @@ class Supervisor:
         # back and that guarantee is unaffected. It does add worktree and
         # spawn latency ahead of merges - see the report.
         if planned_security:
-            self.confirm_security_spawn(self.execute_security(planned_security))
+            # Same shape and the same external calls as a dispatch, so the
+            # same per-plan bound.
+            self.confirm_security_spawn(self.run_declared(
+                "security",
+                batch_bound(DISPATCH_EXECUTE_BOUND_PER_PLAN,
+                            len(planned_security)),
+                lambda: self.execute_security(planned_security)))
 
         # C-05.3b Phase C + E. Outside every transaction, like the security
         # spawn above and for the same reason: an install, a build, a
         # server and a browser run are minutes of work, and holding the
         # state lock across them would stall every other task.
         if self._accessibility_plans:
-            self.commit_accessibility(
-                self.execute_accessibility(self._accessibility_plans))
+            # THE ONE THAT WAS ALWAYS MANDATORY, not stage-7 polish. A single
+            # attempt may legitimately run the whole governed G3 budget -
+            # install+build 600, readiness 120, scan 120/300, teardown 60,
+            # 1080 in total - which is nine times the 120 s staleness
+            # threshold. Undeclared, every accessibility run would have made
+            # a healthy supervisor look dead. It has been harmless only
+            # because no services factory existed to make it run at all.
+            self.commit_accessibility(self.run_declared(
+                "accessibility",
+                batch_bound(self._accessibility_budget().total,
+                            len(self._accessibility_plans)),
+                lambda: self.execute_accessibility(self._accessibility_plans)))
 
         # T1 has committed. Each merge now gets its own transaction, before the
         # slow provider work so a merge never waits on a provider call.
-        self.execute_merges(merge_candidates)
+        # C-18 stage 7. NOT in the proposed table, and it belongs there: each
+        # candidate makes up to six `gh` calls at 120 s each, so two
+        # candidates can exceed the staleness threshold twelvefold. This is
+        # also the phase where a false-positive Watchdog kill is least
+        # acceptable, because gh.merge is irreversible.
+        if merge_candidates:
+            self.run_declared(
+                "merges",
+                batch_bound(MERGE_EXECUTE_BOUND_PER_CANDIDATE,
+                            len(merge_candidates)),
+                lambda: self.execute_merges(merge_candidates))
 
         # C-18 stage 2. Every notification this tick queued - from T1, from
         # Phase D and from each merge's own transaction - is delivered here,
@@ -4876,7 +4980,13 @@ class Supervisor:
         # ONE allowance, shared with the second drain below. The governed
         # limits are per tick, so two drains must not each get a full one.
         drain_allowance = self.new_drain_allowance()
-        self.drain_notifications(drain_allowance)
+        # C-18 stage 7. Declared PER CALL, not once for both: each drain is
+        # a separate stretch of wall clock with Jev and the Observer between
+        # them, and a declaration re-published at the second drain is what
+        # keeps a wedge there detectable within one drain's bound rather
+        # than one tick's.
+        self.run_declared("notifications", DRAIN_BOUND_SECONDS,
+                          lambda: self.drain_notifications(drain_allowance))
 
         # Outside the lock: a slow provider must never stall the control cycle.
         # Each is declared as bounded busy work so a healthy supervisor is not
@@ -4896,13 +5006,21 @@ class Supervisor:
         #
         # Deliberately the SAME allowance the first drain used: whatever it
         # spent is already gone, and this one may only use what is left.
-        self.drain_notifications(drain_allowance)
+        self.run_declared("notifications", DRAIN_BOUND_SECONDS,
+                          lambda: self.drain_notifications(drain_allowance))
 
-    def run_declared(self, what: str, bound_seconds: float, action) -> None:
-        """Run bounded slow work with its deadline published in the heartbeat."""
+    def run_declared(self, what: str, bound_seconds: float, action):
+        """Run bounded slow work with its deadline published in the heartbeat.
+
+        Returns whatever `action` returned, so a phase whose result feeds a
+        commit step can be declared without being split in two. The commit
+        step itself stays OUTSIDE the declaration: it is a fast state
+        transaction, and leaving the window open across it would overstate
+        how long the slow work may legitimately take.
+        """
         self.declare_busy(what, bound_seconds)
         try:
-            action()
+            return action()
         finally:
             self.clear_busy()
 

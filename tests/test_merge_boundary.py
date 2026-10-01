@@ -38,6 +38,7 @@ from control import (  # noqa: E402
     state as state_mod,
     supervisor as supervisor_mod,
 )
+import declared_phases  # noqa: E402
 
 TZ = "Pacific/Auckland"
 BRANCH_FMT = "task/{0}"
@@ -103,7 +104,8 @@ class MergeBoundaryCase(unittest.TestCase):
         self.sup.notify_out = mock.Mock(return_value={"ok": True})
         # Jev and the Observer are slow provider work that runs after the tick
         # transaction; they are not part of this boundary.
-        self.sup.run_declared = mock.Mock()
+        self.sup.run_declared = mock.Mock(
+            side_effect=declared_phases.provider_phases_suppressed)
 
     # ------------------------------------------------------------- fixtures
 
@@ -269,7 +271,9 @@ class TestLaterTickFailureCannotStrandAMerge(MergeBoundaryCase):
         """The complementary half: once T2 has committed, later work outside
         it cannot undo the merge, the debt or the completion."""
         self.seed()
-        self.sup.run_declared = mock.Mock(side_effect=InjectedFailure("jev"))
+        self.sup.run_declared = mock.Mock(
+            side_effect=declared_phases.provider_phase_raises(
+                InjectedFailure("jev")))
         with self.assertRaises(InjectedFailure):
             self.run_tick()
 

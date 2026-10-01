@@ -45,6 +45,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from control import (  # noqa: E402
     clock,
@@ -56,6 +57,7 @@ from control import (  # noqa: E402
     state as state_mod,
     supervisor as supervisor_mod,
 )
+import declared_phases  # noqa: E402
 
 TZ = "Pacific/Auckland"
 SHA = "a" * 40
@@ -132,7 +134,8 @@ class HarnessCase(unittest.TestCase):
         self.events: list[tuple[str, dict]] = []
         sup.log = mock.Mock(side_effect=lambda e, **k: self.events.append((e, k)))
         sup.notify_out = mock.Mock(return_value={"ok": True})
-        sup.run_declared = mock.Mock()
+        sup.run_declared = mock.Mock(
+            side_effect=declared_phases.provider_phases_suppressed)
         return sup
 
     # ------------------------------------------------------------ fixtures

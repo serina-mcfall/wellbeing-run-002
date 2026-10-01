@@ -49,6 +49,7 @@ from control import (  # noqa: E402
     state as state_mod,
     supervisor as supervisor_mod,
 )
+import declared_phases  # noqa: E402
 
 TZ = "Pacific/Auckland"
 BRANCH = "task/task-001"
@@ -126,7 +127,8 @@ class ObservationHarness(unittest.TestCase):
         self.events: list[tuple[str, dict]] = []
         self.sup.log = mock.Mock(side_effect=lambda e, **k: self.events.append((e, k)))
         self.sup.notify_out = mock.Mock(return_value={"ok": True})
-        self.sup.run_declared = mock.Mock()
+        self.sup.run_declared = mock.Mock(
+            side_effect=declared_phases.provider_phases_suppressed)
 
     # ------------------------------------------------------------ fixtures
 

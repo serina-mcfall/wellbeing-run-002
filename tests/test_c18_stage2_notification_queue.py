@@ -40,6 +40,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from control import (  # noqa: E402
     clock,
@@ -51,6 +52,7 @@ from control import (  # noqa: E402
     state as state_mod,
     supervisor as supervisor_mod,
 )
+import declared_phases  # noqa: E402
 
 TZ = "Pacific/Auckland"
 PR = 7
@@ -218,7 +220,9 @@ class NothingIsDeliveredUnderTheStateLock(QueueHarness):
                                   return_value=None), \
                 mock.patch.object(supervisor_mod.config, "HEARTBEAT_PATH",
                                   self.root / "heartbeat.json"), \
-                mock.patch.object(self.sup, "run_declared"):
+                mock.patch.object(
+                    self.sup, "run_declared",
+                    side_effect=declared_phases.provider_phases_suppressed):
             self.sup.tick()
         self.assertTrue(self.lock_states, "the tick delivered nothing")
         self.assertEqual(self.lock_states, [False] * len(self.lock_states))
@@ -573,7 +577,9 @@ class IntentsHaveStableIdentities(QueueHarness):
                                   return_value=None), \
                 mock.patch.object(supervisor_mod.config, "HEARTBEAT_PATH",
                                   self.root / "heartbeat.json"), \
-                mock.patch.object(self.sup, "run_declared"):
+                mock.patch.object(
+                    self.sup, "run_declared",
+                    side_effect=declared_phases.provider_phases_suppressed):
             self.sup.tick()
             first = set(self.intents())
             self.sup.tick()
@@ -736,7 +742,9 @@ class DocumentsWrittenBeforeThisStageStillWork(QueueHarness):
                                   return_value=None), \
                 mock.patch.object(supervisor_mod.config, "HEARTBEAT_PATH",
                                   self.root / "heartbeat.json"), \
-                mock.patch.object(self.sup, "run_declared"):
+                mock.patch.object(
+                    self.sup, "run_declared",
+                    side_effect=declared_phases.provider_phases_suppressed):
             self.sup.tick()
         self.assertIn("notifications", self.durable())
 
@@ -755,8 +763,10 @@ class LateTickWorkIsAlsoDrained(QueueHarness):
         self.seed()
 
         def late_provider_work(what, bound_seconds, action):
+            if what in declared_phases.PROVIDER_PHASES and what != "jev":
+                return None
             if what != "jev":
-                return
+                return action()
             with self.store.transaction() as doc:
                 self.sup.notify_out(doc, notify.HUMAN_REQUIRED,
                                     "budget hard stop", "stop spending")
@@ -833,7 +843,9 @@ class TheTickLimitsAreSharedAcrossBothDrains(QueueHarness):
                                   return_value=None), \
                 mock.patch.object(supervisor_mod.config, "HEARTBEAT_PATH",
                                   self.root / "heartbeat.json"), \
-                mock.patch.object(self.sup, "run_declared"), \
+                mock.patch.object(
+                    self.sup, "run_declared",
+                    side_effect=declared_phases.provider_phases_suppressed), \
                 mock.patch.object(self.sup, "new_drain_allowance",
                                   side_effect=counting), \
                 mock.patch.object(self.sup, "drain_notifications",

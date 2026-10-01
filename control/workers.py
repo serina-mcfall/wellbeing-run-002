@@ -59,7 +59,18 @@ class Readiness:
         }
 
 
-def tmux(args: list[str], timeout: int = 20) -> gh.Result:
+# C-18 stage 7. These were literal default arguments. They are named now
+# because the Supervisor's declare_busy bounds are DERIVED from them: a
+# dispatch phase may legitimately take as long as the external calls it
+# makes, and no longer. Naming them is what stops the two from drifting -
+# raise a timeout here and the declared bound follows automatically,
+# instead of silently under-bounding the phase that waits on it.
+TMUX_TIMEOUT = 20
+WORKMUX_TIMEOUT = 180
+WORKMUX_PATH_TIMEOUT = 30
+
+
+def tmux(args: list[str], timeout: int = TMUX_TIMEOUT) -> gh.Result:
     return gh.run(["tmux", *args], timeout=timeout)
 
 
@@ -75,7 +86,7 @@ def session_healthy(name: str) -> bool:
     return tmux(["has-session", "-t", name]).ok
 
 
-def workmux(args: list[str], timeout: int = 180) -> gh.Result:
+def workmux(args: list[str], timeout: int = WORKMUX_TIMEOUT) -> gh.Result:
     return gh.run(["workmux", *args], cwd=str(config.REPO_ROOT), timeout=timeout)
 
 
@@ -88,7 +99,7 @@ def list_worktrees() -> list[dict]:
 
 
 def worktree_path(name: str) -> Path | None:
-    result = workmux(["path", name], timeout=30)
+    result = workmux(["path", name], timeout=WORKMUX_PATH_TIMEOUT)
     if not result.ok or not result.stdout:
         return None
     path = Path(result.stdout.strip())

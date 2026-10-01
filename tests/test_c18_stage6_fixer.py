@@ -51,6 +51,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from control import (  # noqa: E402
     clock,
@@ -64,6 +65,7 @@ from control import (  # noqa: E402
     supervisor as supervisor_mod,
     workers,
 )
+import declared_phases  # noqa: E402
 
 # Captured before any patch replaces the module attribute, so the job-file
 # spy can record the lock and still write a REAL job file - which is what the
@@ -150,7 +152,8 @@ class FixerHarnessCase(unittest.TestCase):
                                        experiment_id="run-002")
         self.events: list[tuple[str, dict]] = []
         sup.log = mock.Mock(side_effect=lambda e, **k: self.events.append((e, k)))
-        sup.run_declared = mock.Mock()
+        sup.run_declared = mock.Mock(
+            side_effect=declared_phases.provider_phases_suppressed)
         return sup
 
     # ------------------------------------------------------------ fixtures
