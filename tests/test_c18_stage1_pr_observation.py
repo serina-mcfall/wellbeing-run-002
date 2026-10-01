@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # This directory too, for the shared merge-evidence fixture.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mergeable_evidence import complete_evidence  # noqa: E402
+from mergeable_evidence import attest, complete_evidence  # noqa: E402
 
 from control import (  # noqa: E402
     clock,
@@ -164,6 +164,13 @@ class ObservationHarness(unittest.TestCase):
                 # path, so an unapproved PR stays unmergeable for its own
                 # reason rather than gaining evidence it never earned.
                 record.update(complete_evidence(HEAD_SHA))
+                # C-04c: the ledger half, on the same approved path and for
+                # the same reason. A record that carries complete evidence
+                # with nothing in the durable ledger attesting it is a
+                # state production cannot reach, and attempt_merge now
+                # refuses it - which would make every merge test here fail
+                # for a reason that has nothing to do with C-18.
+                attest(self.sup.ledger, HEAD_SHA, task_id, number)
             doc["prs"][str(number)] = record
         if write:
             self.store._write(doc)

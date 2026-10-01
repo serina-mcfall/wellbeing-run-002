@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # This directory too, for the shared merge-evidence fixture.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mergeable_evidence import complete_evidence  # noqa: E402
+from mergeable_evidence import attest, complete_evidence  # noqa: E402
 
 from control import (  # noqa: E402
     clock,
@@ -98,9 +98,31 @@ class MergeBoundaryCase(unittest.TestCase):
         self.store = state_mod.Store(path=root / "state.json", tz=TZ)
         self.sup.store = self.store
         self.heartbeat_path = root / "heartbeat.json"
+        # C-04c: attempt_merge now reads the durable ledger as a second
+        # source for the four evidence legs, so a mocked ledger is no
+        # longer an adequate stub for this harness - its `inspect` would
+        # return a Mock, which fails closed and refuses every merge. A
+        # real Ledger on a temp path, never .runtime/.
+        from control import ledger as real_ledger_mod
+        self.ledger_path = root / "ledger.jsonl"
+        self.sup.ledger = real_ledger_mod.Ledger(
+            path=self.ledger_path, tz=TZ, experiment_id="run-002")
 
         self.events: list[tuple[str, dict]] = []
-        self.sup.log = mock.Mock(side_effect=lambda e, **k: self.events.append((e, k)))
+
+        # The recorder ALSO appends to the real ledger. Before C-04c this
+        # stub swallowed every log() call, so no production code path could
+        # write a durable event in this harness - which was invisible while
+        # nothing read the ledger back, and became a silent falsehood the
+        # moment attempt_merge started cross-checking it. Recording in both
+        # places keeps `self.events` convenient AND leaves the harness
+        # faithful: a leg committed by production code now produces a
+        # genuine attestation here, exactly as it would in a real run.
+        def _record(event_type, **fields):
+            self.events.append((event_type, fields))
+            return self.sup.ledger.append(event_type, **fields)
+
+        self.sup.log = mock.Mock(side_effect=_record)
         self.sup.notify_out = mock.Mock(return_value={"ok": True})
         # Jev and the Observer are slow provider work that runs after the tick
         # transaction; they are not part of this boundary.
@@ -135,6 +157,11 @@ class MergeBoundaryCase(unittest.TestCase):
             # boundary, so the evidence must pass or no candidate would ever
             # reach the boundary being tested.
             record.update(complete_evidence(REVIEWED_HEAD, task_id.lower()))
+            # C-04c: the ledger half of the same fixture. A real run writes
+            # these four as each leg completes; without them the record
+            # above describes evidence that passed with nothing in the
+            # durable record saying so, which production cannot reach.
+            attest(self.sup.ledger, REVIEWED_HEAD, task_id, number)
             if accepted:
                 record["accepted_findings"] = [_accepted_finding()]
             doc["prs"][str(number)] = record
@@ -402,6 +429,8 @@ class TestDeterministicOrdering(MergeBoundaryCase):
                            "reviewed_head": REVIEWED_HEAD,
                            "review_cycles": 1, "accepted_findings": []})
             record.update(complete_evidence(REVIEWED_HEAD, task_id.lower()))
+            # C-04c: the ledger half, same reason as seed()'s.
+            attest(self.sup.ledger, REVIEWED_HEAD, task_id, number)
             doc["prs"][str(number)] = record
         self.store._write(doc)
 
@@ -502,6 +531,10 @@ class InvariantDetectionCase(MergeBoundaryCase):
                        "reviewed_head": REVIEWED_HEAD,
                        "review_cycles": 1})
         record.update(complete_evidence(REVIEWED_HEAD))
+        # C-04c: the ledger half, same reason as seed()'s. Harmless for the
+        # cases here that never reach a merge - it only adds four events -
+        # and required for the ones that do.
+        attest(self.sup.ledger, REVIEWED_HEAD, "TASK-001", 100)
         record["last_review_at"] = (clock.iso(clock.now(TZ) - timedelta(hours=1))
                                     if last_review_at is mock.sentinel.default
                                     else last_review_at)

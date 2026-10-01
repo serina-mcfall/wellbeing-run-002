@@ -446,6 +446,139 @@ MERGEABLE_STATES: frozenset[str] = frozenset({"CLEAN", "UNSTABLE", "HAS_HOOKS"})
 # that left open, which was reproduced rather than inferred.
 MERGE_EVIDENCE_INCOMPLETE = "EVIDENCE_INCOMPLETE"
 
+# =====================================================================
+# C-04c: THE SECOND SOURCE. The append-only ledger, cross-checked against
+# the mutable record at merge time.
+#
+# WHY THIS EXISTS, STATED PLAINLY. C-04b declined to port live-gate.js's
+# REVIEW_PROVENANCE_* checks, on the reasoning that `evaluate_merge`
+# judges "the control plane's OWN records, written by the Supervisor
+# under its own lock". That sentence is true about WHO WRITES THEM in
+# the happy path and false as a security property, and the difference
+# was measured rather than argued:
+#
+#   .runtime/state.json is 0600 owned by `serina`.
+#   Workers are spawned by control/worker_entry.py with no setuid, no
+#   setgid and no container, so they run as `serina` too.
+#   Therefore every worker can write every field this gate trusts.
+#
+# Reproduced, not inferred: starting from a blank record for a pull
+# request with NO code review, NO security evidence and NEITHER
+# accessibility leg, writing six fields into state.json turns
+# evaluate_merge's answer from (False, NO_REVIEW_PASS) into
+# (True, MERGE_OK). See tests/test_c04c_merge_attestation.py.
+#
+# WHAT THIS CHECK IS, AND WHAT IT IS NOT.
+#
+#   IT IS   a second, independent source for the same four facts, so a
+#           forged merge requires editing state.json AND appending four
+#           consistent events to the durable evidence record. It closes
+#           corruption and partial-write cases completely, and it makes
+#           a deliberate forgery LEAVE A PERMANENT TRACE in the artefact
+#           the experiment is judged by.
+#
+#   IT IS NOT prevention. control/ledger.py has no hash chain, no
+#           signature and no integrity verification, and ledger.jsonl is
+#           0644 owned by `serina`. A worker that can edit state.json can
+#           also append to the ledger. THIS CHECK RAISES THE COST AND THE
+#           VISIBILITY OF A FORGERY. IT DOES NOT MAKE ONE IMPOSSIBLE, AND
+#           NOTHING IN THIS REPOSITORY DOES, UNTIL WORKERS RUN AS A
+#           DIFFERENT UID THAN THE ONE THAT OWNS .runtime/.
+#
+# That remaining gap is C-22, an OPEN LAUNCH BLOCKER. It is not closed
+# by this code and must not be recorded as closed by it.
+# =====================================================================
+
+# (event_type, the outcome that attests a PASS for that leg).
+MERGE_ATTESTATIONS: tuple[tuple[str, str], ...] = (
+    ("REVIEW_RESULT", REVIEW_PASS),
+    ("SECURITY_RESULT", security_contract.SECURITY_PASS),
+    ("ACCESSIBILITY_RESULT", accessibility_contract.ACCESSIBILITY_AUTO_PASS),
+    ("ACCESSIBILITY_REVIEW_RESULT", accessibility_contract.ACCESSIBILITY_PASS),
+)
+
+MERGE_ATTESTATION_EVENTS: tuple[str, ...] = tuple(
+    event for event, _ in MERGE_ATTESTATIONS)
+
+MERGE_ATTESTATION_MISSING = "LEDGER_ATTESTATION_MISSING"
+MERGE_ATTESTATION_UNREADABLE = "LEDGER_UNREADABLE"
+MERGE_ATTESTATION_CONTRADICTED = "LEDGER_ATTESTATION_CONTRADICTED"
+
+
+def _attested_head(event) -> str | None:
+    """The head an attestation names, however that leg spells it.
+
+    `head_sha` is not in `ledger.FIELDS`, so `Ledger.append` merges it
+    into `metadata_redacted` - which is also where the three legs that
+    pass `metadata_redacted={"head": ...}` put theirs. Both spellings are
+    read HERE rather than normalised at the twelve call sites, because
+    changing what those events record would change the durable evidence
+    format for a reason that is really about reading it.
+    """
+    if not isinstance(event, dict):
+        return None
+    meta = event.get("metadata_redacted")
+    if not isinstance(meta, dict):
+        return None
+    for key in ("head_sha", "head"):
+        value = meta.get(key)
+        if isinstance(value, str) and _CLAIM_SHA_RE.match(value):
+            return value
+    return None
+
+
+def ledger_attests_merge(inspection, head_sha: str) -> tuple[bool, str]:
+    """Whether the durable record independently attests all four legs.
+
+    (True, "") or (False, one finite reason). PURE over its arguments -
+    the caller does the reading, which keeps the merge transaction's one
+    file read at the call site rather than hidden in a predicate.
+
+    FAIL CLOSED, THREE WAYS:
+
+      * an INCOMPLETE inspection denies. A truncated line is not an
+        absent event, and treating "we could not read all of it" as "it
+        is not there" would make a crash mid-append look like a clean
+        refusal - or, worse, let a deliberately corrupted ledger read as
+        whatever the reader hoped.
+      * a MISSING leg denies. Absence is not permission.
+      * a CONTRADICTED leg denies: if any event of that type at this head
+        carries a non-PASS outcome, the leg is refused even though a PASS
+        also exists. Two disagreeing attestations about one commit are
+        unresolved evidence, and taking the convenient one is how a
+        re-run that failed becomes a merge.
+    """
+    if inspection is None:
+        return False, MERGE_ATTESTATION_UNREADABLE
+    if not getattr(inspection, "complete", False):
+        return False, MERGE_ATTESTATION_UNREADABLE
+    if not isinstance(head_sha, str) or not _CLAIM_SHA_RE.match(head_sha):
+        # An uncheckable head can match no attestation. Without this every
+        # comparison below would be against a value no event can carry.
+        return False, MERGE_ATTESTATION_MISSING
+
+    # A non-sequence `events` is UNREADABLE, not empty. The same lesson as
+    # security_claim_is_valid's: a predicate whose whole contract is to
+    # return a finite reason must never raise one, and a stub or a
+    # corrupted reader can hand this anything.
+    events = getattr(inspection, "events", None)
+    if not isinstance(events, (list, tuple)):
+        return False, MERGE_ATTESTATION_UNREADABLE
+
+    for event_type, passing in MERGE_ATTESTATIONS:
+        at_head = [e for e in events
+                   if isinstance(e, dict)
+                   and e.get("event_type") == event_type
+                   and _attested_head(e) == head_sha]
+        if not at_head:
+            return False, MERGE_ATTESTATION_MISSING
+        outcomes = {e.get("outcome") for e in at_head}
+        if passing not in outcomes:
+            return False, MERGE_ATTESTATION_MISSING
+        if outcomes - {passing}:
+            return False, MERGE_ATTESTATION_CONTRADICTED
+    return True, ""
+
 
 @dataclass(frozen=True)
 class MergeDecision:

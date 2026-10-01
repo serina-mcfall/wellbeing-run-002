@@ -4635,6 +4635,40 @@ class Supervisor:
                      activity_class="ORCHESTRATION")
             pr = gh.pr_view(repo, number) or pr
 
+        # C-04c. THE SECOND SOURCE, read before the gate and denying on its
+        # own. Everything `evaluate_merge` trusts in `record` lives in
+        # .runtime/state.json, which every worker can write today because
+        # they share this UID - so the whole evidence chain is forgeable by
+        # editing one file. The durable ledger carries the same four facts,
+        # written by the Supervisor as each leg completed, and this requires
+        # the two sources to agree about THIS head.
+        #
+        # Deliberately BEFORE evaluate_merge rather than inside it: the gate
+        # is pure over its arguments, and reading a file belongs at the call
+        # site. The head compared is `pr["headRefOid"]` - GitHub's
+        # observation, taken under this transaction's lock - never
+        # `record["reviewed_head"]`, which is the forgeable value.
+        #
+        # This is TAMPER EVIDENCE, NOT PREVENTION. The ledger has no hash
+        # chain and is writable by the same UID. C-22 remains open.
+        attested, why = routing.ledger_attests_merge(
+            self.ledger.inspect(task_id=task["id"], pr_id=number,
+                                event_types=routing.MERGE_ATTESTATION_EVENTS),
+            pr.get("headRefOid"))
+        if not attested:
+            # NOT an approval invalidation. A missing or unreadable
+            # attestation says nothing about whether the review was sound,
+            # so sending the task back round a review cycle would burn a
+            # cycle for a bookkeeping fault.
+            self.log("MERGE_BLOCKED", task_id=task["id"], pr_id=number,
+                     outcome="BLOCKED", activity_class="ORCHESTRATION",
+                     metadata_redacted={
+                         "reason": "the durable ledger does not independently "
+                                   "attest every evidence leg at this head",
+                         "condition": why,
+                         "head": pr.get("headRefOid")})
+            return
+
         current_hash = routing.material_diff_hash(repo, number)
         decision = routing.evaluate_merge(
             pr, record, self.cfg.required_checks, self.red_guardrail_active(doc),

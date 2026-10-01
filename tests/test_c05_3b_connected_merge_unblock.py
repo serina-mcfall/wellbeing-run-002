@@ -200,6 +200,31 @@ class ConnectedMergeUnblockCase(MergeBoundaryCase):
         record.update(legs)
         doc["prs"][str(PR)] = record
 
+        # C-04c: the ledger half of the same injection. `attempt_merge` now
+        # requires the durable record to attest all four legs at this head,
+        # and these two legs were injected rather than produced, so their
+        # attestations have to be injected too or the chain would be refused
+        # for a reason that has nothing to do with what it tests.
+        #
+        # The attestation for a DROPPED leg is dropped with it. Seeding it
+        # anyway would make this fixture claim the durable record attests a
+        # leg the record does not carry - which is precisely the divergence
+        # C-04c exists to catch, and a test must not manufacture it.
+        #
+        # The other two are produced for real: `accessibility_auto` by tick
+        # 1's commit_accessibility, and REVIEW_RESULT by `approve()`.
+        for event_type, outcome in routing.MERGE_ATTESTATIONS:
+            if event_type == "ACCESSIBILITY_RESULT":
+                continue                      # tick 1 produces this one
+            if drop_leg == "security_evidence" and event_type == "SECURITY_RESULT":
+                continue
+            if drop_leg == "accessibility_review" and \
+                    event_type == "ACCESSIBILITY_REVIEW_RESULT":
+                continue
+            self.sup.ledger.append(
+                event_type, task_id=MERGING, pr_id=PR, outcome=outcome,
+                metadata_redacted={"head": REVIEWED_HEAD})
+
         self.store._write(doc)
         return doc
 

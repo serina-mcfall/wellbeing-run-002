@@ -102,3 +102,59 @@ def with_complete_evidence(record: dict, sha: str,
     """`record`, updated in place with complete evidence at `sha`."""
     record.update(complete_evidence(sha, task_id))
     return record
+
+
+# ---------------------------------------------------------------- C-04c
+#
+# THE OTHER HALF OF THE SAME FIXTURE. `complete_evidence` seeds the
+# MUTABLE record. A real run cannot reach that record without ALSO having
+# written four events to the durable ledger, one as each leg completed -
+# `commit_review`, `commit_security`, `commit_accessibility` and
+# `ingest_accessibility_review` each log their RESULT with the head they
+# judged.
+#
+# Since C-04c, `attempt_merge` cross-checks the two sources, so a fixture
+# that seeds only the record is modelling a state production cannot
+# produce: evidence that passed with nothing in the evidence record saying
+# so. Seeding both is what keeps these fixtures faithful rather than what
+# makes them pass.
+#
+# They live next to `complete_evidence` for the reason that file's own
+# docstring gives: copies drift independently, and a fixture that drifts
+# from the shape under test stops exercising anything.
+
+def attestation_events(sha: str, task_id: str = "TASK-001",
+                       pr_id: int = 100) -> tuple[dict, ...]:
+    """The four ledger events a real run writes alongside the record.
+
+    `task_id` here is the LEDGER's spelling - `self.log(task_id=task["id"])`
+    uses the uppercase task identifier, while `complete_evidence` takes the
+    lowercase form the SHA-bound worker names are built from. They are
+    genuinely different strings and conflating them is how an attestation
+    silently stops matching.
+
+    The head is carried in `metadata_redacted`, which is where
+    `Ledger.append` puts it for all four: `head_sha` is not in
+    `ledger.FIELDS`, and the three accessibility/security legs pass
+    `metadata_redacted={"head": ...}` directly.
+    """
+    return tuple(
+        {"event_type": event_type, "task_id": task_id, "pr_id": pr_id,
+         "outcome": outcome, "metadata_redacted": {"head": sha}}
+        for event_type, outcome in routing.MERGE_ATTESTATIONS
+    )
+
+
+def attest(ledger, sha: str, task_id: str = "TASK-001",
+           pr_id: int = 100) -> None:
+    """Append those four events to a real `Ledger`.
+
+    Uses `Ledger.append` rather than writing lines directly, so the events
+    go through the same stamping, redaction and locking a live one would -
+    a fixture that bypassed `append` could pass while the real writer was
+    broken.
+    """
+    for event in attestation_events(sha, task_id, pr_id):
+        ledger.append(event["event_type"], task_id=event["task_id"],
+                      pr_id=event["pr_id"], outcome=event["outcome"],
+                      metadata_redacted=dict(event["metadata_redacted"]))

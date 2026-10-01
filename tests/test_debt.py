@@ -417,11 +417,19 @@ class SupervisorCase(unittest.TestCase):
         pr = {"number": PR, "state": "OPEN", "isDraft": False,
               "mergeStateStatus": "CLEAN"}
         view = {"mergeCommit": {"oid": merged_sha}} if pr_view else None
+        # C-04c. attempt_merge now cross-checks the durable ledger before the
+        # gate. This file mocks evaluate_merge because the gate is not what it
+        # tests, and the attestation check sits in front of it for exactly the
+        # same reason. The check itself is proved in
+        # tests/test_c04c_merge_attestation.py, including that removing it lets
+        # a forged record merge.
         with mock.patch.object(supervisor_mod.providers, "may", return_value=True), \
                 mock.patch.object(supervisor_mod.routing, "material_diff_hash",
                                   return_value="h"), \
                 mock.patch.object(supervisor_mod.routing, "evaluate_merge",
                                   return_value=routing.MergeDecision(allowed, "reason")), \
+                mock.patch.object(supervisor_mod.routing, "ledger_attests_merge",
+                                  return_value=(True, "")), \
                 mock.patch.object(supervisor_mod.gh, "merge",
                                   return_value=types.SimpleNamespace(
                                       ok=merge_ok, stderr="", stdout="")), \

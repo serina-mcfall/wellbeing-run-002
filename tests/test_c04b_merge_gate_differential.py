@@ -32,6 +32,31 @@ other fails this file.
 
 NOTHING WAS WEAKENED. Every change C-04b made to `evaluate_merge` adds a
 denial. No denial was removed, no threshold lowered, no policy amended.
+
+C-04c — ONE OF THE "ACCEPTED DIFFERENCES" WAS NOT ACCEPTABLE.
+-------------------------------------------------------------
+C-04b declined to port live-gate.js's REVIEW_PROVENANCE_* group, on the
+reasoning quoted above: that `evaluate_merge` judges "the control plane's
+OWN records, written by the Supervisor under its own lock", which is a
+different question from judging an untrusted document.
+
+That reasoning described a boundary THAT DOES NOT EXIST YET. Workers are
+spawned with no setuid and no container, so they run as the same UID that
+owns `.runtime/`, and every field the gate trusts is in a file they can
+write. Measured, then reproduced: see ThreatModelCase in
+tests/test_c04c_merge_attestation.py, where six field writes turn a pull
+request with no review and no evidence into MERGE_OK.
+
+Five of the six provenance conditions are now matched on the Python side
+by `routing.ledger_attests_merge`, enforced in `supervisor.attempt_merge`.
+The sixth, WORKER_MISMATCH, is recorded in JS_ONLY with why it cannot be
+matched today.
+
+WHAT THAT CHANGES, AND WHAT IT DOES NOT. A forged merge now requires
+editing state.json AND appending four consistent events to the durable
+evidence record. The ledger has no hash chain and the same UID can write
+it, so this is TAMPER EVIDENCE, NOT PREVENTION. The gap it leaves is
+C-22, an open launch blocker, and it must not be read as closed.
 """
 
 from __future__ import annotations
@@ -78,6 +103,16 @@ PYTHON_CONDITIONS = frozenset({
     "MERGE_STATE_BLOCKED",
     "MERGE_STATE_UNKNOWN",           # C-04b
     "MERGE_STATE_UNRECOGNISED",      # C-04b
+    # C-04c. Enforced in supervisor.attempt_merge immediately BEFORE
+    # evaluate_merge rather than inside it, because the gate is pure over
+    # its arguments and reading the ledger is I/O that belongs at the call
+    # site. They are listed here because this inventory is about what the
+    # Python merge PATH can refuse, not about one function's return values
+    # - and because leaving them out is exactly how a condition stops
+    # being compared against the JavaScript gate.
+    "LEDGER_ATTESTATION_MISSING",
+    "LEDGER_UNREADABLE",
+    "LEDGER_ATTESTATION_CONTRADICTED",
 })
 
 JS_CONDITIONS = frozenset({
@@ -130,6 +165,18 @@ SHARED = {
                                         "EVIDENCE_SHA_UNBOUND"),
     "required CI passed for this head":
                                        ("CI_NOT_SATISFIED", "CI_UNVERIFIED"),
+    # C-04c. These three were JS_ONLY until the threat model behind that
+    # classification was measured and found false — see ThreatModelCase in
+    # tests/test_c04c_merge_attestation.py.
+    "the durable record independently attests each leg at this head":
+                                       ("LEDGER_ATTESTATION_MISSING",
+                                        "REVIEW_PROVENANCE_MISSING"),
+    "the durable record can be read at all":
+                                       ("LEDGER_UNREADABLE",
+                                        "REVIEW_PROVENANCE_UNREADABLE"),
+    "two attestations about one commit do not disagree":
+                                       ("LEDGER_ATTESTATION_CONTRADICTED",
+                                        "REVIEW_PROVENANCE_CONFLICT"),
 }
 
 # Policy ONLY the Python gate has, with why the JavaScript one does not.
@@ -199,19 +246,24 @@ JS_ONLY = {
         "Which worker produced the review. The Supervisor dispatched that "
         "worker and read its output under its own lock, so the identity is "
         "known by construction rather than asserted by a document.",
-    "REVIEW_PROVENANCE_MISSING":
-        "Append-only LEDGER proof that this review is for this commit by "
-        "that worker. NOT PORTED. The binding now exists on the Python "
-        "side - C-18 stage 5 made REVIEW_RESULT carry head_sha and "
-        "agent_id - but it is never read back at merge time, which would "
-        "defend against a state.json rollback that the head comparison "
-        "does not already catch. Recorded as a known, accepted difference; "
-        "it is the strongest candidate if these ever converge.",
-    "REVIEW_PROVENANCE_UNBOUND": "As REVIEW_PROVENANCE_MISSING.",
-    "REVIEW_PROVENANCE_SHA_MISMATCH": "As REVIEW_PROVENANCE_MISSING.",
-    "REVIEW_PROVENANCE_WORKER_MISMATCH": "As REVIEW_PROVENANCE_MISSING.",
-    "REVIEW_PROVENANCE_CONFLICT": "As REVIEW_PROVENANCE_MISSING.",
-    "REVIEW_PROVENANCE_UNREADABLE": "As REVIEW_PROVENANCE_MISSING.",
+    "REVIEW_PROVENANCE_UNBOUND":
+        "An attestation that names NO head. The Python side reaches the "
+        "same refusal through LEDGER_ATTESTATION_MISSING: an event whose "
+        "metadata carries no usable head simply does not match this head, "
+        "so the leg is unattested. Same outcome, one fewer code.",
+    "REVIEW_PROVENANCE_SHA_MISMATCH":
+        "An attestation naming a DIFFERENT head. Same as "
+        "REVIEW_PROVENANCE_UNBOUND - it does not match, so the leg is "
+        "unattested and LEDGER_ATTESTATION_MISSING fires.",
+    "REVIEW_PROVENANCE_WORKER_MISMATCH":
+        "STILL NOT PORTED, and the only part of the provenance group that "
+        "is not. live-gate.js checks WHICH WORKER produced the review. The "
+        "Python side cannot do the equivalent for all four legs: only "
+        "REVIEW_RESULT logs agent_id, and the code reviewer's worker name "
+        "(<task>-review-<cycle>) is not SHA-bound, so a check over it "
+        "would be weaker than it looks while reading as if it were not. "
+        "C-04 already records that asymmetry as an open defect. This is a "
+        "recorded gap, not an oversight.",
     "PR_UNOBSERVED":
         "The Supervisor refuses before reaching the gate: execute_merges "
         "logs MERGE_BLOCKED and continues when gh.pr_view returns None, so "
