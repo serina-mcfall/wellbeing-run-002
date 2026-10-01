@@ -3957,3 +3957,858 @@ that exercises the wiring is the one that must go red, and it does.
 - **The registry is derived from the frozen spec, not from WCAG.** It says
   what `product/ACCESSIBILITY.md` says and nothing more. It is not a
   conformance checklist.
+
+
+## 31. C-05.3b accessibility dispatch — design proposal (PROPOSED — NOT APPROVED — NOT IMPLEMENTED)
+
+**Status: PROPOSED. Not approved. Not implemented. No production code was
+changed to write this.** Read-only inspection, 2026-10-01, against
+`wip/c05-1-persistence` at `f2aa539`. Nothing here authorises a launch, a
+paid provider call, a worker, a rehearsal or a code change. Ten of the
+decisions below are marked **GOVERNANCE** and cannot be taken by an
+implementer; five of those are **blocking** (§31.14).
+
+### 31.1 The defect this closes, verified
+
+`control/supervisor.py:1871-1873`, at the end of `ingest_security`:
+
+```
+        # SECURITY_PASS deliberately does NOT advance to REVIEW: accessibility
+        # is a required evidence class and is not implemented until C-05.3b,
+        # so the task holds in WAITING_EVIDENCE.
+```
+
+`SECURITY_FAIL` transitions to `FIX_REQUIRED` at `:1868-1870`. `SECURITY_PASS`
+falls off the end of the function. `WAITING_EVIDENCE`'s outbound edges
+(`control/state.py:114-115`) include `REVIEW`, but **nothing in the repository
+ever takes that edge** — grep for `"REVIEW"` as a `transition` target from an
+evidence path returns nothing. The asymmetry is pinned by
+`tests/test_c05_3_evidence_routing.py:314-321`
+(`test_security_pass_alone_never_reaches_review`), which ticks three times and
+asserts the task is still `WAITING_EVIDENCE`.
+
+The consequence is the one `experiment/REHEARSAL-PLAN.md:268` names: a passing
+task stalls permanently and only failing tasks progress. An idle run that looks
+healthy.
+
+### 31.2 What is already governed, and what is not
+
+**Approved (C-05a, RESOLVED 2026-09-30, `experiment/CONTRADICTION-AUDIT.md:42`)
+— four timeout constants and nothing else:**
+
+| Key | Value | Consumer today |
+|---|---|---|
+| `timeouts.security` | 1800 | C-05.3a (`_lease_expires("security")`) |
+| `timeouts.accessibility_soft_seconds` | 120 | **none** |
+| `timeouts.accessibility_hard_seconds` | 300 | **none** |
+| `timeouts.product_server_readiness_seconds` | 120 | **none** |
+
+The row is explicit that these are *"initial rehearsal governance values, not
+empirical findings"*, that they are *"never auto-tuned"*, and that
+*"C-05.3b consumes the accessibility and product-server values"*. It is equally
+explicit about shape, and that sentence is the single most load-bearing piece
+of governance this proposal has:
+
+> "The `_seconds` keys are deliberately NOT role-shaped: accessibility runs
+> in-process via `gate_evidence.run_accessibility` and the product server is a
+> control-plane-owned process, so neither is a leased worker role and neither
+> may be reachable as `timeouts[role]`."
+
+Two facts follow directly, and most of this design is downstream of them:
+
+1. The **automated** half is an in-process call, not a leased worker.
+2. The **product server** is a control-plane-owned process, not a worker.
+
+**Not approved — no design exists anywhere.** Every other C-05.3b reference in
+the repository is a status marker saying it has not begun:
+`experiment/LAUNCH-CHECKLIST.md:53` ("Not started"),
+`C05-3a-SESSION-HANDOVER.md:3062`, `:3118`, `:3129`,
+`experiment/REHEARSAL-PLAN.md:268`, and the supervisor comment above. There is
+no `control/accessibility_contract.py`, no parser, no
+`ACCESSIBILITY_PASS`/`ACCESSIBILITY_FAIL` token anywhere under `control/`, no
+caller of `gate_evidence.run_accessibility`, and no caller of
+`control/prompts.py::accessibility` (`:99-110`).
+
+### 31.3 Why C-05.3a cannot simply be copied
+
+Ten structural differences, each found by inspection. The form of this section
+follows §14.0.
+
+1. **Two halves, not one review.** Security is a single provider judgement about
+   a diff. Accessibility is an in-process Node browser run *and* a separate
+   leased provider review, and `agents/ACCESSIBILITY.md:8` forbids collapsing
+   them: *"Automated checks do not replace this qualitative review; neither
+   replaces the other."* The governed timeout keys already encode the split —
+   `security` is role-shaped, the accessibility keys deliberately are not.
+
+2. **Six of the nine claim keys are meaningless for the automated half.**
+   `worker`, `lease_expires_at` and the whole `security_worker_name` /
+   `SECURITY_WORKER_RE` SHA-binding defence (`control/routing.py:619-652`) exist
+   for one reason, stated at `:621-626`: every worker artefact in
+   `WORKER_LOG_DIR` is keyed on the worker name, and nothing clears a stale one.
+   The automated half writes nothing into `WORKER_LOG_DIR`. Its isolation is
+   `allocate_attempt`'s `O_EXCL` mkdir (`control/gate_evidence.py:643-663`).
+   Copying the name defence would add a field with nothing to defend and a
+   validator rule that can never fire.
+
+3. **The attempt ordinal is chosen in a different place.** C-05.3a's whole
+   safety argument is that the ordinal is chosen *under the exclusive state
+   lock* and nowhere else (`plan_security` docstring,
+   `control/supervisor.py:1045-1049`). `allocate_attempt` chooses it by racing
+   `mkdir` on the filesystem, outside any lock. Those two cannot both be true
+   for one attempt, and §31.5 has to pick.
+
+4. **Accessibility needs a product server that does not exist.** Security needs
+   nothing beyond the provider worker. `apparatus/accessibility/run.js` takes a
+   URL and never starts anything — `withPage` goes straight to
+   `page.goto(url)`. `product/` contains six specification markdown files and
+   **no `package.json`, no source, no start command**. Nothing anywhere in
+   `control/`, `apparatus/`, `scripts/` or `bin/` starts a product server.
+
+5. **C-09 has no concept of a control-plane-owned port.** The C-09 audit row
+   (`experiment/CONTRADICTION-AUDIT.md:17`) scopes the allocator as
+   *"builder + fixer only; reviewers are read-only sandboxes"*.
+   `workers.select_port_candidates` (`control/workers.py:275-304`) excludes
+   exactly two sets: ports on committed `doc["workers"]` records, and ports
+   reserved by a job file (`_reserved_job_file_ports`, `:233-272`). A
+   control-plane-owned product server is in neither. Security never had to
+   touch the port mechanism at all. This cuts **both ways** — see §31.6.
+
+6. **No analogue of SURFACES_INCOMPLETE.** Security grades twelve named
+   `SECURITY_SURFACES` and a missing one fails closed
+   (`routing.security_is_consistent:305-308`). Accessibility has ten
+   `accessibilityCheck` enum values, nine produced by a machine and the tenth
+   (`COGNITIVE_SENSORY_REVIEW`) produced by a provider. Completeness therefore
+   spans **two producers**, and a single `CHECKS_INCOMPLETE` reason has to be
+   satisfied jointly.
+
+7. **Findings do not carry a severity the gate can read.** A security finding
+   carries `severity` directly. An accessibility finding carries `jev_severity`
+   *plus* `classification` *plus* `unmet_requirement`, and must be run through
+   `control/severity.py::apply_severity_policy` against a requirement registry
+   that does not exist yet. The automated half emits **no severity of any
+   kind** — `run.js` emits `{check_id, result, sha, artifact_reference}` and
+   nothing else.
+
+8. **The blocking rule is stricter and differently shaped.** Security: P0/P1
+   block. Accessibility: a deterministic **P1 floor** is applied to any
+   `FAILURE` classification (`severity.py:104-107`), *and* invalid evidence
+   blocks independently of severity (`severity.py:49`, `agents/ACCESSIBILITY.md:15`).
+   An unclassifiable finding is a missing-evidence state, not a P2.
+
+9. **The qualitative role has no governed timeout.** `config/experiment.json`'s
+   `timeouts` object has `security: 1800` and **no `accessibility` key**.
+   `_lease_expires` (`control/supervisor.py:1879-1885`) reads
+   `self.cfg.extra["timeouts"][role]`, so `_lease_expires("accessibility")`
+   raises `KeyError`. C-05a made the omission deliberate for the in-process
+   half — but the *qualitative* half is a leased worker, and it has no number.
+   C-05.3a had its number before it started. This is blocking governance
+   (§31.12, G1).
+
+10. **The run blocks the tick for longer than the staleness threshold.**
+    `run_accessibility` calls `workers.run_bounded` synchronously with
+    `hard_timeout_seconds = 300`. `supervisor.heartbeat_stale_seconds` is
+    **120**. A supervisor running accessibility looks dead to the Watchdog
+    unless `declare_busy` wraps it. The security worker is spawned and polled,
+    so C-05.3a never met this. `declare_busy` is **mandatory here**, not the
+    optional stage-7 polish C-18 describes.
+
+### 31.4 Shape of the solution
+
+Two evidence producers, two claims, one composite gate.
+
+```
+                    ┌─ accessibility_auto    (in-process Node + product server)
+WAITING_EVIDENCE ───┼─ accessibility_review  (leased provider worker)
+                    └─ security_evidence     (landed, C-05.3a)
+                              │
+                              └─► composite gate at one SHA ──► REVIEW
+```
+
+Everything new is written in the C-18 plan/execute/confirm shape from the
+start. No new external effect is added inside T1.
+
+### 31.5 The automated half — `accessibility_auto`
+
+**Claim schema — seven keys, deliberately not nine.** On the PR record, beside
+`security_evidence`:
+
+```
+sha            full 40-hex head this attempt is about
+attempt_id     "attempt-NNNN", gate_evidence's existing namespace
+claim_state    PLANNED | RUNNING | COMPLETE
+claimed_at     canonical tz-aware second-precision
+port           the product server's governed C-09 port for this attempt
+verdict        ACCESSIBILITY_AUTO_PASS | ACCESSIBILITY_AUTO_FAIL | None
+reason         "" or one finite failure reason
+```
+
+`port` is the durable ownership record §31.6 needs — the single field that both
+the allocator's exclusion set and the orphan-listener check read. No `worker`
+(there is none), no `lease_expires_at` (nothing is leased), no `ordinal`
+separate from `attempt_id`. **Reason for refusing the C-05.3a shape:**
+a nullable field that a validator must special-case is a field that will one day
+be read as meaningful. §31.3 item 2 is the argument.
+
+`claim_state` has **three** values, not C-05.3a's three-with-different-meanings.
+`SPAWNED` does not apply — nothing is spawned — so the middle state is `RUNNING`,
+and its durable witness is the pair of lifecycle markers C-05.2 already writes
+(`attempt-running.marker` / `attempt-terminal.marker`,
+`gate_evidence.py:72-76`). Recovery reads markers, not `/proc`:
+
+| On disk | Meaning | Action |
+|---|---|---|
+| no attempt dir for `(task, sha, attempt_id)` | the plan never materialised | re-plan |
+| RUNNING, no TERMINAL, no outcome | crashed mid-run, **or** still running | see D1 below |
+| TERMINAL + `attempt-outcome.json` | finished | ingest |
+| TERMINAL, no outcome | impossible by construction (`run_accessibility:1470-1474` publishes the outcome *before* the marker) — treat as corrupt, fail closed |
+
+**D1 — the one genuinely hard recovery case.** C-05.3a could distinguish "still
+running" from "crashed" by scanning `/proc` for the named worker. There is no
+worker here: the run happens inside the supervisor's own process, so if the
+supervisor is alive and in Phase C the run is alive, and if the supervisor
+restarted the run is dead. The supervisor's own singleton lock
+(`_acquire_singleton`) already proves at most one supervisor exists. **Proposed
+rule:** a `RUNNING` claim found by a *newly started* supervisor is dead by
+construction — a supervisor that holds the singleton lock and does not have the
+run on its own stack cannot have it running anywhere. Mark the attempt abandoned
+(`reason = SPAWN_OR_RUN_INCOMPLETE`), advance the ordinal, re-plan. This is
+*weaker* evidence than C-05.3a's `/proc` proof and must be stated as such — but
+unlike a paid provider review, a wasted automated re-run costs CPU and nothing
+else, so the fail-closed direction here is "re-run", not "hold".
+
+**Ordinal allocation — the C-05.3a invariant versus `allocate_attempt`.** Two
+options, and this one must be decided, not left:
+
+- **(a) Keep `allocate_attempt` as-is**: Phase C picks the ordinal by `mkdir`,
+  Phase D writes the resulting `attempt_id` back into the claim. The window
+  between plan and confirm is exactly C-05.3a's `spawn_uncommitted` condition
+  (`routing.security_spawn_uncommitted`), already modelled.
+- **(b) Choose the ordinal in T1** and add
+  `gate_evidence.allocate_attempt_at(task_id, sha, ordinal)` that still uses
+  `O_EXCL` mkdir but fails closed on collision instead of advancing.
+
+**Recommended: (b).** It preserves the invariant C-05.3a's whole safety argument
+rests on — the ordinal is chosen under the exclusive lock and nowhere else — and
+it makes the claim complete at plan time, so there is no window in which a
+durable claim exists with a null `attempt_id`. The cost is one new
+`gate_evidence` function and the loss of `allocate_attempt`'s
+advance-on-collision convenience, which the automated path does not need
+(a collision there means the claim was already materialised, which is
+information, not an obstacle). Reversible either way; this is a design call an
+implementer may take, not governance.
+
+**Lifecycle, per tick:**
+
+```
+outside lock   A   observe       read markers + attempt-outcome.json for the claimed attempt
+outside lock   E1  (none)        the outcome is already published by run_accessibility itself
+─── T1 ────────────────────────────────────────────────────────────────────────
+inside  lock   E2  ingest        durable outcome → verdict, reason
+inside  lock   B   plan          gates → choose ordinal → write PLANNED claim
+─── T1 commits ────────────────────────────────────────────────────────────────
+declare_busy   C   execute       start product server → wait readiness → run_accessibility → stop server
+own txn        D   confirm       claim_state → COMPLETE (or RUNNING on a partial)
+```
+
+Phase C is wrapped in `self.run_declared("accessibility", bound, ...)` where
+`bound = product_server_readiness_seconds + accessibility_hard_seconds +
+BUSY_MARGIN_SECONDS` = 120 + 300 + margin. **This is required, not optional:**
+see §31.3 item 10.
+
+**Honest cost, stated rather than hidden.** `tick()` is sequential and
+`supervisor.poll_seconds` is 30. One accessibility attempt can therefore delay
+the next tick by up to ~7 minutes — roughly fourteen poll intervals — during
+which no merge, no dispatch and no notification drain happens. Making the Node
+run non-blocking would contradict C-05a's "runs in-process" governance, so this
+proposal accepts the stall and declares it. **GOVERNANCE (G7, non-blocking):**
+whether that stall is acceptable at `max_builders = 3`, or whether C-05a's
+in-process ruling should be revisited.
+
+### 31.6 The product server
+
+This is the least answerable question in the proposal and most of it escalates.
+
+**What is settled by governance.** C-05a: the product server is "a
+control-plane-owned process", with `product_server_readiness_seconds = 120`.
+So the control plane starts it and the control plane stops it — not a worker,
+not the Builder, not `run.js`.
+
+**What is settled by inspection.** `run.js` starts nothing and binds nothing;
+it takes a URL that must already resolve (`run.js:122`,
+`page.goto(url, {waitUntil: 'load'})`). Its own comments explain that even a
+Playwright `BrowserServer` was avoided *"because launching a server would bind a
+websocket port that C-09's listener reconciliation would then have to account
+for"*. So the product server is squarely the control plane's problem.
+
+**Proposed shape, for the parts that are derivable:**
+
+- **Lifetime: one attempt.** Started at the top of Phase C, stopped in the same
+  Phase C after `run_accessibility` returns *or raises*. Not a long-lived
+  process, not shared between attempts, not surviving a tick. Rationale: a
+  server outliving its attempt is a process with no durable owner, which is
+  precisely the orphan class C-09 exists to prevent, and nothing on the PR
+  record could name it.
+- **Working tree: the attempt's own worktree at the exact head SHA.** Same rule
+  as C-05.3a's security worktree, same ownership mechanism
+  (`retained_worktrees` with a new `why` value `ACCESSIBILITY_ATTEMPT`), same
+  release-after-outcome-is-durable discipline (Phase F). Evidence bound to a
+  different commit is not evidence (`gate_evidence._adjudicate:1410-1412`
+  already enforces this on the result file).
+- **Readiness: poll the chosen URL, bounded by
+  `product_server_readiness_seconds` (120).** Readiness is proven by the server
+  answering, never by the process existing — a process that started and is
+  failing to serve must not read as ready.
+- **Readiness timeout is an apparatus failure, not a product defect.** Proposed
+  reason token `PRODUCT_SERVER_UNREADY`, recorded as a `FAILED` attempt outcome
+  with an empty check list. It must **not** transition to `FIX_REQUIRED`:
+  nothing was observed about the product, and `gate_evidence`'s stated rule 2
+  (`:22-25`) is that *"a run that did not happen never reads as a run that
+  passed"* — the converse holds too, and a server that would not start is not
+  evidence that the page is inaccessible. The task holds, and the hold is
+  bounded by G4.
+- **Port: taken from the governed C-09 range `[3200, 3299]`** via the already-
+  landed C-18 stage 3 split — `select_port_candidates` under the lock (T1),
+  `probe_port` outside it (Phase C).
+
+**HAZARD — and it is two defects, not one, because the port mechanism is
+blind in both directions.**
+
+*Forward:* `select_port_candidates` excludes only `doc["workers"]` ports and
+job-file ports. A control-plane-owned server appears in neither, so from the
+moment it binds until it exits, `dispatch_builder` can select and hand a Builder
+the same port.
+
+*Reverse — and this is the worse half.* `control/reconcile.py:427-453` scans
+`/proc/net/tcp` and `/proc/net/tcp6` for listeners inside `[3200, 3299]` and
+emits `FOREIGN_OR_ORPHAN_LISTENER` for any in-range listener with no owning
+worker record. A product server owned by the control plane has no worker record
+by construction, so **every tick it runs, the Watchdog reports it as an orphan.**
+That is exactly C-05.3a's D5 (§3, *"Running security attempts are reported as
+orphan resources"*) reappearing in a new resource class — and D5's repair, R4,
+taught `detect_orphans` about claim-based ownership rather than inventing a
+second ownership store. The same repair shape applies here.
+
+The repository's existing durable port-claim mechanism is the job file, written
+before spawn — but `_reserved_job_file_ports` resolves liveness through
+worker-entry and recorded-agent identity (`:249-271`), which a non-worker
+process does not have, so a synthetic job file would be *misread*, not merely
+unhelpful.
+
+**Proposed minimal fix, following R4 rather than inventing anything:** the
+accessibility claim carries a `port` field — already durable, already in `doc`,
+already scoped to the attempt — and that one field is read by both
+`select_port_candidates` (as a third exclusion source) and the orphan-listener
+check (as proof of ownership). One store, two readers, matching R4's reasoning
+exactly. **GOVERNANCE (G2, blocking):** this widens a C-09 mechanism whose row
+is still `OPEN / PARTIAL`, and C-09 ownership rules are governed, not an
+implementer's call.
+
+**ESCALATED — not answerable from the repository at all (G3, blocking):**
+*what command starts the product server.* `product/` is specifications only.
+There is no `package.json`, no framework choice committed, no dev-server
+command, no build, no dependency install, and no governed timeout for an
+install step (which is unbounded and would sit inside the 120 s readiness
+budget). The Builder creates the product during the run, so the command cannot
+be known pre-T+00 — but it also cannot be *discovered* safely, because
+"run whatever `package.json` says" is arbitrary code execution chosen by a
+worker. A governance answer is needed on: the committed command (or the
+committed contract a Builder must satisfy), whether dependency install is in or
+out of the readiness budget, and what happens on the very first PR when no
+product exists yet.
+
+### 31.7 The qualitative half — `accessibility_review`
+
+Structurally the closest thing to C-05.3a in this proposal, and the only place
+copying is appropriate.
+
+**Claim schema: the nine keys, unchanged in shape** — `sha`, `ordinal`,
+`attempt_id`, `worker`, `claim_state`, `claimed_at`, `lease_expires_at`,
+`verdict`, `reason` — stored at `record["accessibility_review"]`, with
+`accessibility_worker_name(task_id, sha, ordinal)` deriving
+`"{task}-a11y-{sha}-{ordinal:04d}"` and the full SHA, for exactly the reason
+`routing.py:619-642` gives. Attempt namespace
+`a11y-attempt-NNNN`, which like `security-attempt-NNNN` cannot match the
+`attempt-` prefix `scan_sidecars` walks, so browser observation never sees it.
+
+**Name length check, done rather than assumed.** `SECURITY_NAME_OVERHEAD` is
+`len("-security-") + 40 + len("-9999")` = 55, leaving 9 characters for the task
+id inside the 64-character `SECURITY_WORKER_RE` bound — and §routing's comment
+notes this run's eight-character task ids fit at 63. `"-a11y-"` is four
+characters shorter than `"-security-"`, so the accessibility form is 59 for the
+same task ids. Fits, with more headroom, not less.
+
+**Recovery, dispatch gates, worktree ownership, publication retry and release
+are the C-05.3a tables with `security` renamed.** `security_recovery_state`'s
+eight-state table, the `PROVEN_NOT_RUNNING` three-condition rule, the
+`PUBLICATION_PENDING` state, the `STALE_HEAD_ATTEMPT_LIVE` refusal, the
+`_security_dispatch_block` gate set (frozen / provider / stopping / slots) and
+Phase F's release-only-after-publication rule all transfer unchanged. That is
+the *only* part of C-05.3a this proposal copies, and it copies it wholesale and
+deliberately.
+
+**BLOCKER — no governed timeout.** `_lease_expires("accessibility")` raises
+`KeyError` today (§31.3 item 9). An implementer cannot pick a number: C-05a is
+explicit that these values are governance decisions and *"changing any one of
+them requires another explicit governance decision rather than a code change"*.
+Adding one is the same kind of act. **GOVERNANCE (G1, blocking).** Note the
+C-05a row's own reasoning predicts the required shape: the qualitative review
+*is* a leased worker, so its key must be bare and role-shaped
+(`timeouts.accessibility`), not `_seconds`-suffixed — which also means the key
+name `accessibility` would then be reachable as `timeouts[role]`, exactly what
+C-05a wanted to prevent for the *other* two values. The two halves must not
+share a key name.
+
+### 31.8 The verdict contract — `control/accessibility_contract.py`
+
+New module, in the exact shape of `control/security_contract.py`: a dependency-
+light vocabulary leaf, importing nothing from `control/` except — see below —
+one alias set, reading no file, spawning nothing. One string literal per token,
+in this repository, in this file.
+
+```python
+# ---------------------------------------------------------------- verdicts
+ACCESSIBILITY_PASS         = "ACCESSIBILITY_PASS"
+ACCESSIBILITY_FAIL         = "ACCESSIBILITY_FAIL"
+ACCESSIBILITY_UNPARSEABLE  = "ACCESSIBILITY_UNPARSEABLE"
+ACCESSIBILITY_VERDICTS     = frozenset({ACCESSIBILITY_PASS, ACCESSIBILITY_FAIL})
+
+ACCESSIBILITY_AUTO_PASS    = "ACCESSIBILITY_AUTO_PASS"
+ACCESSIBILITY_AUTO_FAIL    = "ACCESSIBILITY_AUTO_FAIL"
+
+# ---------------------------------------------------- adjudication reasons
+#  (qualitative review — produced while deciding whether a parsed review
+#   is a coherent contract)
+OUTPUT_UNPARSEABLE          = "OUTPUT_UNPARSEABLE"      # alias, see below
+VERDICT_UNRECOGNISED        = "VERDICT_UNRECOGNISED"    # alias, see below
+FINDING_FIELDS_INVALID      = "FINDING_FIELDS_INVALID"  # alias, see below
+PASS_WITH_BLOCKING_FINDINGS = "..."                     # alias, see below
+FAIL_WITHOUT_BLOCKING_FINDINGS = "..."                  # alias, see below
+CLASSIFICATION_INVALID      = "CLASSIFICATION_INVALID"  # severity.py said INVALID
+CHECKS_INCOMPLETE           = "CHECKS_INCOMPLETE"       # fewer than ten check_ids
+
+# -------------------------------------------- apparatus reasons, automated
+RESULT_MISSING    = "RESULT_MISSING"
+RESULT_UNREADABLE = "RESULT_UNREADABLE"
+RESULT_EMPTY      = "RESULT_EMPTY"
+SHA_MISMATCH      = "SHA_MISMATCH"
+PRODUCT_SERVER_UNREADY = "PRODUCT_SERVER_UNREADY"
+
+# ------------------------------------------- apparatus reasons, shared
+TIMED_OUT, EXIT_NONZERO, OUTPUT_MISSING, PROVIDER_FAILURE,
+SPAWN_OR_RUN_INCOMPLETE   # aliased from security_contract — see below
+```
+
+**Three deliberate differences from the security contract, each with a reason:**
+
+- **No `SURFACES_INCOMPLETE`.** The accessibility prompt has no surfaces block
+  (`prompts/accessibility.md:68-93`). Completeness is about the ten
+  `accessibilityCheck` values, spanning two producers, so the reason is
+  `CHECKS_INCOMPLETE` and it is evaluated against the **union** of the nine
+  automated results and the qualitative `COGNITIVE_SENSORY_REVIEW`. Reusing the
+  security name would make a reader believe a surfaces grid exists.
+
+- **A new `CLASSIFICATION_INVALID`.** Security has no equivalent because a
+  security finding's severity is self-describing. An accessibility finding goes
+  through `severity.apply_severity_policy`, which can return
+  `{"valid": False, ...}` for six distinct contradictions — all of which must
+  fail the review closed rather than be read as a lesser finding, per
+  `agents/ACCESSIBILITY.md:15`.
+
+- **The five process reasons are aliased, not restated.** `security_contract`'s
+  module docstring states the rule: *"There is exactly one string literal per
+  token in this repository."* `TIMED_OUT`, `EXIT_NONZERO`, `OUTPUT_MISSING`,
+  `PROVIDER_FAILURE` and `SPAWN_OR_RUN_INCOMPLETE` already have their one
+  literal, and `control/gate_evidence.py:172-176` already aliases exactly these
+  five from `security_contract` for exactly this reason. This proposal follows
+  that existing pattern rather than inventing a third neutral leaf. It reads
+  slightly oddly — accessibility importing from a module named `security` — and
+  the alternative (extracting a shared `attempt_contract.py` leaf and
+  re-exporting from both) is cleaner but refactors landed, tested code for a
+  naming aesthetic. **Recommended: alias now, extract only if a third evidence
+  class ever arrives.**
+
+**A real defect this surfaces.** `gate_evidence._adjudicate` (`:1391-1418`)
+produces `"TIMED_OUT"`, `"EXIT_NONZERO"`, `"RESULT_MISSING"`,
+`"RESULT_UNREADABLE"`, `"RESULT_EMPTY"` and `"SHA_MISMATCH"` as **bare string
+literals inline**, with no governed union and no module owning them. Two of
+those six are second literals for tokens `security_contract` already owns. This
+is the exact drift `security_contract`'s docstring exists to prevent, and
+C-05.3b is the natural place to close it. Not a behaviour change; a
+single-definition change.
+
+**Parser: `routing.parse_accessibility(text)` + `accessibility_is_consistent`,
+modelled on `parse_security` / `security_is_consistent`,** keeping every stated
+rule: reverse-scan fenced blocks (the prompt asks for the block last); never
+default a missing severity; never drop a malformed finding to make a review look
+coherent; return an unrecognised verdict token rather than falling back to an
+earlier block. Fixed precedence for one deterministic reason per review:
+unparseable → unrecognised verdict → structure → per-finding severity policy →
+verdict-vs-findings.
+
+### 31.9 Finding IDs — `TASK###-R#-A11Y-###`
+
+Three producers refuse to allocate, and they are right to:
+
+- `apparatus/accessibility/run.js:13-19` — *"does NOT allocate
+  TASK###-R#-A11Y-### finding IDs — that belongs to whatever assembles a PR
+  evidence package (not yet built; no product PR exists pre-T+00), and
+  inventing one here would be exactly the kind of fabricated capability
+  Protocol v2's anti-cheating rule forbids."*
+- `prompts/accessibility.md:77` asks the reviewer for `"id": "A1"` — a local
+  ordinal that will not validate against the schema pattern
+  (`PR-EVIDENCE-V2.schema.json`, `accessibilityFinding.id`).
+- `protocol/PR-EVIDENCE-V2.schema.json` requires the canonical form, and
+  requires a `finding_id` on any check whose `result` is `FAIL`.
+
+**Proposed resolution: C-05.3b does NOT mint finding IDs.** It stores raw check
+results and raw qualitative findings, bound to `(task_id, sha, attempt_id)`, in
+the durable attempt outcome. The assembler `run.js` names — the PR evidence
+package — is **C-04**, which is not built, and minting here would create a
+second allocator that C-04 would then have to either adopt or override.
+
+This is affordable because of a fact worth stating plainly: **the composite
+REVIEW gate (§31.10) needs verdicts, not finding IDs.** C-05.3b can be complete
+and correct without ever producing a `TASK###-R#-A11Y-###` string.
+
+**The consequence must be stated rather than glossed:** until C-04 lands, the
+run produces durable, SHA-bound, parseable accessibility evidence that is **not
+a schema-valid Protocol v2 PR evidence package**. C-05.3b unblocks
+`WAITING_EVIDENCE`; it does not deliver the evidence artefact Protocol v2
+specifies. Anyone citing C-05.3b as "the accessibility gate is implemented"
+would be overclaiming.
+
+**For when C-04 does mint them — the ownership answer, and the hazard §14.0
+item 3 already named.**
+
+- **R# is an accessibility *evidence-cycle* counter, not the reviewer's
+  `review_cycles`.** A new per-PR-record `accessibility_cycles`, incremented
+  **exactly once per accepted evidence set, in the same transaction as the
+  ingest** (Phase E2) — never at plan time.
+- **The ### ordinal** is allocated in that same ingest transaction, `001`
+  upward, over a deterministic ordering: the nine automated FAILs first in
+  `run.js`'s fixed emission order (`run.js:454-462`), then the qualitative
+  findings in emitted order. Deterministic so that re-ingesting the same durable
+  outcome yields byte-identical IDs — ingestion is already required to be
+  idempotent.
+- **Why commit-time and not plan-time.** §14.0 item 3 states the dilemma:
+  increment at plan and a failed execution burns a number, leaving a hole;
+  increment at commit and two plans might choose one name. Here the second horn
+  does not exist, because the two counters answer different questions and live
+  in different namespaces. The *attempt* ordinal is chosen at plan time under
+  the lock (that is what makes two concurrent plans impossible); the *evidence
+  cycle* R# is chosen at ingest time, so an attempt that timed out, crashed, or
+  produced unparseable output never consumes one. Attempts are counted;
+  accepted evidence sets are numbered. Keeping them separate is what dissolves
+  the hazard rather than trading one horn for the other.
+- **GOVERNANCE (G5, non-blocking):** whether R# is per-evidence-class or shared
+  with `SEC-###` and `CODE-###` across one PR. `protocol/RUN-002-PROTOCOL-v2.0.md:238-241`
+  gives the format and the lifecycle but does not say. If shared, the counter
+  cannot live in C-05.3b at all.
+
+### 31.10 Mapping check results through the severity registry
+
+**What exists.** `control/severity.py::apply_severity_policy(finding,
+known_requirement_ids)` implements the P1 floor and the evidence-shape rules,
+and fails closed to `INVALID` — `merge_blocked: True` — when
+`known_requirement_ids` is absent or does not contain the cited
+`unmet_requirement` (`severity.py:95-102`).
+
+**What is missing, and is being built concurrently.** The registry itself.
+C-02/C-04 own it. **This proposal does not build it.**
+
+**Assumptions this design makes about C-02, stated so they can be checked:**
+
+1. The registry is reachable from `control/` as an in-memory collection of
+   identifier strings, obtained without a filesystem read at call time — so a
+   caller inside T1 performs no external work. If C-02 lands as a file read,
+   the read must move to Phase A observation and this assumption breaks.
+2. Identifiers are the kebab-case form already used by the prompt and the
+   severity tests — `visible-focus-indicator`, `keyboard-focus-trap`.
+3. The registry is a *set membership* test, with no severity attached to the
+   identifier. `severity.py` applies the floor itself.
+
+**The mapping gap, which is this section's real finding.** `run.js` emits **no
+severity and no requirement citation** — nine `{check_id, result, sha,
+artifact_reference}` objects and nothing more. So an automated `FAIL` cannot be
+handed to `apply_severity_policy` as it stands. Something must assert *which
+requirement a failing check proves unmet*. The proposed mechanism is a static
+in-code map, `CHECK_REQUIREMENT`, from each of the nine `check_id` values to one
+registry identifier, turning a FAIL into
+`{classification: "FAILURE", unmet_requirement: <mapped>, jev_severity: "P1"}`
+and letting the floor apply trivially.
+
+**GOVERNANCE (G6, blocking for the automated FAIL path only):** the contents of
+that map. It is a policy statement about what each automated check proves, it
+does not exist anywhere in the repository, and an implementer inventing it would
+be writing accessibility policy. Nine entries. `AXE_SCAN` is the awkward one: a
+single axe violation id is far more specific than a check id, so either the map
+is check-level and coarse, or the axe violation ids become registry identifiers
+in their own right.
+
+**Fail-closed behaviour until then, which is correct and should be stated as
+designed rather than apologised for:** with no registry, every automated FAIL
+resolves to `INVALID` with `merge_blocked: True`. The gate holds. A task with a
+failing accessibility check never reaches REVIEW, and never silently passes. The
+automated FAIL path is inert-but-safe until C-02 lands — the right direction to
+be wrong in.
+
+### 31.11 The composite REVIEW gate
+
+**The predicate.** In T1, for a task in `WAITING_EVIDENCE` with PR record `R`
+and the head `H` observed *this tick* (the same `H` that `route_evidence`
+already receives and that `plan_security` already checks against
+`observation.head_sha`):
+
+```
+gate_fires(R, H)  ⇔  all three of:
+
+   claim_ok(R["security_evidence"],     H, SECURITY_PASS)
+   claim_ok(R["accessibility_auto"],    H, ACCESSIBILITY_AUTO_PASS)
+   claim_ok(R["accessibility_review"],  H, ACCESSIBILITY_PASS)
+
+where claim_ok(c, H, want) ⇔
+       isinstance(c, dict)
+   and <class>_claim_is_valid(c)[0]
+   and c["claim_state"] == "COMPLETE"
+   and c["sha"] == H
+   and c["verdict"] == want
+   and c["reason"] == ""
+```
+
+Fires `transition(..., "REVIEW", ...)`. State-only; the transition is already
+legal (`state.py:114`).
+
+**How a mixed-SHA evidence set is rejected — and why this shape and not
+another.** Each claim is compared **to `H`, independently**. The three claims
+are never compared to each other. That is strictly stronger than pairwise
+equality, which would accept three claims that agree perfectly with one another
+and all describe a commit that has since been superseded. It is the same rule
+`plan_security` enforces at `supervisor.py:1059-1066`, and the same rule
+`_adjudicate` enforces on the result file at `gate_evidence.py:1410-1412`:
+*"Evidence bound to a different commit is not evidence about this one."*
+
+**The consequence worth naming: a head move needs no reset path.** The predicate
+is pure over `(claims, H)`. When the head moves, no claim's `sha` equals the new
+`H`, so the gate simply does not fire — nothing is cleared, nothing is
+invalidated, and there is no half-cleared record a crash could leave behind.
+This is why the design does not add an `approval_current`-style invalidation
+flag: it would be a second source of truth for something the SHA comparison
+already decides. `state.py:106-113` already states the governing rule —
+*"a prior SHA's pass never carries forward."*
+
+**Precedence, in fixed order, so one record yields one outcome:**
+
+| Condition | Result |
+|---|---|
+| any claim `COMPLETE` at `H` with a `*_FAIL` verdict | `FIX_REQUIRED` (as `ingest_security` already does) |
+| all three `COMPLETE` at `H` and all `*_PASS` | `REVIEW` |
+| anything else — absent, stale-SHA, `PLANNED`, `RUNNING`, or a non-empty `reason` | **hold** in `WAITING_EVIDENCE` |
+
+FAIL outranks PASS: a head with a known blocking finding should not consume a
+reviewer cycle, which is the ground `state.py:106-113` gives for the
+`WAITING_EVIDENCE → FIX_REQUIRED` edge existing at all.
+
+**Placement: inside `route_evidence`, as the last step of the per-task loop** —
+after this tick's ingests, so an evidence set completed this tick fires the same
+tick rather than one tick later. Not a separate method called afterwards: it
+must see the ingests, and a second loop over the same tasks would read the same
+document twice for no benefit.
+
+**GOVERNANCE (G4, blocking).** The third row holds **forever**. That is today's
+defect rewritten at a higher resolution: a task whose product server will never
+start, or whose evidence is permanently unparseable, waits indefinitely with no
+escalation. §8 item 2 raised exactly this question for C-05.3a's
+publication-blocked case and it is still open. C-05.3b needs the answer before
+it ships, because it multiplies the number of ways to be permanently stuck by
+three. The governed lease is the obvious candidate and, as §8 already notes,
+currently means something else.
+
+### 31.12 Concurrency
+
+`config/experiment.json`'s `concurrency` block holds `max_builders: 3`,
+`max_fixers: 1`, `max_reviewers: 1`, `max_security: 1`, `max_observers: 1`,
+`max_repair_cycles: 3`. There is **no** `max_accessibility`, and
+`control/config.py:81-86` has no field for one.
+
+**GOVERNANCE (G7, blocking).** Two numbers are needed, not one, because the two
+halves consume different resources:
+
+- `max_accessibility_auto` — bounded by host resources, not money: each attempt
+  is a Chromium plus a product server plus a worktree plus a port from a
+  100-port range. It is also, per §31.5, serialised inside `tick()` regardless,
+  so a value above 1 buys nothing until the in-process ruling changes.
+  **Suggested starting point: 1** — but a suggestion is not a governance
+  decision and this proposal does not take it.
+- `max_accessibility_review` — a paid provider review per PR, exactly the budget
+  and rate-limit judgement §8 item 1 named for `max_security` (which was
+  subsequently governed to 1).
+
+### 31.13 Placement against C-18
+
+**C-18's state:** stages 1–3 landed (§§18–21); stages 4–7 open. Stage 3 — the
+`allocate_port` split into `select_port_candidates` (pure, lock-safe) and
+`probe_port` (external) — is **landed**, and the product server needs exactly
+that split. Stages 4 and 6 migrate the *existing* builder and fixer callers;
+C-05.3b has no existing callers to migrate.
+
+**Proposed ordering: C-05.3b may land before C-18 stages 4–7, and should.**
+
+The reasoning is that C-05.3b adds **no new external effect inside T1**. Every
+new path is written plan/execute/confirm from the start:
+
+| Work | Phase | Lock held? |
+|---|---|---|
+| read markers, outcome, provenance | A | no |
+| `select_port_candidates` | B (T1) | yes — pure, no bind (stage 3) |
+| choose ordinal, write claim, ingest, fire the gate | B/E2 (T1) | yes — state only |
+| `probe_port`, start server, poll readiness | C | no, under `declare_busy` |
+| `allocate_attempt_at`, `run_accessibility` | C | no, under `declare_busy` |
+| stop server, release worktree | C/F | no |
+| `claim_state` → COMPLETE | D | own transaction |
+
+Waiting for stages 4–7 would mean an idle run continues to be the only
+observable behaviour (§31.1) while work that does not depend on them is blocked.
+Landing C-05.3b first adds one more consumer of the stage-3 split, which is
+evidence that the split's contract is right before stages 4 and 6 bet on it.
+
+**§14.5 records this ordering as explicitly undecided** — *"Whether C-18 lands
+before or after C-05.3b"* — and it remains a governance call.
+**GOVERNANCE (G8, non-blocking):** the above is a recommendation with its
+reasoning shown, not a decision taken.
+
+**Two concrete collisions to coordinate, neither a blocker.**
+
+1. C-18 stage 4 (`dispatch_builder`) will touch `select_port_candidates`' call
+   site at the same time as G2 proposes widening its exclusion set. Same
+   function, two changes, two agents. Sequence them.
+
+2. **A landed test will go red, deliberately, and must be updated rather than
+   worked around.** `tests/test_c18_stage3_port_split.py:413-425`
+   (`StageThreeDidNotMigrateTheDispatchSites`) asserts against the *source text*
+   of `control/supervisor.py`:
+
+   ```python
+   self.assertEqual(source.count("workers.allocate_port(doc)"), 2)
+   self.assertNotIn("workers.select_port_candidates", source)
+   self.assertNotIn("workers.probe_port", source)
+   ```
+
+   Its docstring says why it exists: *"Recorded as a test so nobody can later
+   read 'stage 3 done' as 'port binds have left T1'."* The moment C-05.3b uses
+   the split halves in `supervisor.py` — which §31.13 requires it to — the last
+   two assertions fail. The honest update narrows them to the builder and fixer
+   dispatch sites the test is actually about, rather than deleting the test: its
+   purpose (stopping "stage 3 done" being read as "stages 4 and 6 done") is
+   still worth protecting, and the first assertion already carries it.
+
+### 31.14 Governance questions, collected
+
+Nothing below can be answered from repository policy. **Blocking** means
+implementation cannot start without it.
+
+| # | Question | Blocking? |
+|---|---|---|
+| **G1** | The qualitative accessibility reviewer's worker timeout. `timeouts` has no `accessibility` key and `_lease_expires("accessibility")` raises `KeyError`. Must not collide with the `_seconds` keys C-05a deliberately kept non-role-shaped. | **Yes** |
+| **G2** | May C-09 recognise a control-plane-owned port? Two halves: the allocator must not re-issue it to a Builder, and the orphan-listener check must not annunciate it. C-09's row is still `OPEN / PARTIAL` and scopes the allocator to "builder + fixer only". | **Yes** |
+| **G3** | What command starts the product server; whether dependency install sits inside the 120 s readiness budget; what happens on the first PR, before any product exists. `product/` is specifications only. | **Yes** |
+| **G4** | How long `WAITING_EVIDENCE` may hold on unobtainable evidence before `HUMAN_REQUIRED`. Same open question as §8 item 2, now with three ways to trigger it. | **Yes** |
+| **G5** | Is `R#` per-evidence-class or shared across `A11Y`/`SEC`/`CODE` on one PR? If shared, the counter cannot live in C-05.3b. | No |
+| **G6** | The nine `check_id` → requirement-identifier map. A policy statement about what each automated check proves. Blocks the automated-FAIL path only; the PASS path and the gate work without it. | Partial |
+| **G7** | `max_accessibility_auto` and `max_accessibility_review`. Budget and rate-limit judgement, as `max_security` was. | **Yes** |
+| **G8** | C-05.3b before or after C-18 stages 4–7. §14.5 left it open; §31.13 recommends before. | No |
+| **G9** | Whether a 7-minute serialised stall inside `tick()` is acceptable, or whether C-05a's "runs in-process" ruling should be revisited so the browser run can be spawned and polled. | No |
+| **G10** | A C-number for this work, and whether the `gate_evidence._adjudicate` inline-literal drift (§31.8) is folded in or raised as its own audit row. | No |
+
+### 31.15 Expected affected files
+
+| File | Change |
+|---|---|
+| `control/accessibility_contract.py` | **new** — the vocabulary leaf |
+| `control/routing.py` | `parse_accessibility`, `accessibility_is_consistent`, both claim builders, `accessibility_worker_name`, the recovery table, both `*_claim_is_valid` |
+| `control/supervisor.py` | Phases A–F for both halves; the composite gate inside `route_evidence`; `run_declared` around the browser run |
+| `control/gate_evidence.py` | `allocate_attempt_at`; the a11y attempt namespace, provenance and outcome publication; the inline-literal fix |
+| `control/workers.py` | the third port-exclusion source (**G2**) |
+| `control/reconcile.py` | teach the orphan-listener check about claim-owned ports (**G2**), following R4's shape |
+| `control/severity.py` | **no change** — it already does its job; only a caller is missing |
+| `control/state.py` | **no change** — `WAITING_EVIDENCE → REVIEW` is already legal |
+| `config/experiment.json` | `timeouts.accessibility` (**G1**), `concurrency.max_accessibility_*` (**G7**) |
+| `control/config.py` | fields for the above |
+| `prompts/accessibility.md` | remove the "dispatch is not yet implemented" paragraph (`:9-17`) once it is |
+| `apparatus/accessibility/run.js` | **no change** — its contract is sound and its refusals are correct |
+
+Tests to retain unchanged, because they pin behaviour this must preserve:
+`tests/test_c05_3_evidence_routing.py` (except
+`test_security_pass_alone_never_reaches_review`, which becomes
+`..._alone_still_never_reaches_review` with the other two claims absent),
+`tests/test_c05_3_evidence_claim.py`, `tests/test_c05_3_evidence_recovery.py`,
+`tests/test_c05_3_security_contract.py`, `tests/test_c09_resource_lifecycle.py`,
+`apparatus/accessibility/run.test.js`.
+
+One test must be **narrowed, not deleted**:
+`tests/test_c18_stage3_port_split.py::StageThreeDidNotMigrateTheDispatchSites`
+— see §31.13.
+
+### 31.16 Staged sequence
+
+No stage may be started under this proposal. Each leaves the tree green.
+
+| Stage | Scope | Why here |
+|---|---|---|
+| 1 | `control/accessibility_contract.py` + parser + `accessibility_is_consistent` | Pure, no state, no dispatch; and it closes the `_adjudicate` literal drift immediately |
+| 2 | The composite gate, reading claims that do not exist yet | Fires only when all three are present; provably inert until stages 3 and 5 land, and testable today with synthetic claims |
+| 3 | `accessibility_review` — the C-05.3a copy | Needs **G1**. Highest-value half: it alone exercises the gate end to end |
+| 4 | Product server lifecycle + port ownership | Needs **G2** and **G3**. Isolated from the claims; separately testable against a trivial static server |
+| 5 | `accessibility_auto` — claim, phases, `allocate_attempt_at` | Depends on stage 4. Last because it is the half with the weakest recovery evidence (§31.5 D1) |
+| 6 | `CHECK_REQUIREMENT` map → `apply_severity_policy` | Needs **G6** and C-02. Inert-but-safe before it; nothing regresses by waiting |
+
+**Tests each stage owes,** in the shape §7 and §14.4 already set: a
+fail-before/pass-after proof that no external effect occurs inside T1 (the
+`test_t1_claims_without_touching_the_filesystem` pattern — spy on `workers`,
+`gh`, `prompts`, `gate_evidence` and assert none is called); crash between plan
+and execute; duplicate-effect prevention across two ticks; identity recheck
+refusing a superseded plan; and resource ownership surviving the crash window.
+
+**Mutations that must be caught, at minimum:** drop the `sha == H` comparison
+from any one of the three `claim_ok` legs (→ a mixed-SHA set passes the gate);
+compare the three claims to each other instead of to `H` (→ a unanimously stale
+set passes); increment `accessibility_cycles` at plan time (→ a failed attempt
+burns an R#); drop `declare_busy` around the browser run (→ a healthy supervisor
+reads as wedged past 120 s); drop the registry argument from
+`apply_severity_policy` (→ an arbitrary `unmet_requirement` string validates);
+read a readiness timeout as `FIX_REQUIRED` (→ an apparatus failure is reported
+as a product defect); drop the third port exclusion (→ a Builder is handed the
+product server's port); drop claim-owned ports from the orphan-listener check
+(→ a working product server is annunciated as `FOREIGN_OR_ORPHAN_LISTENER`);
+let `claim_ok` accept a non-empty `reason`.
+
+### 31.17 Honest assessment of size
+
+This is **larger than C-05.3a**, not comparable to it. C-05.3a was one evidence
+producer with one claim; this is two producers with two claims, a composite gate
+over three, a new process class the repository has never started, and a C-09
+mechanism change. Stage 3 is a well-understood copy. Stages 4 and 5 are new
+ground: nothing in this repository has ever started a server, and the automated
+half's crash recovery rests on a singleton-lock argument rather than the `/proc`
+proof C-05.3a could make.
+
+**Four blocking governance answers are needed before any code is written**
+(G1, G2, G3, G7); the fifth, G4, is needed before it ships rather than before
+it starts. And G3 may not be answerable before a product exists at all —
+which, if true, makes stages 4–5 genuinely blocked on T+00 rather than on an
+implementer, and would mean the gate can only be closed for the *qualitative*
+half pre-launch. That possibility should be considered explicitly rather than
+discovered during implementation.
+
+### 31.18 What this section does not do
+
+- It does not implement anything. No production file was modified.
+- It does not approve the four C-05a timeout values for any new consumer; it
+  states which ones a design would consume and where.
+- It does not build, specify or constrain C-02's requirement registry, nor
+  C-04's evidence-package assembler. It states the assumptions it makes about
+  both so they can be checked against what those agents actually land.
+- It does not claim C-05.3b delivers a schema-valid Protocol v2 PR evidence
+  package. It does not (§31.9).
+- It does not answer G1–G10. Ten questions are escalated; none is guessed.
+- C-05.3b remains **not begun**. T+00 remains **NOT_STARTED**.
