@@ -1,0 +1,10 @@
+{
+  "name": "run-002-accessibility-fixture-clean",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Disposable fixture product serving the clean accessibility fixture page. NOT the Run 002 product. See ../README.md.",
+  "scripts": {
+    "build": "node build.js",
+    "start": "node server.js"
+  }
+}

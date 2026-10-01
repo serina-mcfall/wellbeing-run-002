@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<!--
+  Fixture: satisfies every automated check in apparatus/accessibility/run.js.
+  Used by run.test.js to prove each check can PASS against a real page, not
+  just fail against a broken one.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clean fixture</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; max-width: 100%; font-family: sans-serif; color: #111; background: #fff; }
+  a, button, input, [role="button"] { min-width: 24px; min-height: 24px; }
+  a:focus-visible, button:focus-visible, input:focus-visible {
+    outline: 3px solid #0b5fff;
+    outline-offset: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .decor { animation: none !important; transition: none !important; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .decor { animation: spin 3s linear infinite; }
+  }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <header>
+    <a href="#main" style="display:inline-block; padding:10px 14px;">Skip link</a>
+    <h1>Clean fixture</h1>
+  </header>
+
+  <main id="main">
+    <form onsubmit="return false;">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" style="padding:10px;">
+
+      <label for="promo">Promo code</label>
+      <input id="promo" name="promo" type="text" aria-invalid="true" aria-describedby="promo-error" style="padding:10px;">
+      <span id="promo-error">That code has expired.</span>
+
+      <button type="submit" style="padding:12px 18px;">Submit</button>
+    </form>
+
+    <span class="decor" aria-hidden="true" style="display:inline-block;width:20px;height:20px;">*</span>
+
+    <img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBTAA7" alt="decorative spacer">
+
+    <p>Body copy with ordinary contrast.</p>
+  </main>
+</body>
+</html>
