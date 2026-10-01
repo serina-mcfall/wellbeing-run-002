@@ -79,6 +79,27 @@ class InvariantCase(unittest.TestCase):
         self.sup.log = mock.Mock(side_effect=lambda e, **k: self.events.append(e))
         self.sup.notify_out = mock.Mock(return_value={"ok": True})
 
+    def review(self, doc, *, head=HEAD_AFTER_FIX, diff_hash="hash-after-fix"):
+        """Drive a reviewer dispatch through all three C-18 phases.
+
+        Stage 5 split `dispatch_reviewer` into a planning half that runs
+        inside T1 and performs no external work, an execute half that runs
+        with no lock held, and a commit half. The invariants these tests hold
+        are unchanged; only the number of phases they have to drive is.
+        """
+        observation = supervisor_mod.ReviewObservation(
+            pr_number=PR, head=head, diff_hash=diff_hash)
+        view = {"number": PR, "state": "OPEN", "isDraft": False,
+                "headRefName": BRANCH, "headRefOid": head}
+        self.sup._dispatch_plans = []
+        self.sup.dispatch_reviewer(doc, doc["tasks"]["TASK-001"], PR, observation)
+        plans = list(self.sup._dispatch_plans)
+        with mock.patch.object(supervisor_mod.gh, "pr_view", return_value=view):
+            for plan in plans:
+                self.sup.apply_dispatch_result(
+                    doc, self.sup._execute_reviewer_dispatch(plan))
+        return plans
+
     def open_pr(self) -> dict:
         return {"number": PR, "state": "OPEN", "isDraft": False, "headRefName": BRANCH,
                 "mergeStateStatus": "CLEAN", "mergeable": "MERGEABLE",
@@ -105,7 +126,7 @@ class TestSecondReviewCycle(InvariantCase):
                 mock.patch.object(supervisor_mod.prompts, "reviewer", return_value="p"), \
                 mock.patch.object(supervisor_mod.prompts, "write",
                                   return_value=Path("/tmp/p.md")):
-            self.sup.dispatch_reviewer(doc, doc["tasks"]["TASK-001"], PR)
+            self.review(doc)
 
         name, branch, base = acquire.call_args.args[0], acquire.call_args.args[1], \
             acquire.call_args.args[2]
@@ -118,10 +139,11 @@ class TestSecondReviewCycle(InvariantCase):
 
     def test_an_unresolvable_head_fails_loudly_rather_than_reviewing_stale_code(self):
         doc = doc_after_fix()
-        with mock.patch.object(supervisor_mod.gh, "pr_diff_sha", return_value=None), \
-                mock.patch.object(supervisor_mod.prompts, "write",
-                                  return_value=Path("/tmp/p.md")):
-            self.sup.dispatch_reviewer(doc, doc["tasks"]["TASK-001"], PR)
+        with mock.patch.object(supervisor_mod.prompts, "write",
+                               return_value=Path("/tmp/p.md")) as write:
+            plans = self.review(doc, head=None, diff_hash=None)
+        self.assertEqual(plans, [], "nothing may be planned against no head")
+        write.assert_not_called()
         self.assertIn("DISPATCH_FAILED", self.events)
         self.assertEqual(doc["prs"][str(PR)]["review_cycles"], 1)
 
@@ -149,7 +171,7 @@ class TestObsoleteWorktreeState(InvariantCase):
                                       return_value="p"), \
                     mock.patch.object(supervisor_mod.prompts, "write",
                                       return_value=Path("/tmp/p.md")):
-                self.sup.dispatch_reviewer(doc, doc["tasks"]["TASK-001"], PR)
+                self.review(doc)
             seen.add(acquire.call_args.args[1])
         self.assertEqual(seen, {f"review/c1/{BRANCH}", f"review/c2/{BRANCH}",
                                 f"review/c3/{BRANCH}"})

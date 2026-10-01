@@ -357,6 +357,11 @@ class TestDispatchPopulation(SupervisorCase):
                 mock.patch.object(supervisor_mod.workers, "allocate_port") as alloc2, \
                 mock.patch.object(supervisor_mod.gh, "pr_diff_sha",
                                   return_value=sha), \
+                mock.patch.object(supervisor_mod.gh, "pr_view",
+                                  return_value={"number": 7, "state": "OPEN",
+                                                "isDraft": False,
+                                                "headRefName": "task/task-001",
+                                                "headRefOid": sha}), \
                 mock.patch.object(supervisor_mod.evidence, "collect",
                                   return_value=[]), \
                 mock.patch.object(supervisor_mod.evidence, "render",
@@ -371,7 +376,16 @@ class TestDispatchPopulation(SupervisorCase):
                                   return_value=ok_result()), \
                 mock.patch.object(supervisor_mod.prompts, "write",
                                   return_value=Path("/tmp/p")):
-            self.sup.dispatch_reviewer(doc2, task2, 7)
+            # C-18 stage 5: plan inside what T1 would be, execute with no
+            # lock, then commit. The assertions below are unchanged.
+            self.sup._dispatch_plans = []
+            self.sup.dispatch_reviewer(
+                doc2, task2, 7,
+                supervisor_mod.ReviewObservation(pr_number=7, head=sha,
+                                                 diff_hash="h"))
+            for plan in list(self.sup._dispatch_plans):
+                self.sup.apply_dispatch_result(
+                    doc2, self.sup._execute_reviewer_dispatch(plan))
         alloc2.assert_not_called()
         record2 = doc2["workers"]["task-001-review-1"]
         self.assertIsNone(record2["port"])

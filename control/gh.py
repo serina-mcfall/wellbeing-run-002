@@ -121,6 +121,16 @@ def update_branch(repo: str, number: int) -> Result:
     return run(["gh", "pr", "update-branch", str(number), "--repo", repo])
 
 
+def mark_ready(repo: str, number: int) -> Result:
+    """Take a draft pull request out of draft.
+
+    Grants nothing. It changes only whether GitHub considers the pull request
+    open for review; approval, review verdict and merge eligibility are
+    decided elsewhere and are untouched by this call.
+    """
+    return run(["gh", "pr", "ready", str(number), "--repo", repo])
+
+
 def merge(repo: str, number: int, method: str = "squash") -> Result:
     return run(["gh", "pr", "merge", str(number), "--repo", repo, f"--{method}",
                 "--delete-branch"])
