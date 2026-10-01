@@ -57,9 +57,32 @@ class TestAccessibilityPromptRendering(unittest.TestCase):
         self.assertIn("not an independent merge or acceptance authority", text)
 
     def test_accessibility_prompt_discloses_the_automation_gap(self):
-        """Must not silently claim automated coverage it cannot yet perform."""
-        text = prompts.accessibility(self._task(), 7, "task/task-002", "org/repo", 1)
-        self.assertIn("not yet implemented", text)
+        """Must not silently claim automated coverage it cannot yet perform.
+
+        C-02b moved this gap, it did not close it. Dispatch IS implemented
+        now, so the old "not yet implemented" wording became a false
+        statement in a frozen file. What is still true - and what the
+        reviewer must be told - is that the pipeline has never faced a real
+        product, so an empty {{evidence}} is a legitimate state rather than
+        a sign the Supervisor failed to send something.
+        """
+        text = " ".join(prompts.accessibility(
+            self._task(), 7, "task/task-002", "org/repo", 1).split())
+        self.assertIn("not yet been exercised against a real product", text)
+        self.assertIn("may legitimately carry no automated results", text)
+        self.assertIn(
+            "Do not claim to have run an automated check you were not given",
+            text)
+
+    def test_the_prompt_no_longer_calls_the_dispatch_unimplemented(self):
+        """The superseded claim must not creep back in.
+
+        A guard nobody can watch fail is not a guard: this one fails the
+        build if anyone restores the pre-C-02b sentence.
+        """
+        text = " ".join(prompts.accessibility(
+            self._task(), 7, "task/task-002", "org/repo", 1).split())
+        self.assertNotIn("is not yet implemented", text)
 
 
 class TestAccessibilityRoleContractDoc(unittest.TestCase):

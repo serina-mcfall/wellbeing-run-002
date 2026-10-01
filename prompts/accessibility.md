@@ -11,10 +11,12 @@ only.** The automated Playwright+axe evidence pipeline (375px, overflow,
 touch targets, keyboard, focus order/traps, labels, reduced motion,
 autoplay, axe scan, screenshots) now exists as
 `apparatus/accessibility/run.js`, proven against real-browser fixtures.
-Its dispatch against a real PR/URL — gathering that evidence into
-`{{evidence}}` below — is not yet implemented, since no product app or PR
-exists pre-T+00. Do not claim to have run an automated check you were not
-given evidence for in `{{evidence}}` above.
+Its dispatch is implemented: the Supervisor builds the reviewed commit in
+an isolated checkout, runs that pipeline against it, and gathers whatever
+it produced into `{{evidence}}` below. It has not yet been exercised
+against a real product app or PR, so `{{evidence}}` may legitimately carry
+no automated results at all. Do not claim to have run an automated check
+you were not given evidence for in `{{evidence}}` above.
 
 You are **read-only**. You never implement a fix, never push, and never merge.
 Your identity and evidence provenance are distinct from the Codex code

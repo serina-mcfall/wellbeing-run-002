@@ -1,0 +1,212 @@
+C-02b — FROZEN PROMPT AMENDMENT RECORD (stale automation disclosure)
+====================================================================
+Date:      2026-10-02
+Authority: Explicit operator instruction, this session, quoted verbatim below.
+Scope:     The ONE sentence in prompts/accessibility.md that declared the
+           automated dispatch unimplemented. Nothing else in the file.
+Applied by: integration owner, branch wip/c05-1-persistence.
+
+This is the item §42.11 row 7 left open and assigned to the OPERATOR. It is
+no longer the operator's: the instruction in section 1 delegates it.
+
+
+1. THE OPERATOR'S AUTHORISATION, VERBATIM
+-----------------------------------------
+    "1. Correct the stale accessibility-prompt sentence.
+
+    I explicitly authorize correcting the single sentence in
+    prompts/accessibility.md that says automated dispatch is unimplemented.
+    Describe the implemented behavior accurately without claiming live
+    verification has passed. Record the amendment and affected hash/manifest
+    references through the governance mechanism. Do not change unrelated
+    requirements or ask me to approve this correction again."
+
+Two limits are explicit in that paragraph and both were honoured: the
+correction is confined to the one sentence, and it does not assert that any
+live verification has passed.
+
+
+2. THE DEFECT
+-------------
+prompts/accessibility.md said, of the automated Playwright+axe pipeline:
+
+    Its dispatch against a real PR/URL — gathering that evidence into
+    `{{evidence}}` below — is not yet implemented, since no product app or
+    PR exists pre-T+00.
+
+That was true when written and became false on 2026-10-01, when
+control/accessibility_services.py landed and Supervisor.__init__ began
+passing a real `accessibility_services_factory`. As of this amendment the
+chain route_evidence -> execute_accessibility -> commit_accessibility is
+dispatched by tick() (handover §42.3 table, row "Automated accessibility").
+
+The error was fail-SAFE, not fail-open: a reviewer told the pipeline does
+not run is more cautious, not less. It was still a false statement in a file
+that is about to be frozen and hashed, which is why it is being corrected
+before T+00 rather than carried into the freeze.
+
+
+3. THE AMENDED TEXT — WHAT IT CLAIMS AND WHAT IT REFUSES TO CLAIM
+-----------------------------------------------------------------
+CLAIMS (all verifiable in code at this HEAD):
+  - dispatch is implemented
+  - the Supervisor builds the reviewed commit in an ISOLATED CHECKOUT
+    (accessibility_services.py uses `git worktree add --detach` at
+    exactly plan.sha — handover §42.7)
+  - it gathers whatever the pipeline produced into {{evidence}}
+
+REFUSES TO CLAIM:
+  - that any live verification has passed. The replacement says instead
+    that it "has not yet been exercised against a real product app or PR".
+    At the time of writing the only exercise is section 8's LOCAL FIXTURE
+    run; that is a fixture, not a product, and the sentence stays true.
+  - that {{evidence}} will be populated. It states explicitly that
+    {{evidence}} "may legitimately carry no automated results at all", so
+    an empty block reads as a legitimate state rather than as a Supervisor
+    failure the reviewer should compensate for by guessing.
+
+The operative instruction that follows it is UNCHANGED, deliberately:
+"Do not claim to have run an automated check you were not given evidence
+for in `{{evidence}}` above." That sentence, not the status disclosure, is
+what actually prevents a reviewer inventing automated coverage.
+
+
+4. THE DIFF — COMPLETE
+----------------------
+diff --git a/prompts/accessibility.md b/prompts/accessibility.md
+@@ -11,10 +11,12 @@
+ touch targets, keyboard, focus order/traps, labels, reduced motion,
+ autoplay, axe scan, screenshots) now exists as
+ `apparatus/accessibility/run.js`, proven against real-browser fixtures.
+-Its dispatch against a real PR/URL — gathering that evidence into
+-`{{evidence}}` below — is not yet implemented, since no product app or PR
+-exists pre-T+00. Do not claim to have run an automated check you were not
+-given evidence for in `{{evidence}}` above.
++Its dispatch is implemented: the Supervisor builds the reviewed commit in
++an isolated checkout, runs that pipeline against it, and gathers whatever
++it produced into `{{evidence}}` below. It has not yet been exercised
++against a real product app or PR, so `{{evidence}}` may legitimately carry
++no automated results at all. Do not claim to have run an automated check
++you were not given evidence for in `{{evidence}}` above.
+
+One hunk. No other hunk in the file.
+
+UNRELATED REQUIREMENTS CHECKED AND UNCHANGED: the severity block (P0/P1
+blocking, P2/P3 debt, the P1 floor, the ambiguous-classification hold), the
+verdict rules, the required-output JSON shape including C-02a's
+ACC-DOD-VISIBLE_FOCUS, the read-only/identity-separation paragraph, and the
+reading list. Verified by the diff above being the file's only hunk.
+
+
+5. GOVERNED HASHES — BEFORE AND AFTER
+-------------------------------------
+control.manifest.prompt_hashes() over manifest.REQUIRED_PROMPT_FILES:
+
+BEFORE
+  accessibility.md  51a1bd6aaae36cb8ba5fec426ae92b9f21eed0abd7ecb8bce21327ef1c3c88dd
+  builder.md        1bb021e12bfffc5362577ac7293c3a66d3844c53b0687a2d953915b6e9de9c65
+  fixer.md          7f9f2107165b60b2f4acd8f380ebeb00507e96766e08ea497753e6d7be0ff70c
+  observer.md       b699631242df2cf06ecb1cc370ae0b94ace904ca137b5b20f2a9d50d24b92b69
+  reviewer.md       aeb3761e4dbff5642e892611499ac6429bd8ea7919ddc5c157907136fa097710
+  security.md       6b7a4636d73e89d05819f5b4898a0fa67b74f4288202d235f259baa68cdabcb5
+
+AFTER
+  accessibility.md  82a94a22e14f611b91f27d36951223512a590d24d49610c733c32cf0c3b695b5   <-- CHANGED
+  builder.md        1bb021e12bfffc5362577ac7293c3a66d3844c53b0687a2d953915b6e9de9c65
+  fixer.md          7f9f2107165b60b2f4acd8f380ebeb00507e96766e08ea497753e6d7be0ff70c
+  observer.md       b699631242df2cf06ecb1cc370ae0b94ace904ca137b5b20f2a9d50d24b92b69
+  reviewer.md       aeb3761e4dbff5642e892611499ac6429bd8ea7919ddc5c157907136fa097710
+  security.md       6b7a4636d73e89d05819f5b4898a0fa67b74f4288202d235f259baa68cdabcb5
+
+Exactly one of six moved. 51a1bd6a… was C-02a's post-amendment value, so the
+two amendments chain cleanly and neither overwrote the other's record.
+
+The other four frozen content hashes — product_spec_sha, task_graph_hash,
+severity_policy_hash, pr_template_hash — are UNAFFECTED. No constituent file
+of any of them was touched.
+
+
+6. MANIFEST REFERENCES — WHICH PROCEDURE ACTUALLY APPLIES
+---------------------------------------------------------
+Same finding as C-02a section 7, re-checked rather than assumed at this
+HEAD:
+
+  - protocol/experiment-manifest.template.json still carries
+    "prompt_hashes": "TO_BE_FILLED". It is the only committed artefact
+    naming prompt_hashes and it holds no real value.
+  - No .runtime manifest baseline recording a prompt hash exists.
+  - manifest.verify_against_baseline's "prompt_hashes drifted from the
+    recorded baseline" check therefore has no baseline to fire against and
+    did not fire.
+  - T+00 is NOT_STARTED.
+
+So this is a PRE-FREEZE CORRECTION under experiment/FREEZE-PROTOCOL.md, not
+a post-T+00 deviation: it changes WHAT WILL BE FROZEN, not what was frozen.
+The post-T+00 deviation procedure is not bypassed — it does not yet apply.
+The parts of it that can be honoured early were honoured anyway: explicit
+human authority (section 1), a durable record (this file), narrow scope
+(one sentence), and regression evidence (section 7).
+
+
+7. VERIFICATION, INCLUDING THE MUTATION
+---------------------------------------
+Command: python3 -m unittest tests.test_accessibility_reviewer \
+                             tests.test_c05_3b_qualitative_review \
+                             tests.test_manifest
+Result:  Ran 61 tests — OK
+
+The guard that previously pinned the stale wording —
+test_accessibility_prompt_discloses_the_automation_gap, which asserted the
+literal string "not yet implemented" — would have passed forever on a false
+statement. It was re-pointed at the claim that is still TRUE (the pipeline
+has never faced a real product) and at the operative instruction, and a
+second guard was added against the superseded sentence returning.
+
+MUTATION PROOF (a guard nobody has watched fail is not a guard):
+
+  Mutation:  prompts/accessibility.md's amended paragraph reverted, in
+             place, to the pre-amendment sentence.
+  Result:    FAILED (failures=2)
+               test_accessibility_prompt_discloses_the_automation_gap
+                 AssertionError: 'not yet been exercised against a real
+                 product' not found in ...
+               test_the_prompt_no_longer_calls_the_dispatch_unimplemented
+                 AssertionError: 'is not yet implemented' unexpectedly
+                 found in ...
+  Restored:  from a file copy, sha256
+             82a94a22e14f611b91f27d36951223512a590d24d49610c733c32cf0c3b695b5
+             — byte-identical to the AFTER hash in section 5.
+  Re-run:    Ran 10 tests — OK
+
+The mutation backup was a FILE COPY, not `git checkout --`. §42.9 records
+the session where `git checkout --` destroyed uncommitted work during a
+mutation; that lesson is being applied, not re-learned.
+
+
+8. THE HONEST LIMIT OF "IMPLEMENTED"
+------------------------------------
+The amended sentence says dispatch is implemented. At the moment it was
+written, "implemented" meant: the code path exists, is reached from tick(),
+and is covered by injected-service fixture tests. It had never bound a
+socket or run npm.
+
+That limit was then narrowed, in this same session, by the local fixture
+exercise recorded separately (handover §44, evidence
+C-05.3c-local-fixture-scan.txt): the real ProductServices now demonstrably
+installs, builds, serves, scans and tears down a fixture product. It is
+still a FIXTURE. No product app, no PR, no deployed URL, no provider call.
+
+The sentence's second half — "has not yet been exercised against a real
+product app or PR" — therefore remains literally true and must not be
+removed until a real product PR has actually been scanned.
+
+
+9. WHAT WAS DELIBERATELY NOT DONE
+---------------------------------
+  - No other sentence of prompts/accessibility.md changed.
+  - No requirement, severity rule, verdict rule or output shape changed.
+  - No other prompt file touched; five of six hashes are byte-identical.
+  - No claim added that any live verification, live PR scan or provider
+    call has passed.
+  - The operator was not asked to re-approve this correction, per the
+    instruction.
