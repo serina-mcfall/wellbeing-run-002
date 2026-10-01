@@ -144,6 +144,48 @@ def requirement_ids() -> frozenset[str]:
     return REQUIREMENT_IDS
 
 
+def prompt_vocabulary() -> str:
+    """The canonical identifiers, rendered for the reviewer's prompt.
+
+    WHY THIS IS NOT IN THE PROMPT FILE. C-02a amended the frozen
+    prompts/accessibility.md so its one worked example cites a real
+    identifier. That fixed the example; it did not tell the reviewer the
+    other sixteen. The prompt sends the reviewer to
+    product/ACCESSIBILITY.md, which contains the source PROSE ("visible
+    focus"), not the canonical form - so a reviewer citing anything but
+    the example would have to infer ACC-DOD-*/ACC-COG- from one sample,
+    and a wrong inference is a CLASSIFICATION_INVALID hold.
+
+    Widening the frozen file to list all seventeen would have exceeded
+    the amendment that was authorised. This list goes into the
+    {{evidence}} substitution the Supervisor already owns and already
+    fills at dispatch, so:
+
+      * no further frozen-file change, and no new prompt hash;
+      * no parser alias - the registry stays the single source of truth
+        for what a requirement is called, which is the whole point of
+        C-02;
+      * the vocabulary is RENDERED FROM THE REGISTRY, so it cannot drift
+        from what severity.apply_severity_policy will accept. A list
+        typed into a document could.
+
+    Sorted, so the same registry always renders the same block and a
+    prompt diff means a real change.
+    """
+    lines = ["### Canonical accessibility requirement identifiers",
+             "",
+             "`unmet_requirement` MUST be one of these exact strings. They are "
+             "the identifiers derived from `product/ACCESSIBILITY.md`; a "
+             "citation outside this list is refused as invalid evidence and "
+             "your whole review is discarded, so do not invent, abbreviate or "
+             "reword one. If nothing here fits what you found, say so in the "
+             "finding's summary rather than inventing an identifier.",
+             ""]
+    for entry in sorted(REQUIREMENTS, key=lambda r: r["id"]):
+        lines.append(f"- `{entry['id']}` — {entry['source_phrase']}")
+    return "\n".join(lines)
+
+
 def is_known_requirement(identifier) -> bool:
     """True iff `identifier` names a requirement in the frozen product spec.
 

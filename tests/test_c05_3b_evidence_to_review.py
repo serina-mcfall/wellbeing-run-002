@@ -56,6 +56,12 @@ class EvidenceToReviewCase(unittest.TestCase):
         self.sv = sv_mod.Supervisor.__new__(sv_mod.Supervisor)
         self.sv.cfg = SimpleNamespace(
             timezone=TZ, github_repo="o/r", max_security=1,
+            # C-05.3b: route_evidence plans the QUALITATIVE accessibility
+            # leg as well now, and that path reads its own governed
+            # limit. Zero, so these security-focused cases keep planning
+            # exactly what they always did - the limit is what is being
+            # completed here, not an assertion.
+            max_accessibility_review=0,
             extra={"timeouts": {"waiting_evidence_total_seconds": 18000}})
         self.sv.tz = TZ
         self.sv.stopping = False

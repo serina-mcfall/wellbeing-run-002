@@ -1728,6 +1728,32 @@ def _claim_outcome_is_valid(claim, verdicts, reasons) -> tuple[bool, str]:
             else (False, "CLAIM_REASON_UNRECOGNISED"))
 
 
+@dataclass(frozen=True)
+class AccessibilityReviewPlan:
+    """The immutable facts the qualitative dispatch needs, copied out
+    under the lock.
+
+    The same contract SecurityPlan keeps, and for the same reason: by the
+    time Phase C runs, the document these came from has committed and may
+    already have moved on, so no reference to the task, PR record or
+    claim leaves T1. Every field is a scalar read made under the lock.
+
+    `attempt_id` is deliberately the first thing a caller reaches for -
+    `ingest_accessibility_review` re-verifies the claim against it before
+    committing anything, so a result whose claim has since been
+    superseded is discarded rather than applied to whatever is there now.
+    """
+
+    task_id: str
+    task_title: str
+    pr: int
+    sha: str
+    branch: str
+    cycle: int
+    attempt_id: str
+    worker: str
+
+
 def accessibility_review_worker_name(task_id: str, sha: str,
                                      ordinal: int) -> str:
     """The one derivation, used when minting a claim and when checking one.

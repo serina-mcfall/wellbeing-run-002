@@ -95,6 +95,12 @@ class EvidenceRoutingCase(unittest.TestCase):
             roles={"security": SimpleNamespace(provider="codex", model=None,
                                                effort="medium")},
             max_security=1,
+            # C-05.3b: route_evidence plans the QUALITATIVE accessibility
+            # leg as well now, and that path reads its own governed
+            # limit. Zero, so these security-focused cases keep planning
+            # exactly what they always did - the limit is what is being
+            # completed here, not an assertion.
+            max_accessibility_review=0,
             extra={"timeouts": {"security": 1800, "lease_grace_seconds": 60}})
         self.sv.tz = TZ
         self.sv.ledger = self.ledger

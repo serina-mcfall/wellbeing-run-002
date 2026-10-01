@@ -467,6 +467,12 @@ class PlanSecurityCase(unittest.TestCase):
         self.sv = supervisor_mod.Supervisor.__new__(supervisor_mod.Supervisor)
         self.sv.cfg = SimpleNamespace(
             timezone=TZ, github_repo="o/r", max_security=1,
+            # C-05.3b: route_evidence plans the QUALITATIVE accessibility
+            # leg as well now, and that path reads its own governed
+            # limit. Zero, so these security-focused cases keep planning
+            # exactly what they always did - the limit is what is being
+            # completed here, not an assertion.
+            max_accessibility_review=0,
             roles={"security": SimpleNamespace(provider="codex", model=None,
                                                effort="medium")},
             extra={"timeouts": {"security": 1800, "lease_grace_seconds": 60}})

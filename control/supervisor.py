@@ -17,12 +17,14 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Mapping
 
 from . import (
     accessibility_contract,
     accessibility_evidence,
+    accessibility_registry,
+    accessibility_services,
     budget,
     clock,
     config,
@@ -368,17 +370,31 @@ class Supervisor:
         # arrives; see _stop_reason for what each outcome means.
         self._stop_signal: int | None = None
         # C-05.3b. The factory that supplies one attempt's external
-        # services - install, build, serve, scan, tear down. It is None
-        # here and that is the honest state: no product exists to build
-        # before the first product PR, so nothing can run an attempt yet.
-        # The planning path refuses to claim while it is None rather than
-        # minting claims that could never be executed, which would leak a
-        # port per tick. Injecting a factory is what turns the automated
-        # half on, and it is also how every test drives it.
-        self.accessibility_services_factory = None
+        # services - install, build, serve, scan, tear down.
+        #
+        # This was None, and the automated half was therefore wired and
+        # completely inert: `route_evidence` is gated on it being
+        # non-None, so no attempt was ever planned. An earlier handover
+        # recorded that as needing no decision, on the grounds that it
+        # "resolves when a product exists to build". Only half true - the
+        # plumbing is APPARATUS code, and leaving it to the product
+        # builder would mean the first product PR arrives with nothing
+        # able to check it. control/accessibility_services.py is that
+        # plumbing, and it is wired here.
+        #
+        # Nothing runs yet regardless: planning still requires a task in
+        # an evidence state with an open PR, which cannot exist before the
+        # first product build. What changed is that when one does exist,
+        # the attempt can actually execute. A Supervisor built through
+        # __new__ - which several suites do deliberately - still has no
+        # attribute at all, and route_evidence's getattr default keeps
+        # those from claiming ports they could never use.
+        self.accessibility_services_factory = accessibility_services.factory
         # Accumulated inside T1 by plan_accessibility_auto, executed after
         # it commits. Reset per tick, like _dispatch_plans.
         self._accessibility_plans: list = []
+        # C-05.3b: the qualitative plans claimed in T1 and spawned after it.
+        self._accessibility_review_plans: list = []
         # C-18: this tick's planned dispatches, accumulated inside T1 by
         # _plan_dispatch and executed after it commits. Reset at the top of
         # every tick - the durable claim, not this list, survives a crash.
@@ -2732,6 +2748,14 @@ class Supervisor:
                 a11y = self.plan_accessibility_auto(doc, task, pr_number, head)
                 if a11y is not None:
                     self._accessibility_plans.append((task["id"], a11y))
+            # The QUALITATIVE half, claimed in this same transaction. It
+            # needs no services factory - it spawns an agent, not a
+            # browser - so it is gated only by its own slot limit, the
+            # provider controls and the ordinal ceiling, all of which
+            # plan_accessibility_review checks for itself.
+            review = self.plan_accessibility_review(doc, task, pr_number, head)
+            if review is not None:
+                self._accessibility_review_plans.append(review)
             identifiers = self.plan_security(
                 doc, task, pr_number, head, observation,
                 slots_free=self._security_slots_free(doc, pr_number))
@@ -3497,21 +3521,33 @@ class Supervisor:
         """Phase E. One transaction, re-verifying every claim it touches."""
         if not results:
             return
-        with self.store.transaction() as doc:
-            for task_id, plan, outcome, services in results:
-                task = doc["tasks"].get(task_id)
-                record = doc["prs"].get(str(plan.pr))
-                if task is None or not isinstance(record, dict):
-                    continue
-                claim = record.get("accessibility_auto")
-                if isinstance(claim, dict) and \
-                        claim.get("attempt_id") == plan.attempt_id:
-                    # G2: the port returns to the pool only once the
-                    # listener has been observed gone.
-                    outcome = accessibility_evidence.confirm_release(
-                        outcome, claim, services)
-                self.ingest_accessibility_auto(doc, task, plan.pr, plan.sha,
-                                               plan, outcome)
+        try:
+            with self.store.transaction() as doc:
+                for task_id, plan, outcome, services in results:
+                    task = doc["tasks"].get(task_id)
+                    record = doc["prs"].get(str(plan.pr))
+                    if task is None or not isinstance(record, dict):
+                        continue
+                    claim = record.get("accessibility_auto")
+                    if isinstance(claim, dict) and \
+                            claim.get("attempt_id") == plan.attempt_id:
+                        # G2: the port returns to the pool only once the
+                        # listener has been observed gone.
+                        outcome = accessibility_evidence.confirm_release(
+                            outcome, claim, services)
+                    self.ingest_accessibility_auto(doc, task, plan.pr, plan.sha,
+                                                   plan, outcome)
+        finally:
+            # The isolated checkout each attempt built in, removed once the
+            # verdict is durable. AFTER the transaction, because the port
+            # confirmation above still needs the services; in a `finally`,
+            # because an attempt that failed is exactly the one whose
+            # checkout would otherwise be left behind. Disposal never
+            # raises and never changes a verdict - it is disk to reclaim.
+            for _task_id, _plan, _outcome, services in results:
+                dispose = getattr(services, "dispose", None)
+                if callable(dispose):
+                    dispose()
 
     # ============================================================
     # C-05.3b: the QUALITATIVE accessibility half.
@@ -3593,9 +3629,12 @@ class Supervisor:
                  metadata_redacted={"head": head,
                                     "attempt_id": fresh["attempt_id"],
                                     "worker": fresh["worker"]})
-        return accessibility_evidence.AccessibilityPlan(
-            task_id=task["id"], pr=pr_number, sha=head,
-            attempt_id=fresh["attempt_id"], port=0)
+        return routing.AccessibilityReviewPlan(
+            task_id=task["id"], task_title=task.get("title") or task["id"],
+            pr=pr_number, sha=head,
+            branch=task.get("branch") or f"run-002/{task['id'].lower()}",
+            cycle=ordinal, attempt_id=fresh["attempt_id"],
+            worker=fresh["worker"])
 
     def ingest_accessibility_review(self, doc: dict, task: dict, pr_number: int,
                                     head: str, plan, text: str) -> None:
@@ -3650,6 +3689,238 @@ class Supervisor:
                             f"accessibility review findings on {head[:12]}")
             return
         self.advance_if_evidence_complete(doc, task, pr_number, head)
+
+    # ------------------------------------------------ qualitative dispatch
+    #
+    # THE HALF THAT WAS NEVER CONNECTED. `plan_accessibility_review` and
+    # `ingest_accessibility_review` were built and proved through the
+    # Supervisor, but nothing called them from a tick: `route_evidence`
+    # planned only the automated half, so the qualitative leg could never
+    # be dispatched in a real run and `review_gate_fires` could never see
+    # it pass. These three methods are the missing middle.
+    #
+    # The shape is the SECURITY half's, not the C-18 stage-4 dispatch
+    # harness's, because the claim already is: the qualitative attempt is
+    # claimed on the PR record (`record["accessibility_review"]`) exactly
+    # as the security attempt is, validated by its own claim validator,
+    # and bound to a SHA-bound worker name. Routing it through the
+    # harness would mean two claim systems governing one attempt.
+    #
+    # Ingest is the REAP path, which is what the Codex reviewer uses: the
+    # spawn registers an ordinary worker record, `reap_workers` sees it
+    # finish, and the role handler reads its output. Nothing new is
+    # invented for liveness, lease expiry or orphan detection - the
+    # qualitative reviewer gets all of it by being an ordinary worker.
+
+    def execute_accessibility_review(self, planned: list) -> list:
+        """Phase C. External work, NO state lock held.
+
+        Renders the prompt, acquires a worktree at the claimed head,
+        writes the job file and spawns. Returns (plan, worktree) for each
+        attempt that actually started, so Phase D caches only what
+        happened.
+
+        The provider controls are re-read HERE as well as in T1, for the
+        reason `execute_security` gives: T1 has committed and released
+        the lock, and the decision that matters is the one true at the
+        instant a paid worker would start.
+        """
+        started_plans = []
+        snapshot = self.store.read() if self.store.exists() else {}
+        role_cfg = self.cfg.roles["accessibility"]
+        for plan in planned:
+            if self.stopping:
+                self.log("ACCESSIBILITY_REVIEW_HELD", task_id=plan.task_id,
+                         pr_id=plan.pr, activity_class="ORCHESTRATION",
+                         outcome="SUPERVISOR_STOPPING",
+                         metadata_redacted={"attempt_id": plan.attempt_id})
+                break
+            blocked = self._security_dispatch_block(snapshot)
+            if blocked:
+                self.log("ACCESSIBILITY_REVIEW_HELD", task_id=plan.task_id,
+                         pr_id=plan.pr, activity_class="ORCHESTRATION",
+                         outcome=blocked,
+                         metadata_redacted={"attempt_id": plan.attempt_id,
+                                            "phase": "EXECUTE"})
+                continue
+
+            prompt_text = prompts.accessibility(
+                {"id": plan.task_id, "title": plan.task_title},
+                plan.pr, plan.branch, self.cfg.github_repo, plan.cycle,
+                self._accessibility_review_evidence())
+            prompt_path = prompts.write(plan.worker, prompt_text)
+            # Its own checkout at the claimed head, on its own branch: the
+            # reviewer is read-only and must never share the worktree the
+            # Builder or Fixer is committing into.
+            path, why = workers.acquire_worktree(
+                plan.worker, f"a11y/c{plan.cycle}/{plan.branch}", plan.sha,
+                self.cfg.tmux_session, prompt_path,
+                reuse_if_checked_out=False)
+            if path is None:
+                self.log("ACCESSIBILITY_REVIEW_HELD", task_id=plan.task_id,
+                         pr_id=plan.pr, activity_class="ORCHESTRATION",
+                         outcome=why,
+                         metadata_redacted={"attempt_id": plan.attempt_id})
+                continue
+
+            job = workers.write_job(
+                plan.worker, "accessibility", role_cfg.provider,
+                role_cfg.model, plan.task_id, path, prompt_path, self.tz,
+                pr=plan.pr,
+                hard_timeout_seconds=self.cfg.extra["timeouts"]["accessibility"],
+                effort=role_cfg.effort)
+            spawn = workers.start_job(plan.worker, job, path)
+            if not spawn.ok:
+                self.log("WORKER_START_FAILED", task_id=plan.task_id,
+                         pr_id=plan.pr, role="accessibility",
+                         activity_class="FAILED_WORK", outcome="FAILED",
+                         metadata_redacted={"attempt_id": plan.attempt_id,
+                                            "stderr": spawn.stderr[:500]})
+                continue
+            started_plans.append((plan, str(path)))
+        return started_plans
+
+    def _accessibility_review_evidence(self) -> str:
+        """What goes into the prompt's `{{evidence}}` substitution.
+
+        C-02a's RESIDUAL closes here. Amending the frozen prompt fixed its
+        one worked example; it did not tell the reviewer the other
+        sixteen identifiers, and the document the prompt sends it to
+        carries the source prose rather than the canonical form. A
+        reviewer inferring `ACC-DOD-*` from a single sample and getting it
+        wrong is a CLASSIFICATION_INVALID hold.
+
+        The vocabulary is injected here instead, into a substitution the
+        Supervisor already owns and already fills, because that needs no
+        further change to a frozen file and no parser alias. It is
+        RENDERED FROM THE REGISTRY, so it cannot drift from what
+        `severity.apply_severity_policy` will actually accept.
+
+        Deliberately nothing else. The prompt tells the reviewer not to
+        claim an automated check it was not given evidence for, and this
+        half gathers none - claiming otherwise in the evidence block
+        would be the apparatus putting words in the reviewer's mouth.
+        """
+        return accessibility_registry.prompt_vocabulary()
+
+    def confirm_accessibility_review_spawn(self, started: list) -> None:
+        """Phase D. Cache the spawn, in its own transaction.
+
+        Re-verifies the claim before touching it: Phase C held no lock, so
+        the head may have moved or the claim been superseded while the
+        worker was being spawned. A spawn whose claim has gone is recorded
+        and the worker left to the ordinary reaper rather than being
+        attached to whatever claim is there now.
+        """
+        if not started:
+            return
+        with self.store.transaction() as doc:
+            for plan, worktree in started:
+                record = doc["prs"].get(str(plan.pr))
+                claim = record.get("accessibility_review") \
+                    if isinstance(record, dict) else None
+                if not isinstance(claim, dict) or \
+                        claim.get("attempt_id") != plan.attempt_id or \
+                        claim.get("sha") != plan.sha:
+                    self.log("ACCESSIBILITY_REVIEW_DISCARDED",
+                             task_id=plan.task_id, pr_id=plan.pr,
+                             activity_class="REVIEW", outcome="CLAIM_MOVED",
+                             metadata_redacted={"attempt_id": plan.attempt_id})
+                    continue
+                # THE CLAIM IS NOT TOUCHED HERE, and that is not an
+                # oversight. `accessibility_review_claim_is_valid`
+                # enforces a CLOSED key set and a closed claim_state set
+                # of exactly PLANNED and COMPLETE. A first version of this
+                # added `claim["worktree"]` and a "DISPATCHED" state; both
+                # made the claim fail its own validator, so
+                # `review_gate_fires` silently refused the leg forever and
+                # the task could never leave WAITING_EVIDENCE. The gate
+                # test caught it.
+                #
+                # The right answer is to conform, not to widen a guard to
+                # fit new code. PLANNED already means "in flight" to
+                # plan_accessibility_review, which re-plans only a claim
+                # that is COMPLETE or at another head, so the claim needs
+                # no new state to describe a spawn. The worktree belongs
+                # on the WORKER record, which is where every other role
+                # keeps it and where the reaper and orphan detection look.
+                doc["workers"][plan.worker] = state_mod.new_worker_record(
+                    "accessibility", plan.task_id, plan.branch,
+                    clock.iso(self.now()), pr=plan.pr, worktree=worktree,
+                    lease_expires_at=claim.get("lease_expires_at"))
+                # The head this worker was dispatched against, on the
+                # worker's OWN record. Per-PR fields are overwritten by a
+                # later cycle; this one cannot be.
+                doc["workers"][plan.worker]["head"] = plan.sha
+                doc["workers"][plan.worker]["attempt_id"] = plan.attempt_id
+                self.log("ACCESSIBILITY_REVIEW_DISPATCHED",
+                         task_id=plan.task_id, pr_id=plan.pr,
+                         role="accessibility", agent_id=plan.worker,
+                         activity_class="REVIEW", outcome="DISPATCHED",
+                         head_sha=plan.sha,
+                         metadata_redacted={"attempt_id": plan.attempt_id,
+                                            "cycle": plan.cycle})
+
+    def on_accessibility_review_finished(self, doc: dict, worker: str,
+                                         meta: dict, status: dict) -> None:
+        """The reap-path ingest for the qualitative half.
+
+        Reads the finished worker's output and hands it to the committed
+        `ingest_accessibility_review`, which re-verifies the claim and the
+        head before recording anything.
+        """
+        task = doc["tasks"].get(meta.get("task_id"))
+        pr_number = meta.get("pr")
+        head = meta.get("head")
+        attempt_id = meta.get("attempt_id")
+        if not task or pr_number is None or not head or not attempt_id:
+            return
+        provider = self.cfg.roles["accessibility"].provider
+        if status.get("outcome") != "SUCCESS":
+            # A provider limit is not an accessibility verdict. The claim
+            # is released so a later tick can re-plan it, and the task is
+            # NOT routed anywhere on the strength of a review that never
+            # happened.
+            self._release_accessibility_review_claim(
+                doc, pr_number, attempt_id,
+                "PROVIDER_LIMIT" if self._handle_provider_failure(
+                    doc, provider, status, None,
+                    "Accessibility reviewer hit a provider limit.")
+                else "WORKER_FAILED")
+            self.log("ACCESSIBILITY_REVIEW_RESULT", task_id=task["id"],
+                     pr_id=pr_number, role="accessibility", agent_id=worker,
+                     activity_class="REVIEW", outcome="WORKER_FAILED",
+                     head_sha=head,
+                     metadata_redacted={"attempt_id": attempt_id})
+            return
+
+        providers.record_success(doc, provider, self.tz)
+        last_message = config.WORKER_LOG_DIR / f"{worker}.last.txt"
+        text = last_message.read_text(encoding="utf-8") \
+            if last_message.exists() else workers.worker_output(worker, 20000)
+        self.release_review_worktree(worker)
+        self.ingest_accessibility_review(
+            doc, task, pr_number, head,
+            SimpleNamespace(attempt_id=attempt_id), text)
+
+    def _release_accessibility_review_claim(self, doc: dict, pr_number: int,
+                                            attempt_id: str,
+                                            reason: str) -> None:
+        """Close a claim whose worker produced no verdict.
+
+        COMPLETE with no verdict, which is what `review_gate_fires`
+        already treats as "this leg has not passed". Leaving the claim
+        in flight would hold the slot against the governed
+        max_accessibility_review of 1 for the rest of the run.
+        """
+        record = doc["prs"].get(str(pr_number))
+        claim = record.get("accessibility_review") \
+            if isinstance(record, dict) else None
+        if not isinstance(claim, dict) or claim.get("attempt_id") != attempt_id:
+            return
+        claim["claim_state"] = "COMPLETE"
+        claim["verdict"] = None
+        claim["reason"] = reason
 
     def advance_if_evidence_complete(self, doc: dict, task: dict,
                                      pr_number: int, head: str) -> bool:
@@ -3772,6 +4043,7 @@ class Supervisor:
                 "builder": self.on_builder_finished,
                 "fixer": self.on_fixer_finished,
                 "reviewer": self.on_reviewer_finished,
+                "accessibility": self.on_accessibility_review_finished,
                 "observer": self.on_observer_finished,
             }.get(meta.get("role"))
             if handler:
@@ -4822,6 +5094,7 @@ class Supervisor:
         # a plan can never leak from one cycle into the next.
         self._dispatch_plans = []
         self._accessibility_plans = []
+        self._accessibility_review_plans = []
 
         # C-05.3a Phase A + Phase E-publish, and C-18 stage 1's pull-request
         # observation, all OUTSIDE the lock. The snapshot is
@@ -4981,6 +5254,20 @@ class Supervisor:
                 batch_bound(self._accessibility_budget().total,
                             len(self._accessibility_plans)),
                 lambda: self.execute_accessibility(self._accessibility_plans)))
+
+        # C-05.3b: the QUALITATIVE half's spawn. Same shape and the same
+        # external calls as a security spawn, so the same per-plan bound.
+        # It runs after the automated half for one reason: both can claim
+        # against the same PR, and letting the browser attempt finish
+        # first keeps a provider call from being spent on a commit whose
+        # automated leg has already failed.
+        if self._accessibility_review_plans:
+            self.confirm_accessibility_review_spawn(self.run_declared(
+                "accessibility_review",
+                batch_bound(DISPATCH_EXECUTE_BOUND_PER_PLAN,
+                            len(self._accessibility_review_plans)),
+                lambda: self.execute_accessibility_review(
+                    self._accessibility_review_plans)))
 
         # T1 has committed. Each merge now gets its own transaction, before the
         # slow provider work so a merge never waits on a provider call.
