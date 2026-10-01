@@ -25,6 +25,10 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# This directory too, for the shared merge-evidence fixture.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from mergeable_evidence import complete_evidence  # noqa: E402
 
 from control import (  # noqa: E402
     clock,
@@ -124,6 +128,11 @@ class MergeBoundaryCase(unittest.TestCase):
                            "reviewed_diff_hash": DIFF_HASH,
                            "reviewed_head": REVIEWED_HEAD,
                            "review_cycles": 1})
+            # evaluate_merge requires the Protocol v2 evidence classes for
+            # the observed head. These tests are about the merge TRANSACTION
+            # boundary, so the evidence must pass or no candidate would ever
+            # reach the boundary being tested.
+            record.update(complete_evidence(REVIEWED_HEAD, task_id.lower()))
             if accepted:
                 record["accepted_findings"] = [_accepted_finding()]
             doc["prs"][str(number)] = record
@@ -388,6 +397,7 @@ class TestDeterministicOrdering(MergeBoundaryCase):
                            "reviewed_diff_hash": DIFF_HASH,
                            "reviewed_head": REVIEWED_HEAD,
                            "review_cycles": 1, "accepted_findings": []})
+            record.update(complete_evidence(REVIEWED_HEAD, task_id.lower()))
             doc["prs"][str(number)] = record
         self.store._write(doc)
 
@@ -480,6 +490,7 @@ class InvariantDetectionCase(MergeBoundaryCase):
                        "reviewed_diff_hash": DIFF_HASH, "merged": merged,
                        "reviewed_head": REVIEWED_HEAD,
                        "review_cycles": 1})
+        record.update(complete_evidence(REVIEWED_HEAD))
         record["last_review_at"] = (clock.iso(clock.now(TZ) - timedelta(hours=1))
                                     if last_review_at is mock.sentinel.default
                                     else last_review_at)

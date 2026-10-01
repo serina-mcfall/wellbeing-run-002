@@ -17,6 +17,10 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# This directory too, for the shared merge-evidence fixture.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from mergeable_evidence import complete_evidence  # noqa: E402
 
 from control import (  # noqa: E402
     budget,
@@ -103,6 +107,10 @@ class TestMergeGate(unittest.TestCase):
                             "approval_current": True,
                             "reviewed_head": HEAD_SHA,
                             "reviewed_diff_hash": "abc123"})
+        # evaluate_merge requires the Protocol v2 evidence classes for the
+        # observed head; without them this fixture cannot merge and the
+        # "all gates satisfied" case would pass for the wrong reason.
+        self.record.update(complete_evidence(HEAD_SHA))
 
     def test_all_gates_satisfied_allows_merge(self):
         decision = routing.evaluate_merge(self.pr, self.record, ("ci",), False, "abc123")

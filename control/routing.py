@@ -414,6 +414,11 @@ MERGE_CI_NOT_SATISFIED = "CI_NOT_SATISFIED"
 MERGE_CONFLICTING = "BRANCH_CONFLICTING"
 MERGE_BEHIND = "BRANCH_BEHIND"
 MERGE_STATE_BLOCKED = "MERGE_STATE_BLOCKED"
+# Protocol v2 makes accessibility and security required evidence classes for
+# the exact PR head. Until this existed, evaluate_merge never consulted any of
+# it - see the comment on the evidence gate inside evaluate_merge for the hole
+# that left open, which was reproduced rather than inferred.
+MERGE_EVIDENCE_INCOMPLETE = "EVIDENCE_INCOMPLETE"
 
 
 @dataclass(frozen=True)
@@ -428,7 +433,15 @@ class MergeDecision:
 
 def evaluate_merge(pr: dict, record: dict, required_checks: tuple[str, ...],
                    red_guardrail_active: bool, current_diff_hash: str | None) -> MergeDecision:
-    """The six conditions from Protocol v1.0 "Merge execution"."""
+    """The merge gate the Supervisor calls.
+
+    The six conditions from Protocol v1.0 "Merge execution", PLUS the
+    Protocol v2 required-evidence classes for the observed head. The
+    seventh is not a refinement of the six: until it existed this function
+    consulted no evidence at all, and a pull request with no security and
+    no accessibility evidence returned "all merge gates satisfied". See
+    the evidence gate below, and handover section 38.
+    """
     number = pr.get("number")
 
     if red_guardrail_active:
@@ -481,6 +494,47 @@ def evaluate_merge(pr: dict, record: dict, required_checks: tuple[str, ...],
         return MergeDecision(False, "head SHA changed since review",
                              invalidate_approval=True,
                              condition=MERGE_HEAD_CHANGED)
+
+    # THE REQUIRED EVIDENCE CLASSES, for the head GitHub reports right now.
+    #
+    # Nothing in this function consulted evidence until this check existed,
+    # and the hole that left was reproduced rather than inferred: a record
+    # carrying REVIEW_PASS, a current approval and a matching head and diff -
+    # but NO security evidence and NEITHER accessibility leg - returned
+    # MergeDecision(allowed=True, "all merge gates satisfied").
+    #
+    # It is reachable in ordinary routing. route_awaiting_dispatch dispatches
+    # a reviewer whenever the task is in ROUTING_STATES, which includes
+    # PR_OPEN ("a first dispatch from PR_OPEN is ordinary routing"), and that
+    # transitions the task straight to REVIEW. WAITING_EVIDENCE is entered
+    # only from EVIDENCE_STATES = ("PR_OPEN", "WAITING_EVIDENCE"), and REVIEW
+    # is not one of them - so a task reviewed before its evidence was claimed
+    # never enters the evidence state at all, and nothing downstream noticed.
+    #
+    # `review_gate_fires` is the predicate C-05.3b built and proved for
+    # exactly this question, and until now NOTHING CALLED IT. A gate nobody
+    # calls is documentation. This is the call.
+    #
+    # Compared to `observed_head` - what GitHub reports. At this line the
+    # two are ALREADY PROVED EQUAL by the head check above, so passing
+    # `record["reviewed_head"]` instead would behave identically today, and
+    # a mutation swapping them is inert. That is recorded rather than
+    # glossed: the variable choice is not what protects this gate, the
+    # earlier check is. `observed_head` is used anyway so the anchor stays
+    # external if that ordering is ever changed - a record must never get to
+    # choose the head its own evidence is checked against.
+    #
+    # ABSENCE DENIES. `review_gate_fires` returns False for absent, stale,
+    # PLANNED, incomplete, failed and malformed evidence alike, and it is not
+    # a verdict - it means "not every required class is a completed pass at
+    # this head". That is the correct reading for a merge gate: missing
+    # evidence is not permission.
+    if not review_gate_fires(record, observed_head):
+        return MergeDecision(
+            False,
+            "required accessibility and security evidence is not complete "
+            f"for head {observed_head[:12]}",
+            condition=MERGE_EVIDENCE_INCOMPLETE)
 
     reviewed_hash = record.get("reviewed_diff_hash")
     if not reviewed_hash or not current_diff_hash:

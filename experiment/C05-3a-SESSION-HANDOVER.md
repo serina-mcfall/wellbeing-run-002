@@ -6882,3 +6882,148 @@ into an invisible self-attestation. **No change is requested here.**
   credential created, no paid call made, no product worker launched, and
   no merge to `main`.
 - **T+00 remains NOT_STARTED.**
+
+## 38. The runtime is connected to the evidence gate (2026-10-01)
+
+Operator instruction: *"connecting the runtime to the verified merge
+policy. The fixture must exercise the same eligibility path the Supervisor
+actually uses; testing an otherwise uncalled gate is not sufficient. Keep
+missing or invalid evidence blocking merges."*
+
+### 38.1 The hole, reproduced before it was closed
+
+`routing.evaluate_merge` is the gate the Supervisor calls
+(`supervisor.py:3728`). It consulted **no evidence of any kind**. A record
+carrying `REVIEW_PASS`, a current approval, a matching head and diff, green
+CI and a `CLEAN` merge state — but **no security evidence and neither
+accessibility leg** — returned:
+
+```
+evaluate_merge  ALLOWED = True | all merge gates satisfied | MERGE_OK
+review_gate_fires       = False   <- the uncalled gate
+```
+
+Reproduced against the real code, not inferred.
+
+**It was reachable in ordinary routing.** `route_awaiting_dispatch`
+dispatches a reviewer whenever the task is in `ROUTING_STATES`, which
+includes `PR_OPEN` — its own comment says *"A first dispatch from PR_OPEN
+is ordinary routing, not a recovery"* — and `dispatch_reviewer` transitions
+the task straight to `REVIEW`. `WAITING_EVIDENCE` is entered only from
+`EVIDENCE_STATES = ("PR_OPEN", "WAITING_EVIDENCE")`, and `REVIEW` is not
+one of them. So a task reviewed before its evidence was claimed never
+enters the evidence state at all, and nothing downstream noticed.
+
+This is C-20(a)'s deadlock seen from the other end. The deadlock was the
+*visible* symptom; this was the silent one.
+
+### 38.2 What changed
+
+`evaluate_merge` now calls `review_gate_fires(record, observed_head)` and
+denies with a new finite condition `MERGE_EVIDENCE_INCOMPLETE`
+(`"EVIDENCE_INCOMPLETE"`) when any required class is not a completed pass
+at the head GitHub reports.
+
+**Placed inside `evaluate_merge`, not at the Supervisor call site.** A
+check at the call site protects that call site; a check in the gate
+protects every caller, present and future. The cost is that
+`evaluate_merge` is no longer "the six conditions from Protocol v1.0" —
+its docstring is updated and `test_review_evidence`'s
+`test_the_six_merge_conditions_are_untouched` was deliberately tripped and
+updated, which is the guard doing its job.
+
+**Absence denies.** `review_gate_fires` returns False for absent, stale,
+`PLANNED`, incomplete, failed and malformed evidence alike. It is not a
+verdict: False means "not every required class is a completed pass at this
+head", which is the correct reading for a merge gate. Missing evidence is
+not permission.
+
+### 38.3 Eighteen tests were passing for the wrong reason
+
+Five modules built records that asserted a merge **passes** while carrying
+no evidence at all. They were not wrong about what they were testing; they
+were wrong about what a mergeable PR is. `tests/mergeable_evidence.py`
+defines the three complete legs once — the security leg through the real
+`routing.security_claim` so it genuinely satisfies
+`security_claim_is_valid` — and the five fixtures use it.
+
+One builder was missed by the first pass and caught by the suite rather
+than by reading: `test_merge_boundary`'s ordering fixture ends differently
+from its siblings, so a `replace_all` did not reach it.
+
+### 38.4 The runtime-side fixture
+
+`tests/test_c04a_runtime_merge_lifecycle.py` — 17 tests driving the C-04a
+multi-cycle shape through `evaluate_merge` itself: the no-evidence
+regression and its control, each leg independently load-bearing, an
+incomplete and a failed leg, exact-SHA invalidation and regeneration across
+two heads, two review cycles, and the orderings that must not collapse
+(evidence does not substitute for review, review does not substitute for
+evidence, a draft still blocks, RED still wins, failing CI still blocks).
+
+One test asserts the connection directly: when `review_gate_fires` refuses,
+`evaluate_merge` must refuse. If that ever stops holding, the runtime has
+silently stopped requiring evidence again.
+
+**The relationship between the two fixtures, stated plainly.**
+`apparatus/fixture-preflight/production-lifecycle.test.js` exercises
+`live-gate.js`, which the runtime does **not** call. It proves the
+composition layer and the four C-04 adapters against real git and injected
+external services. `tests/test_c04a_runtime_merge_lifecycle.py` exercises
+the gate the Supervisor **does** call. Both are needed and neither
+substitutes for the other; the JS one is not evidence about the runtime.
+
+### 38.5 Verification
+
+- **1,893 → 1,910 Python tests**, exit 0. **218 apparatus tests**, exit 0.
+- Mutation: the evidence gate deleted from `evaluate_merge` → **11 red**.
+  Restored, restoration verified by `diff`.
+- **An inert mutation, recorded rather than glossed.** Gating on
+  `record["reviewed_head"]` instead of `observed_head` survives the whole
+  suite — because the head check immediately above already proves the two
+  equal, so the substitution is semantically identical today. The comment
+  originally implied the variable choice was what protected the gate; it
+  does not, the earlier check does, and the comment now says so.
+
+### 38.6 What is still NOT connected — the severity floor
+
+`control/severity.py::apply_severity_policy` **has no caller in
+`control/`**. Verified, not assumed: `git grep` finds only comments
+referring to it. The deterministic P0/P1 accessibility floor, the
+requirement-registry validity check, and the "INVALID evidence always
+blocks merge" rule therefore run **only** in
+`apparatus/severity/severity-floor.js` via `validate.js` — which the
+runtime never invokes.
+
+What the runtime does instead, at `supervisor.py:3049`:
+
+```python
+if f.get("severity") in routing.BLOCKING_SEVERITIES
+```
+
+It reads the severity field **as submitted** and splits blocking from
+debt. The thing being judged states its own severity, and nothing
+re-derives it.
+
+**Why this was not fixed in the same change.** `apply_severity_policy`
+expects an accessibility finding — `jev_severity`, `classification`,
+`unmet_requirement` / `non_failure_rationale`. Code-review findings carry
+none of those and would rate `INVALID`, which would make every ordinary
+code finding merge-blocking. Applying it correctly requires knowing which
+findings are accessibility findings, and that discrimination is part of
+C-05.3b's accessibility **ingest**, which is not built. So this is
+genuinely **blocked on C-05.3b**, not merely undone.
+
+Until then the honest statement is: the runtime requires every evidence
+class to have passed, and does **not** independently validate the severity
+of the findings inside them.
+
+### 38.7 What this section does not claim
+
+- It does not claim C-05.3b is wired. `WAITING_EVIDENCE` is still absent
+  from `ROUTING_STATES`, so the evidence route still has no exit; what
+  changed is that a PR which skipped that route can no longer merge.
+- It does not claim the runtime applies the severity floor. §38.6.
+- It does not claim `live-gate.js` is in the runtime path. It is not.
+- No gate was run, no threshold changed, no live action taken. T+00
+  remains **NOT_STARTED**.

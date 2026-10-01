@@ -20,8 +20,11 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# This directory too, for the shared merge-evidence fixture.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from control import evidence, prompts, routing  # noqa: E402
+from mergeable_evidence import complete_evidence  # noqa: E402
 
 HEAD = "1db53051dd04c7b154b9a38c54cdc861663b660f"
 OTHER = "54ab0f3e680fcb407545d704e3244bcebc1c718d"
@@ -189,6 +192,11 @@ class TestIndependenceAndMergeGateUnchanged(unittest.TestCase):
                                           "conclusion": "SUCCESS"}]}
         self.record = routing.blank_pr_record(3, "TASK-001", "task/task-001")
         self.record["reviewed_head"] = "a" * 40
+        # The Protocol v2 evidence classes, complete at the observed head.
+        # These tests are about what the CODE REVIEW contributes, so the
+        # evidence legs must be satisfied or every case below would be
+        # refused for the wrong reason.
+        self.record.update(complete_evidence("a" * 40))
 
     def test_evidence_alone_cannot_merge_without_a_codex_pass(self):
         self.record.update({"review_verdict": None, "approval_current": False,

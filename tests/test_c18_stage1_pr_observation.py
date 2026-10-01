@@ -35,6 +35,10 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# This directory too, for the shared merge-evidence fixture.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from mergeable_evidence import complete_evidence  # noqa: E402
 
 from control import (  # noqa: E402
     clock,
@@ -153,6 +157,11 @@ class ObservationHarness(unittest.TestCase):
             if approved:
                 record.update({"review_verdict": routing.REVIEW_PASS,
                                "approval_current": True, "review_cycles": 1})
+                # evaluate_merge requires the Protocol v2 evidence classes
+                # for the observed head. Attached only on the approved
+                # path, so an unapproved PR stays unmergeable for its own
+                # reason rather than gaining evidence it never earned.
+                record.update(complete_evidence(HEAD_SHA))
             doc["prs"][str(number)] = record
         if write:
             self.store._write(doc)

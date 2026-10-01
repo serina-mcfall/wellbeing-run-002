@@ -20,9 +20,18 @@ it - so automating it would amend a frozen specification. The gate reports
 the condition and changes nothing. See handover section 34.
 """
 
+import sys
 import unittest
+from pathlib import Path
 
 from control import routing
+
+# This directory, so the shared fixture imports the same way under
+# `unittest discover -s tests` (which puts tests/ on the path) and under
+# `python -m unittest tests.<module>` (which does not).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from mergeable_evidence import complete_evidence  # noqa: E402
 
 HEAD = "a" * 40
 MOVED = "b" * 40
@@ -53,6 +62,11 @@ def a_record(**overrides) -> dict:
         "reviewed_head": HEAD,
         "reviewed_diff_hash": DIFF,
     })
+    # evaluate_merge requires every Protocol v2 evidence class to be a
+    # completed pass for the OBSERVED head. Without these legs the baseline
+    # fixture cannot merge, and every denial below would pass for the wrong
+    # reason. Overrides still win, so a caller can remove or stale a leg.
+    record.update(complete_evidence(HEAD))
     record.update(overrides)
     return record
 
