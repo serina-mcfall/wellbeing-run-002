@@ -357,7 +357,16 @@ that is documented.
 > `control/worker_entry.py:180` is `env = dict(os.environ)` with no scrub
 > before `Popen`. Until that is an allow-list, a worker inherits the
 > Supervisor's entire environment and the boundary is not enforced
-> whatever the file modes say. Names for the allow-list:
+> whatever the file modes say.
+>
+> **The allow-list is WRITTEN AND TESTED — `worker_entry.worker_child_env`,
+> 10 tests — and deliberately NOT WIRED.** A test pins the unwired status
+> so taking action 6 is a decision rather than a drift. **And wiring it is
+> not sufficient on its own:** `GH_TOKEN` is ON the allow-list, because a
+> worker needs its own 1-hour token. If the Supervisor still holds its own
+> `GH_TOKEN` in the environment when the filter is switched on, every
+> worker inherits the identity that merges. Action 6 is the filter **plus**
+> the UID split that gives the worker a different token. Names:
 > `experiment/github-app/env-var-names.md` §3.
 
 ---
@@ -378,12 +387,16 @@ would fail to exist.
 **The pin must be confirmed or re-stated at approval time.**
 `check-templates.py` enforces the invariant that matters: the pin is
 reachable from HEAD (`F1`), and `apparatus/ control/ protocol/ prompts/
-config/` are unchanged since it (`F2`). Documentation on top of a pin is
+config/ bin/ .github/` are unchanged since it (`F2` — the last two were
+added 2026-10-02: `bin/` was protected by §6 but outside the drift set,
+and `.github/` defines the `ci` check the gate matches by NAME alone). Documentation on top of a pin is
 harmless; one line of gate code is not, and `F2` goes red naming the file.
 Both halves have been watched failing.
 
-The export is created once, read-only:
+The export is created once, read-only — **and the dependency install in
+the middle is not optional; see action 7b**:
 `git worktree add --detach /opt/run-002/gate-<SHA> <SHA>` →
+`cd <export>/apparatus && npm ci --omit=dev` →
 `chown -R run002-sup:run002` → `chmod -R a-w`. The gate invoker uses only
 that absolute path — never a path inside the pull request's worktree, and
 never `config.REPO_ROOT`, which is a mutable tree.
@@ -457,8 +470,14 @@ never `config.REPO_ROOT`, which is a mutable tree.
 twelve, carried out exactly as written, would have left no process
 authenticating as any of the three Apps, left workers unable to push at
 all, installed production credentials before any falsification ran, and
-overwritten live branch protection with a reconstruction. The six added
-rows are marked **ADDED**; two existing rows are marked **CORRECTED**.
+overwritten live branch protection with a reconstruction. Then an attempt
+to actually RUN the export found it could not load the gate at all.
+
+**Eight rows are new** — `0`, `6b`, `6c`, `7b`, `7c`, `10b`, `10c`, `11a`
+— and `3a` is the old row 3, moved to the throwaway. **Two of the eight
+are things without which the arrangement does not function at all**, not
+refinements: `6b` (nothing authenticates as any App, and workers cannot
+push) and `7b` (the export cannot load the gate).
 
 **None of these has been done. Each is yours.**
 
@@ -586,7 +605,7 @@ before 8–10 deadlocks every product PR permanently.
 
 ---
 
-## 12. Recommendations on the two open questions
+## 12. Open questions and recommendations
 
 > ### TWO POLICY CHOICES THE TRANSPORT CANNOT MAKE — ADDED 2026-10-02
 >
