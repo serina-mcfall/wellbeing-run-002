@@ -1,0 +1,196 @@
+C-18 — THE NOTIFICATION AMENDMENT
+==================================
+Date:      2026-10-01
+Authority: Explicit operator instruction, this session, quoted verbatim below.
+Applied by: integration owner, branch wip/c05-1-persistence.
+
+
+1. THE OPERATOR'S AUTHORISATION, VERBATIM
+-----------------------------------------
+    "Notification amendment — I authorize moving the remaining synchronous
+    notification behind the existing durable queue. Record QUEUED as durable
+    intent only, never as successful delivery. Retain a later
+    delivery/failure event linked by intent ID, bounded retries and the
+    existing escalation guarantees. Amend the affected evidence wording
+    explicitly and preserve its history."
+
+With the standing limit from the same instruction:
+
+    "These are explicit delegations for those setup decisions, not
+    permission to silently rewrite unrelated frozen requirements. If
+    repository governance requires a record of my decision, record this
+    instruction and your selected implementation."
+
+
+2. WHAT WAS SYNCHRONOUS
+-----------------------
+control/merge_invariant.py's `annunciate` called `notifier.send(...)`
+directly, and `Supervisor.invariant_violated` reaches it from `route_prs`,
+which runs inside T1. It was the one remaining synchronous outbound send
+under the state lock - C-18 §19.7 item 3 named it and left it out of stage
+2's scope because moving it changes C-14.2's annunciation evidence.
+
+A hanging Discord call therefore stalled the whole state transaction, and
+with it every task in the run. That is the exact defect C-18 exists for.
+
+
+3. WHAT CHANGED
+---------------
+`annunciate` no longer takes a `notifier`. It takes `announce`, a required
+callable with no default - a default would mean a caller that forgot it
+still annunciated, silently, into nothing. The caller supplies the sink,
+and the two callers need different delivery guarantees:
+
+  SUPERVISOR  -> Supervisor._queued_annunciation(doc)
+                 Queues through notify_out and returns delivered=None.
+                 drain_notifications delivers afterwards, outside every
+                 transaction, with the bounded retries and backoff that
+                 stage 2 already built. No send remains under T1.
+
+  WATCHDOG    -> watchdog.durable_then_send(doc, notifier, tz)
+                 Writes the durable intent FIRST, then sends immediately,
+                 then records the outcome against that intent.
+
+Both write the same durable intent. That intent is the annunciation
+evidence in both paths.
+
+
+4. WHY THE WATCHDOG IS EXEMPT FROM THE DEFERRAL
+-----------------------------------------------
+This is the part the proposed wording did not address, and it is the
+reason the change is not a one-line substitution.
+
+The Watchdog is a SEPARATE PROCESS. It has no drain - verified: nothing in
+control/watchdog.py calls drain_notifications or reads notify.queue. And it
+exists for precisely the case where the Supervisor is not ticking.
+
+Queuing its escalation and waiting for the Supervisor to deliver it would
+have made the Watchdog's guarantee depend on the component it is watching.
+The authorisation says "preserve the existing escalation guarantees", so
+the Watchdog still sends immediately.
+
+It gains something, though. Before, a FAILED Watchdog send was simply lost
+- nothing was written down. Now the intent is durable before the send, so:
+
+    send succeeds -> intent marked DELIVERED, closed. The Supervisor's
+                     drain will not deliver it again. Discord offers no
+                     idempotency key, so a duplicate would be a real one.
+    send fails    -> intent stays PENDING with the ordinary bounded
+                     backoff. The Supervisor's drain retries it when the
+                     Supervisor returns.
+
+That is strictly stronger than before on both branches.
+
+
+5. QUEUED IS NOT DELIVERED
+--------------------------
+`notification_delivered` in the STATE_INVARIANT_VIOLATION metadata is:
+
+    None   on the queued path - no send was attempted at this point.
+           Deliberately NOT False, which would read as a failed send, and
+           never True, which would be a delivery claim the function can no
+           longer make.
+    bool   on the Watchdog path, where a send really happened.
+
+`notification_status` is "QUEUED" on the queued path and the notifier's own
+finite reason code on the Watchdog path.
+
+A new metadata key, `annunciation_intent_id`, carries the intent id. That
+is the link the authorisation asked for: the later NOTIFICATION outcome
+reporting delivery or failure carries the same id. The key was added to
+test_durable_metadata_keys_are_a_closed_set's contract rather than slipped
+in - that guard caught it, which is what it is for.
+
+
+6. THE COUNTER
+--------------
+`annunciate` used to do `doc["counters"]["human_interventions"] += 1`
+itself. notify_out ALSO increments it for HUMAN_REQUIRED, so routing
+through notify_out without moving the counter would have double-counted
+every merge-invariant violation. The counter now belongs to each sink. The
+audit's "increments exactly once per newly annunciated finding" still
+holds, and tests/test_merge_boundary.py's f10 and f16 cases assert it.
+
+
+7. GOVERNING WORDING
+--------------------
+There is NO protocol/ text to amend: "annunciat" appears nowhere in any of
+the nine files under protocol/. C-14.2's annunciation requirement is
+governed by its audit row.
+
+experiment/CONTRADICTION-AUDIT.md, the C-14 row, carried:
+
+    "A HUMAN_REQUIRED notification is sent **directly** and
+     doc[counters][human_interventions] increments exactly once per newly
+     annunciated finding."
+
+That sentence is RETAINED VERBATIM and the amendment appended after it,
+rather than rewritten in place - it is the governing text C-14.2 was closed
+against, and the authorisation requires its history be preserved.
+
+
+8. VERIFICATION
+---------------
+Command: python3 -m unittest discover -s tests
+Result:  Ran 2200 tests - OK   (2,195 before; +5 new amendment cases)
+
+New cases, all in tests/test_merge_boundary.py:
+  test_the_supervisor_path_queues_and_does_not_send
+  test_a_queued_annunciation_is_never_recorded_as_delivered
+  test_the_annunciation_is_linked_to_its_intent_by_id
+  test_a_failed_watchdog_send_is_retried_rather_than_lost
+  test_a_delivered_watchdog_send_is_not_queued_for_redelivery
+
+MUTATIONS, each proved red then restored byte-identical (diff empty):
+
+  M1  Supervisor sink sends synchronously again
+      -> test_the_supervisor_path_queues_and_does_not_send
+         "Expected 'send' to not have been called. Called 1 times."
+
+  M2  Queued path reports delivered=True
+      -> test_a_queued_annunciation_is_never_recorded_as_delivered
+         "True is not None"
+
+  M3  Watchdog sink queues without sending
+      -> four red, including
+         test_a_delivered_watchdog_send_is_not_queued_for_redelivery
+         "'PENDING' != 'DELIVERED'"
+      This is the one that matters: it is the mutation that would have
+      silently made the Watchdog's escalation depend on the Supervisor.
+
+Baselines before mutation / after restoration:
+  control/supervisor.py      2b7b1cf85543 -> 2b7b1cf85543
+  control/watchdog.py        a31e64d7cc6f -> a31e64d7cc6f
+  control/merge_invariant.py c18f80e48013 -> c18f80e48013
+
+
+9. TEST ADAPTATION - WHAT WAS AND WAS NOT WEAKENED
+--------------------------------------------------
+tests/test_merge_boundary.py's harness mocked notify_out with a pre-stage-2
+return shape, so once the Supervisor path started queuing, annunciations
+stopped being observable at all. The REAL notify_out is now used - it
+performs no I/O, only a document write and a log - exactly as the harness
+already restores the real log(). The evidence got stronger, not weaker.
+
+Two cases asserting the notifier's finite result vocabulary moved from the
+Supervisor path to the Watchdog path, because the Supervisor path no longer
+sends and so can no longer carry a notifier result. The property asserted
+is unchanged; only the path that can exhibit it moved.
+
+One assertion changed form: f13b counted `notifier.send.call_count == 1`
+and now asserts exactly one durable intent. Same claim - one annunciation -
+expressed through the mechanism that now carries it.
+
+No threshold, guard or assertion was weakened to obtain a pass.
+
+
+10. WHAT THIS DOES NOT CLAIM
+----------------------------
+Delivery is still AT MOST ONCE per durably authorised attempt, not
+exactly-once. Discord accepts no idempotency key, so nothing on this side
+could honour a stronger claim. §19.7 item 2's residual stands: an ambiguous
+send outcome stays suppressed rather than retried, because delivering twice
+is worse than stale bookkeeping.
+
+No notification was sent during this work. Every send in every test is
+mocked and nothing reached the network.

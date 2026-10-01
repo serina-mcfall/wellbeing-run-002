@@ -97,6 +97,56 @@ def busy_with(tz: str) -> str | None:
     return None
 
 
+def durable_then_send(doc: dict, notifier, tz: str):
+    """The Watchdog's annunciation sink: write the intent, then send it now.
+
+    The notification amendment makes the DURABLE QUEUED INTENT the
+    annunciation evidence, and moves the Supervisor's send behind
+    `drain_notifications`. The Watchdog cannot simply follow: it is a
+    separate process, it has no drain, and it exists for exactly the case
+    where the Supervisor is not ticking. Queuing alone here would make the
+    Watchdog's escalation depend on the component it is watching - which
+    would weaken the one guarantee that must not move.
+
+    So the order is: persist the intent (evidence, independent of
+    delivery), then attempt delivery immediately (the escalation,
+    unchanged in urgency), then record the outcome against that intent.
+
+    A SUCCESSFUL send closes the intent, so the Supervisor's drain does
+    not deliver it twice. A FAILED one stays PENDING with the ordinary
+    bounded backoff, so the drain retries it when the Supervisor returns.
+    Before this, a failed Watchdog send was simply lost.
+    """
+    def announce(severity: str, title: str, body: str) -> dict:
+        intent_id = f"NTF-{secrets.token_hex(8)}"
+        now = clock.now(tz)
+        try:
+            intent = notify.new_intent(
+                severity=severity, title=title, body=body,
+                no_human_action_needed=False, clock_label=None,
+                created_at=clock.iso(now))
+        except ValueError as exc:
+            # Refusing to PERSIST a secret-bearing message, exactly as
+            # notify_out does. The send path refuses it too, so nothing
+            # leaves either way; only the finite reason is recorded.
+            reason = str(exc) if str(exc) == "BLOCKED_SECRET_IN_NOTIFICATION" \
+                else "INTENT_INVALID"
+            return {"queued": False, "intent_id": None,
+                    "delivered": False, "status": reason}
+        notify.queue(doc)[intent_id] = intent
+        if severity == notify.HUMAN_REQUIRED:
+            # The counter moved out of annunciate when the sink took over,
+            # so each sink owns it. notify_out does the same.
+            doc["counters"]["human_interventions"] += 1
+        delivered, status_code = merge_invariant.notification_status(
+            notifier.send(severity, title, body))
+        notify.record_direct_delivery(intent, ok=delivered, now=now,
+                                      reason=status_code)
+        return {"queued": True, "intent_id": intent_id,
+                "delivered": delivered, "status": status_code or "DELIVERED"}
+    return announce
+
+
 def _record_systemic_intervention(cfg, ledger, *, condition_code: str,
                                   reason: str, store=None) -> tuple[dict | None, str]:
     """C-08b.2 (S9/S10): best-effort durable obligation for a Watchdog
@@ -230,7 +280,8 @@ def reconcile_merge_invariants(cfg, ledger, notifier, doc) -> None:
         merge_invariant.annunciate(
             doc=doc, task=task, record=record, verdict=verdict, github=github,
             state_view=state_view, ledger_view=ledger_view, ledger=ledger,
-            notifier=notifier, detector="watchdog", tz=cfg.timezone,
+            announce=durable_then_send(doc, notifier, cfg.timezone),
+            detector="watchdog", tz=cfg.timezone,
         )
 
 

@@ -4261,9 +4261,34 @@ class Supervisor:
         merge_invariant.annunciate(
             doc=doc, task=task, record=record, verdict=verdict, github=github,
             state_view=state_view, ledger_view=ledger_view, ledger=self.ledger,
-            notifier=self.notifier, detector="supervisor", tz=self.tz,
+            announce=self._queued_annunciation(doc),
+            detector="supervisor", tz=self.tz,
         )
         return True
+
+    def _queued_annunciation(self, doc: dict):
+        """The Supervisor's annunciation sink: queue, never send.
+
+        This is the notification amendment. `invariant_violated` is reached
+        from `route_prs`, which runs inside T1, and this was the last
+        synchronous outbound send under that lock - a hanging Discord call
+        stalled the whole state transaction and with it every task in the
+        run. The intent is now committed with the freeze and the
+        intervention record that accompany it, and `drain_notifications`
+        delivers it afterwards with bounded retries and no lock held.
+
+        `delivered` is None, not False: no send was attempted here, so
+        neither success nor failure is known yet. notify_out owns the
+        human_interventions counter.
+        """
+        def announce(severity: str, title: str, body: str) -> dict:
+            result = self.notify_out(doc, severity, title, body)
+            return {"queued": bool(result.get("queued")),
+                    "intent_id": result.get("intent_id"),
+                    "delivered": None,
+                    "status": "QUEUED" if result.get("queued")
+                    else result.get("reason")}
+        return announce
 
     @staticmethod
     def merge_no_longer_ready(task: dict | None, record: dict | None,

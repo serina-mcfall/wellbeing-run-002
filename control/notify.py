@@ -13,6 +13,7 @@ The webhook URL is read from the environment at call time and never logged.
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 
 from . import clock, http, redact
 
@@ -172,6 +173,33 @@ def new_intent(*, severity: str, title: str, body: str, no_human_action_needed: 
         "last_outcome": None,
         "delivered_at": None,
     }
+
+
+def record_direct_delivery(intent: dict, *, ok: bool, now, reason=None) -> None:
+    """Record the outcome of a send made OUTSIDE the Supervisor's drain.
+
+    The Watchdog is a separate process with no drain of its own, and it
+    exists precisely for when the Supervisor is not ticking. Its
+    escalations must therefore still leave immediately - but the durable
+    intent is written first, so the annunciation evidence does not depend
+    on the send succeeding.
+
+    On success the intent is closed, so the Supervisor's drain does not
+    deliver it a second time. On failure it is left PENDING with the
+    ordinary backoff, so the drain retries it when the Supervisor returns.
+    That is strictly stronger than before, when a failed Watchdog send was
+    simply lost.
+    """
+    intent["attempt"] = int(intent.get("attempt") or 0) + 1
+    if ok:
+        intent["status"] = DELIVERED
+        intent["last_outcome"] = "DELIVERED"
+        intent["delivered_at"] = clock.iso(now)
+        return
+    intent["status"] = PENDING
+    intent["last_outcome"] = reason or "FAILED"
+    intent["next_attempt_at"] = clock.iso(
+        now + timedelta(seconds=backoff_seconds(intent["attempt"])))
 
 
 def is_due(intent: dict, now) -> bool:

@@ -473,7 +473,14 @@ class InvariantDetectionCase(MergeBoundaryCase):
         self.notifier = mock.Mock()
         self.notifier.send = mock.Mock(return_value={"ok": True})
         self.sup.notifier = self.notifier
-        self.sup.notify_out = mock.Mock(return_value={"ok": True})
+        # Restore the REAL notify_out, exactly as `del self.sup.log` above
+        # restores the real appending log. Under the notification amendment
+        # the Supervisor's annunciation IS the durable queued intent it
+        # writes, so the parent harness's stub would mock away the very
+        # thing these cases have to observe. notify_out performs no I/O -
+        # it writes to the document and logs - so the real one is both safe
+        # here and stronger evidence than a stub.
+        del self.sup.notify_out
 
     # ------------------------------------------------------------- fixtures
 
@@ -557,6 +564,32 @@ class InvariantDetectionCase(MergeBoundaryCase):
     def violation(self):
         found = self.ledger_events(STATE_INVARIANT_VIOLATION)
         return found[-1] if found else None
+
+    # ------------------------------- the notification amendment's seams
+
+    def queued(self, doc) -> list[dict]:
+        """The durable annunciation intents. Under the amendment this -
+        not a completed send - is C-14.2's annunciation evidence."""
+        from control import notify
+        return list(notify.queue(doc).values())
+
+    def run_watchdog_branch(self, doc, *, pr_state="MERGED"):
+        """The Watchdog's own detection pass over the same document.
+
+        Its sink still sends immediately, because it is a separate process
+        with no drain and it exists for when the Supervisor is not
+        ticking - so the notifier's finite result vocabulary is still
+        observable here, which is where those cases now live.
+        """
+        from control import watchdog
+        view = None if pr_state is None else {
+            "number": 100, "state": pr_state, "isDraft": False,
+            "mergeCommit": {"oid": MERGED_SHA}}
+        cfg = SimpleNamespace(timezone=TZ, github_repo="UNASSIGNED")
+        with mock.patch.object(watchdog.gh, "pr_view", return_value=view):
+            watchdog.reconcile_merge_invariants(cfg, self.sup.ledger,
+                                                self.notifier, doc)
+        return doc
 
 
 class TestLostLocalCommit(InvariantDetectionCase):
@@ -660,7 +693,9 @@ class TestUnprovable(InvariantDetectionCase):
         meta = self.violation()["metadata_redacted"]
         self.assertEqual(meta["verdict"], "UNPROVABLE")
         self.assertTrue(meta["froze"])
-        self.assertEqual(self.notifier.send.call_count, 1)
+        # The annunciation, since the notification amendment: exactly one
+        # durable intent on the Supervisor path, not one synchronous send.
+        self.assertEqual(len(self.queued(doc)), 1)
         self.assertEqual(doc["counters"]["human_interventions"], 1)
 
     def test_unobservable_does_not_hide_a_provable_debt_divergence(self):
@@ -733,11 +768,15 @@ class TestMergeOriginContract(InvariantDetectionCase):
 class TestMetadataDiscipline(InvariantDetectionCase):
 
     def test_notification_status_is_a_finite_code_never_raw_text(self):
+        """Driven through the WATCHDOG since the amendment: that is the
+        path that still sends, so it is the path where a notifier result
+        can reach durable metadata at all. The property is unchanged -
+        unbounded upstream text must never be persisted."""
         self.notifier.send.return_value = {"ok": False, "status": 500,
                                            "error": "Traceback: secret-ish raw text"}
         self.local_merged_event()
         doc = self.merged_state()
-        self.run_external_branch(doc)
+        self.run_watchdog_branch(doc)
 
         meta = self.violation()["metadata_redacted"]
         self.assertFalse(meta["notification_delivered"])
@@ -750,9 +789,76 @@ class TestMetadataDiscipline(InvariantDetectionCase):
                                            "reason": "DISCORD_WEBHOOK_URL_NOT_SET"}
         self.local_merged_event()
         doc = self.merged_state()
-        self.run_external_branch(doc)
+        self.run_watchdog_branch(doc)
         self.assertEqual(self.violation()["metadata_redacted"]["notification_status"],
                          "DISCORD_WEBHOOK_URL_NOT_SET")
+
+    def test_a_failed_watchdog_send_is_retried_rather_than_lost(self):
+        """New under the amendment, and the reason the Watchdog queues at
+        all. Before, a failed Watchdog send vanished; now the intent is
+        durable and PENDING, so the Supervisor's drain retries it with the
+        ordinary bounded backoff when the Supervisor returns."""
+        from control import notify
+        self.notifier.send.return_value = {"ok": False,
+                                           "reason": "DISCORD_WEBHOOK_URL_NOT_SET"}
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_watchdog_branch(doc)
+
+        intents = self.queued(doc)
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(intents[0]["status"], notify.PENDING)
+        self.assertEqual(intents[0]["last_outcome"], "DISCORD_WEBHOOK_URL_NOT_SET")
+        self.assertIsNotNone(intents[0]["next_attempt_at"])
+
+    def test_a_delivered_watchdog_send_is_not_queued_for_redelivery(self):
+        """The other half: the Watchdog already delivered it, so the
+        Supervisor's drain must not send it a second time. Discord offers
+        no idempotency key, so a duplicate would be a real duplicate."""
+        from control import notify
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_watchdog_branch(doc)
+
+        intents = self.queued(doc)
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(intents[0]["status"], notify.DELIVERED)
+        self.assertEqual(notify.due_intents(doc, clock.now(TZ)), [])
+
+    def test_the_supervisor_path_queues_and_does_not_send(self):
+        """The amendment's whole point: no synchronous outbound send
+        remains under T1. The annunciation is the durable intent."""
+        from control import notify
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+
+        self.notifier.send.assert_not_called()
+        intents = self.queued(doc)
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(intents[0]["status"], notify.PENDING)
+        self.assertEqual(intents[0]["severity"], notify.HUMAN_REQUIRED)
+
+    def test_a_queued_annunciation_is_never_recorded_as_delivered(self):
+        """QUEUED is durable intent, never a delivery claim."""
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+
+        meta = self.violation()["metadata_redacted"]
+        self.assertIsNone(meta["notification_delivered"])
+        self.assertEqual(meta["notification_status"], "QUEUED")
+
+    def test_the_annunciation_is_linked_to_its_intent_by_id(self):
+        """The link the amendment requires: the violation event names the
+        intent whose later NOTIFICATION outcome reports delivery."""
+        from control import notify
+        self.local_merged_event()
+        doc = self.merged_state()
+        self.run_external_branch(doc)
+
+        recorded = self.violation()["metadata_redacted"]["annunciation_intent_id"]
+        self.assertIn(recorded, notify.queue(doc))
 
     def test_durable_metadata_keys_are_a_closed_set(self):
         """Absence of one known offender proves nothing - a NEW unbounded key
@@ -768,6 +874,9 @@ class TestMetadataDiscipline(InvariantDetectionCase):
             "missing_debt_ids", "ledger_readable", "ledger_unreadable_lines",
             "blocked_merged_in_window", "window_lower_bound", "window_lower_source",
             "notification_delivered", "notification_status",
+            # The notification amendment: what links this annunciation to
+            # the NOTIFICATION outcome that later reports its delivery.
+            "annunciation_intent_id",
         })
 
     def test_durable_evidence_is_structured_codes_not_prose(self):

@@ -388,8 +388,28 @@ def gather(*, task_id, pr_number, doc, task, record, ledger, pr_view, now_iso):
 
 
 def annunciate(*, doc, task, record, verdict, github, state_view, ledger_view,
-               ledger, notifier, detector, tz):
+               ledger, announce, detector, tz):
     """Durably record a dangerous verdict, once per distinct finding.
+
+    `announce(severity, title, body) -> dict` is how the annunciation
+    leaves. It must record a DURABLE INTENT and return
+    `{"queued": bool, "intent_id": str|None, "delivered": bool|None,
+      "status": str|None}`, and it owns the `human_interventions` counter.
+
+    Two callers, two different delivery guarantees, one evidence rule:
+
+      * The SUPERVISOR passes a sink over `notify_out`. It queues and
+        returns `delivered: None`; `drain_notifications` delivers later
+        with bounded retries, outside every transaction. This is what
+        removes the last synchronous send from T1.
+      * The WATCHDOG passes a sink that queues AND sends immediately,
+        because it is a separate process with no drain and it exists for
+        exactly the case where the Supervisor is not ticking. Queuing
+        alone there would make the Watchdog's escalation depend on the
+        component it is watching.
+
+    In both, the durable intent is written before any send, so the
+    annunciation evidence never depends on delivery succeeding.
 
     Freezes only where ALLOWED_TRANSITIONS permits it; a terminal task is
     annunciated without an illegal transition being attempted, because what is
@@ -452,18 +472,42 @@ def annunciate(*, doc, task, record, verdict, github, state_view, ledger_view,
                 "detector": detector,
             })
 
-    delivered, status_code = notification_status(notifier.send(
+    # THE NOTIFICATION AMENDMENT. This used to be `notifier.send(...)` - the
+    # one remaining synchronous outbound send under T1, named by C-18 §19.7
+    # item 3. It now goes through `announce`, which the caller supplies.
+    #
+    # C-14.2's annunciation evidence is the DURABLE QUEUED INTENT, not a
+    # completed send. The intent is committed atomically with the freeze and
+    # the intervention record that accompany it, which is strictly stronger
+    # than a synchronous send that can fail silently with nothing written
+    # down. Delivery is a separate, retried concern reported by NOTIFICATION
+    # outcomes carrying the same intent_id.
+    #
+    # `announce` is REQUIRED and has no default. A default would mean a
+    # caller that forgot it still annunciated, silently, into nothing.
+    outcome = announce(
         "HUMAN_REQUIRED",
         f"{verdict.task_id} PR #{verdict.pr_number}: merge invariant violated",
         f"{verdict.verdict}. {verdict.summary}. Detected by the {detector}. "
         "No automatic repair has been attempted."
         + intervention.notification_suffix(int_record),
-    ))
+    ) or {}
+    intent_id = outcome.get("intent_id")
+    # QUEUED IS NOT DELIVERED. None means "no send was attempted here, the
+    # drain owns it" - deliberately not False, which would read as a failed
+    # send, and never True, which would be a delivery claim this function
+    # can no longer make on the queued path.
+    delivered = outcome.get("delivered")
+    status_code = outcome.get("status") or (
+        "QUEUED" if outcome.get("queued") else NOTIFICATION_SEND_FAILED)
 
     if record is not None:
         record["invariant_annunciation_fingerprint"] = print_id
         record.setdefault("invariant_annunciation_state", before)
-    doc["counters"]["human_interventions"] += 1
+    # The human_interventions counter belongs to `announce` now. The
+    # Supervisor's notify_out already increments it for HUMAN_REQUIRED, so
+    # incrementing here as well would double-count every merge-invariant
+    # violation. The Watchdog's sink increments it for the same reason.
 
     ledger.append(
         "STATE_INVARIANT_VIOLATION",
@@ -495,8 +539,14 @@ def annunciate(*, doc, task, record, verdict, github, state_view, ledger_view,
             "blocked_merged_in_window": ledger_view.blocked_merged_in_window,
             "window_lower_bound": ledger_view.window_lower,
             "window_lower_source": ledger_view.window_lower_source,
+            # QUEUED is durable intent, never delivery. `delivered` is
+            # None on the queued path - no send was attempted at this
+            # point - and the intent_id is what links this annunciation to
+            # the NOTIFICATION outcome that eventually reports delivery or
+            # failure.
             "notification_delivered": delivered,
             "notification_status": status_code,
+            "annunciation_intent_id": intent_id,
         },
     )
     return True
