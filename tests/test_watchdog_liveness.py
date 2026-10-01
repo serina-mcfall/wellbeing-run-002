@@ -33,6 +33,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from control import config, watchdog  # noqa: E402
+from control import state as state_mod  # noqa: E402
 
 TZ = "Pacific/Auckland"
 STALE = 120
@@ -112,6 +113,15 @@ class WatchdogLoopCase(HeartbeatCase):
         every iteration: the second call ends the pass. Bounding on time.sleep
         would not work, because the recovery and stand-down paths `continue` past
         it.
+
+        `config.STATE_PATH` IS PATCHED, and that is not tidiness. Without it
+        this method wrote the REAL `.runtime/state.json` - `main()` calls
+        reconcile_worker_state and annunciate_orphans, each of which does
+        `store or state_mod.Store(tz=...)` and so defaults to the live run
+        state. Measured: 16 writes per full suite run, incrementing a real
+        orphan-annunciation counter in the document T+00 starts from. The
+        ledger, notifier and pid path were already stubbed; the store was
+        the one external edge nobody had closed.
         """
         ledger = mock.Mock()
         notifier = mock.Mock()
@@ -142,6 +152,8 @@ class WatchdogLoopCase(HeartbeatCase):
                                   side_effect=one_iteration), \
                 mock.patch.object(watchdog.config, "WATCHDOG_PID_PATH",
                                   Path(self.dir.name) / "wd.pid"), \
+                mock.patch.object(watchdog.config, "STATE_PATH",
+                                  Path(self.dir.name) / "state.json"), \
                 mock.patch.object(watchdog.time, "sleep"):
             led_mod.Ledger.return_value = ledger
             notify_mod.Notifier.return_value = notifier
@@ -153,6 +165,44 @@ class WatchdogLoopCase(HeartbeatCase):
                 code = None  # survived the pass and looped again
         events = [c.args[0] for c in ledger.append.call_args_list]
         return code, events, start
+
+
+class TestTheLoopWritesNoRealRunState(WatchdogLoopCase):
+    """The pass must write a THROWAWAY state document, never the live one.
+
+    This file used to write the real `.runtime/state.json` on every pass -
+    16 writes per full suite run, incrementing an orphan-annunciation
+    counter in the document T+00 starts from. Nothing noticed, because
+    every assertion was about ledger events.
+
+    Asserted on WHICH PATH THE STORE OPENED, not on what the live file
+    looks like afterwards. Two cheaper guards were tried and rejected: a
+    hash comparison against the live file depends on test ordering and
+    passes vacuously where that file does not exist, and asserting that a
+    throwaway state.json appeared depends on the scenario happening to
+    make a write - the stand-down path opens a store and writes nothing.
+    Opening the live store at all is the defect, written or not.
+    """
+
+    def test_the_loop_never_opens_the_live_run_state(self):
+        self.write(age_seconds=200)
+        seen = {}
+        real_store = state_mod.Store
+
+        def recording_store(path=None, **kw):
+            seen.setdefault("paths", []).append(
+                Path(path) if path is not None else Path(watchdog.config.STATE_PATH))
+            return real_store(path, **kw)
+
+        with mock.patch.object(state_mod, "Store", recording_store):
+            self.run_one_pass(incumbent_alive=True, start_returns=None,
+                              recovery_confirmed=False, fresh=[False, True])
+        self.assertTrue(seen.get("paths"), "no store was opened at all")
+        live = (config.REPO_ROOT / ".runtime" / "state.json").resolve()
+        for path in seen["paths"]:
+            self.assertNotEqual(
+                path.resolve(), live,
+                f"the watchdog loop opened the LIVE run state at {path}")
 
 
 class TestRefusalDoesNotKillTheWatchdog(WatchdogLoopCase):
