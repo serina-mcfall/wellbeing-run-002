@@ -415,6 +415,31 @@ MERGE_CI_NOT_SATISFIED = "CI_NOT_SATISFIED"
 MERGE_CONFLICTING = "BRANCH_CONFLICTING"
 MERGE_BEHIND = "BRANCH_BEHIND"
 MERGE_STATE_BLOCKED = "MERGE_STATE_BLOCKED"
+# C-04b. Three states this gate used to let through in silence, each
+# found by comparing it line by line with apparatus/pr-evidence/live-gate.js.
+MERGE_STATE_DIRTY = "MERGE_STATE_DIRTY"
+MERGE_STATE_UNKNOWN = "MERGE_STATE_UNKNOWN"
+MERGE_STATE_UNRECOGNISED = "MERGE_STATE_UNRECOGNISED"
+MERGE_PR_DRAFT_STATE_UNKNOWN = "PR_DRAFT_STATE_UNKNOWN"
+
+# The GitHub `mergeStateStatus` values a merge may proceed from.
+#
+# CLEAN      everything required is satisfied.
+# UNSTABLE   mergeable, but a NON-required check is failing. Allowed here
+#            and NOT in live-gate.js, deliberately and not by oversight:
+#            this gate separately verifies every REQUIRED check by name
+#            through gh.checks_state(pr, required_checks), so UNSTABLE
+#            means precisely "something we did not require is red". That
+#            difference is recorded in the C-04b differential rather than
+#            left for someone to discover.
+# HAS_HOOKS  mergeable, with repository hooks configured.
+#
+# Everything else - BEHIND, DIRTY, BLOCKED, DRAFT, UNKNOWN, absent, and
+# any value GitHub adds later - denies. UNKNOWN is the one worth naming:
+# it means GitHub has not finished COMPUTING mergeability, and reading
+# "not computed yet" as "fine to merge" is the exact fail-open shape the
+# rest of this module refuses everywhere else.
+MERGEABLE_STATES: frozenset[str] = frozenset({"CLEAN", "UNSTABLE", "HAS_HOOKS"})
 # Protocol v2 makes accessibility and security required evidence classes for
 # the exact PR head. Until this existed, evaluate_merge never consulted any of
 # it - see the comment on the evidence gate inside evaluate_merge for the hole
@@ -466,11 +491,22 @@ def evaluate_merge(pr: dict, record: dict, required_checks: tuple[str, ...],
     if pr.get("state") != "OPEN":
         return MergeDecision(False, f"PR #{number} is not open",
                              condition=MERGE_PR_NOT_OPEN)
-    if pr.get("isDraft"):
+    if pr.get("isDraft") is True:
         return MergeDecision(
             False,
             f"PR #{number} is a draft and has not been marked ready for review",
             condition=MERGE_PR_IS_DRAFT)
+    # C-04b. `if pr.get("isDraft")` treated an ABSENT isDraft as "not a
+    # draft", so an observation that simply did not carry the field read as
+    # ready for review. live-gate.js has always refused that
+    # (PR_DRAFT_STATE_UNKNOWN), and the rule is this module's own
+    # everywhere else: absence is a denial, not an exemption. Only the
+    # literal boolean False means "not a draft".
+    if pr.get("isDraft") is not False:
+        return MergeDecision(
+            False,
+            f"PR #{number} draft status could not be determined",
+            condition=MERGE_PR_DRAFT_STATE_UNKNOWN)
 
     # Protocol v2 "Evidence provenance": "new SHA => regenerate required
     # automated evidence". The head SHA is the thing the rule names, and
@@ -560,9 +596,39 @@ def evaluate_merge(pr: dict, record: dict, required_checks: tuple[str, ...],
     if merge_state == "BEHIND":
         return MergeDecision(False, "branch is behind main and needs reconciliation",
                              condition=MERGE_BEHIND)
-    if merge_state in ("DIRTY", "BLOCKED"):
-        return MergeDecision(False, f"merge state {merge_state}",
-                             condition=MERGE_STATE_BLOCKED)
+    # C-04b. DIRTY and BLOCKED used to share one condition token. They are
+    # two different facts needing two different responses - DIRTY is a
+    # conflict the Fixer may be able to resolve, BLOCKED is a repository
+    # protection rule nothing in the control plane can satisfy - and
+    # C-20a decision D requires diagnostics that distinguish them.
+    # live-gate.js already separated them; this is the same separation.
+    if merge_state == "DIRTY":
+        return MergeDecision(False, "merge state DIRTY: the branch does not merge cleanly",
+                             condition=MERGE_STATE_DIRTY)
+    if merge_state == "BLOCKED":
+        return MergeDecision(
+            False,
+            "merge state BLOCKED: a base-branch protection rule is unsatisfied, "
+            "which is a repository-governance condition rather than a defect "
+            "in the evidence chain",
+            condition=MERGE_STATE_BLOCKED)
+    # C-04b. This used to be the end of the function: every OTHER value,
+    # INCLUDING an absent one and GitHub's "still computing" UNKNOWN,
+    # reached "all merge gates satisfied". Reproduced before it was fixed:
+    # a record and observation that satisfied every check above, with
+    # mergeStateStatus removed entirely, returned allowed=True.
+    if merge_state in ("", "UNKNOWN"):
+        return MergeDecision(
+            False,
+            "GitHub has not reported a usable mergeStateStatus, so "
+            "mergeability is unknown rather than satisfied",
+            condition=MERGE_STATE_UNKNOWN)
+    if merge_state not in MERGEABLE_STATES:
+        # A value this gate has never been reasoned about. Denying is the
+        # only safe reading: a state nobody has judged must not merge
+        # because nobody wrote a branch for it.
+        return MergeDecision(False, f"unrecognised merge state {merge_state}",
+                             condition=MERGE_STATE_UNRECOGNISED)
 
     return MergeDecision(True, "all merge gates satisfied", condition=MERGE_OK)
 

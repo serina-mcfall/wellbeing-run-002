@@ -1,0 +1,290 @@
+C-04b — THE TWO MERGE GATES, COMPARED AND RECONCILED
+=====================================================
+Date:      2026-10-02
+Authority: Explicit operator instruction, this session, quoted verbatim in
+           section 1.
+Branch:    wip/c05-1-persistence
+
+Closes handover 43.5(b), which recorded that the two gates "are not known
+to agree" and that "nothing has ever compared their verdicts on the same
+input."
+
+
+1. THE OPERATOR'S AUTHORISATION, VERBATIM
+-----------------------------------------
+    "3. Reconcile the two merge-policy implementations.
+
+    Compare apparatus/pr-evidence/live-gate.js with
+    control/routing.py::evaluate_merge and identify policy enforced by one
+    but absent from the other.
+
+    This authority includes implementing compatible fixes and connecting
+    required enforcement, not merely writing a differential test. Choose
+    the smallest maintainable implementation consistent with the governing
+    requirements. Do not weaken either gate or silently amend policy."
+
+
+2. THE DECISION TAKEN, AND WHY
+-------------------------------
+Handover 43.5(b) set out three options.
+
+  (i)   the Supervisor invokes live-gate.js and trusts its decision
+  (ii)  live-gate.js is retired and evaluate_merge absorbs it
+  (iii) they are kept separate with a tested statement of which is
+        authoritative for what
+
+OPTION (iii) IS TAKEN, plus the gaps the comparison found are closed in
+the authoritative gate.
+
+Option (i) is NOT AVAILABLE. It requires deciding WHICH REVISION the
+JavaScript gate executes from — running it out of the PR's own tree would
+let a pull request supply the code that judges it. That boundary is
+C-20a(C) and it is still the operator's decision. The handover said so and
+nothing has changed it.
+
+Option (ii) is NOT TAKEN. live-gate.js is not redundant: it answers a
+different question. It judges a SUBMITTED PR-EVIDENCE PACKAGE — an
+untrusted document, where every field is a claim and the whole design is
+about not believing any of them. evaluate_merge judges the control
+plane's OWN records, written by the Supervisor under its own lock. Porting
+package-validation into evaluate_merge would mean validating a document
+the Supervisor never receives.
+
+WHAT MAKES THIS HONEST RATHER THAN CONVENIENT: the separation is now
+MEASURED. tests/test_c04b_merge_gate_differential.py pins every condition
+each gate can report, asserts every one is classified exactly once as
+shared / Python-only / JavaScript-only, and requires a substantive written
+reason for every JavaScript condition that was not ported. A condition
+added to either gate without a decision about the other fails the build.
+
+
+3. THE DIFFERENTIAL
+-------------------
+evaluate_merge: 19 conditions.  live-gate.js: 25 condition codes.
+
+SHARED POLICY — both enforce, different spellings (11):
+  pull request is open                PR_NOT_OPEN / PR_NOT_OPEN
+  not a draft                         PR_IS_DRAFT / PR_IS_DRAFT
+  draft status is known               PR_DRAFT_STATE_UNKNOWN (both) *NEW*
+  branch does not conflict            BRANCH_CONFLICTING / PR_CONFLICTING
+  branch is not behind                BRANCH_BEHIND / PR_BEHIND_BASE
+  protection rules satisfied          MERGE_STATE_BLOCKED /
+                                      PR_BLOCKED_BY_BRANCH_PROTECTION
+  mergeability is known               MERGE_STATE_UNKNOWN /
+                                      PR_MERGE_STATE_NOT_CLEAN   *NEW*
+  reviewed head is the current head   HEAD_SHA_CHANGED / PR_HEAD_MOVED
+  head establishable at all           HEAD_SHA_UNVERIFIABLE /
+                                      PR_HEAD_UNOBSERVED
+  evidence complete and SHA-bound     EVIDENCE_INCOMPLETE /
+                                      EVIDENCE_SHA_UNBOUND
+  required CI passed for this head    CI_NOT_SATISFIED / CI_UNVERIFIED
+
+PYTHON ONLY — and live-gate.js structurally cannot have them:
+  GUARDRAIL_RED        a property of the RUN, not of any package
+  APPROVAL_STALE       control-plane lifecycle state
+  DIFF_UNVERIFIABLE    the material-diff hash. It catches a force-push
+  DIFF_CHANGED         producing a DIFFERENT commit with an IDENTICAL
+                       diff, which every SHA check passes. live-gate.js
+                       has no diff-hash concept at all.
+  NO_REVIEW_PASS       the live worker's parsed verdict
+  MERGE_STATE_DIRTY         *NEW*, a split of MERGE_STATE_BLOCKED
+  MERGE_STATE_UNRECOGNISED  *NEW*
+
+JAVASCRIPT ONLY — NOT PORTED, each a recorded decision (14):
+  COMPOSITION_INPUT_INVALID, OFFLINE_POLICY_FAILED, EVIDENCE_SHA_MISSING,
+  EVIDENCE_SHA_STALE, TASK_RECORD_UNVERIFIED, REVIEWER_UNVERIFIED,
+  PR_UNOBSERVED        — all package-shaped or already answered elsewhere;
+                         reasons recorded in the test's JS_ONLY mapping.
+
+  HEAD_SHA_UNVERIFIED  — THE MOST SUBSTANTIVE ONE. live-gate.js resolves
+                         the head INDEPENDENTLY through git and requires
+                         GitHub's observation to agree. evaluate_merge
+                         anchors on pr["headRefOid"] alone, so a GitHub
+                         observation disagreeing with git is not caught.
+                         Not ported: the Supervisor pushes the branch
+                         itself and re-observes under its own lock, and a
+                         git call per candidate adds an external call to
+                         the one transaction C-14 wants shortest.
+                         ACCEPTED DIFFERENCE, recorded not hidden.
+
+  REVIEW_PROVENANCE_* (6) — append-only LEDGER proof that this review is
+                         for this commit by that worker. Not ported. The
+                         binding EXISTS on the Python side — C-18 stage 5
+                         made REVIEW_RESULT carry head_sha and agent_id —
+                         but it is never read back at merge time. It would
+                         defend against a state.json rollback that the
+                         head comparison does not already catch.
+                         ACCEPTED DIFFERENCE, and the strongest candidate
+                         if these ever converge.
+
+KNOWN DISAGREEMENT ON THE ALLOW SIDE — exactly one:
+  live-gate.js requires mergeStateStatus CLEAN exactly. evaluate_merge
+  also allows UNSTABLE and HAS_HOOKS, because it separately verifies every
+  REQUIRED check BY NAME through gh.checks_state — so UNSTABLE there means
+  only "a check nobody required is red", a distinction live-gate.js cannot
+  make because it has no required-check list. Pinned by
+  MergeStateDifferenceCase, including that a RED REQUIRED check under
+  UNSTABLE still denies, and for the CI reason rather than the merge-state
+  one.
+
+
+4. WHAT THE COMPARISON FOUND — THREE FAIL-OPEN HOLES
+-----------------------------------------------------
+All three were in evaluate_merge, the gate that actually decides merges.
+None was covered by any existing test, which is how all three survived.
+
+H1. AN ABSENT OR UNCOMPUTED mergeStateStatus MERGED.
+    The gate denied BEHIND, DIRTY and BLOCKED and then fell through to
+    "all merge gates satisfied" for EVERYTHING ELSE — including the empty
+    string, including GitHub's UNKNOWN, which means "mergeability has not
+    been computed yet". Reading "not computed" as "fine to merge" is the
+    exact fail-open shape this module refuses everywhere else.
+
+H2. AN ABSENT isDraft MERGED.
+    `if pr.get("isDraft")` treats absent as not-a-draft. An observation
+    that simply did not carry the field read as ready for review.
+    live-gate.js has always refused this (PR_DRAFT_STATE_UNKNOWN).
+
+H3. DIRTY AND BLOCKED SHARED ONE CONDITION TOKEN.
+    Two different facts needing two different responses — DIRTY is a
+    conflict a Fixer may resolve, BLOCKED is a repository protection rule
+    nothing in the control plane can satisfy. C-20a decision D requires
+    distinguishable diagnostics; live-gate.js already separated them.
+
+PROVED, NOT INFERRED. routing.py was reverted to its pre-C-04b form and
+the differential run:
+
+    test_an_absent_merge_state_is_not_a_clean_one        AssertionError: True is not false
+    test_github_still_computing_mergeability_is_not_permission
+                                                         AssertionError: True is not false
+    test_a_merge_state_nobody_has_reasoned_about_denies   AssertionError: True is not false
+    test_an_absent_draft_flag_is_not_ready_for_review     AssertionError: True is not false
+    test_a_non_boolean_draft_flag_is_not_ready_for_review AssertionError: True is not false (x5)
+    test_dirty_and_blocked_are_now_distinguishable
+                                 AssertionError: 'MERGE_STATE_BLOCKED' != 'MERGE_STATE_DIRTY'
+
+"True is not false" is `decision.allowed`. Each of those pull requests
+MERGED under the old gate.
+
+Restored from a file copy; sha256
+c176d8aad5e1b4686175590b9d3c7da8ec5e3e07a4712b09cd722423a3d5d0e0.
+
+
+5. THE FIX, AND WHY IT IS THE SMALLEST ONE
+-------------------------------------------
+control/routing.py only. Four new condition constants, one explicit
+MERGEABLE_STATES allow-list, two edited branches. No new module, no new
+parameter, no new call, no infrastructure.
+
+NOTHING WAS WEAKENED AND NO POLICY WAS AMENDED. Every change ADDS a
+denial. No denial was removed, no threshold lowered, no verdict rule
+rewritten, no gate bypassed. Measured: the full suite was green before and
+after, and no existing test needed changing — which is itself the evidence
+that nothing legitimate relied on the laxity, and that nothing was testing
+it either.
+
+One deliberate restraint: none of the three new denials sets
+`invalidate_approval`. A pull request GitHub has not finished assessing
+has had nothing change about its evidence, and invalidating the approval
+would burn a whole review cycle for an observation delay. Asserted by
+test_no_new_denial_invalidates_an_approval.
+
+MERGEABLE_STATES is an ALLOW-LIST, not a longer deny-list, specifically so
+that a value GitHub adds in future denies by default instead of merging by
+default. That is the property H1 was missing.
+
+
+6. THE SUPERVISOR PATH — WHAT WAS VERIFIED, AND AT WHAT GRADE
+--------------------------------------------------------------
+Three grades, kept apart deliberately. Passing test counts alone do not
+establish readiness.
+
+  [C] COMPONENT          pure functions, hand-built inputs
+  [S] SIMULATED          the real Supervisor over a real store, with
+                         external services injected
+  [R] REAL SERVICE       a real process, socket, browser or git operation
+
+  Failed/missing evidence blocks progression            [S]
+    test_c05_3b_evidence_to_review (16),
+    test_c05_3b_connected_merge_unblock::
+      test_a_missing_evidence_class_never_even_reaches_review
+    Confirmed independently: evaluate_merge calls review_gate_fires, which
+    requires all three legs COMPLETE and at the observed head, and
+    iterates REVIEW_GATE_CLAIM_VALIDATORS (all three registered —
+    security_evidence, accessibility_auto, accessibility_review).
+
+  Repair produces fresh checks and independent review    [S]
+    test_c05_3b_connected_lifecycle (36)
+
+  Changed heads invalidate stale evidence and approvals  [S]
+    test_c05_3b_connected_lifecycle,
+    test_a_claim_that_moved_while_spawning_is_discarded,
+    and at the gate: HEAD_SHA_CHANGED with invalidate_approval=True
+    (test_c04b_merge_gate_differential::
+       test_the_head_is_checked_before_the_evidence)
+
+  Severity policy and claim validators run at live call sites  [S] + [C]
+    VERIFIED BY READING THE LIVE PATH, not from a test name:
+      - routing.accessibility_is_consistent applies
+        adjudicate_accessibility_finding to EVERY finding and returns
+        PASS_WITH_BLOCKING_FINDINGS for a PASS carrying a blocking
+        finding. supervisor.ingest_accessibility_review calls it BEFORE
+        recording any verdict, so a reviewer cannot pass itself over its
+        own blocking finding.
+      - supervisor.commit_accessibility (3481) runs
+        accessibility_findings_block_merge on the automated half.
+      - review_gate_fires iterates every registered claim validator, so a
+        structurally plausible claim its own validator refuses cannot
+        clear the gate.
+
+  Restart recovery preserves claims and cumulative deadlines  [S]
+    test_c05_3b_qualitative_dispatch::
+      test_a_restart_does_not_re_dispatch_an_in_flight_review,
+      test_a_restart_keeps_the_claim_and_its_lease,
+      test_a_restart_can_still_ingest_the_result_it_did_not_dispatch
+    test_g3_g4_evidence_budget::
+      test_a_restart_retains_both_the_total_and_the_open_interval
+    Each builds a genuinely new Supervisor over the same store.
+
+  Cleanup does not release a still-listening port        [R]  <-- UPGRADED
+    Was [S] only. NOW REAL: test_c05_3c_local_fixture_scan::
+      test_a_still_listening_server_is_not_released — a real server on a
+      real socket, the real /proc listener scan, refusing the release
+      (PRODUCT_SERVER_NOT_RELEASED), then permitting it after a real stop.
+      test_the_process_group_really_dies observes the actual pid.
+
+  Merge confirmation precedes completion and unblocking  [S]
+    test_c05_3b_connected_merge_unblock (14), specifically
+      test_the_merge_went_through_the_real_evaluate_merge,
+      test_the_merge_is_CONFIRMED_not_merely_attempted,
+      test_the_dependent_actually_becomes_dispatchable,
+      test_a_merge_the_gate_refuses_leaves_the_dependent_blocked
+
+NOT VERIFIED AT ANY GRADE, AND THIS IS THE HONEST LIMIT:
+  - NO REAL GITHUB CALL has ever been made by any of this. gh.pr_view,
+    gh.merge, gh.checks_state, auth, rate limiting and pagination are
+    unexercised. Every [S] above stubs them.
+  - live-gate.js has still never run against real GitHub either; every
+    adapter in every one of its tests is a stub.
+  - No product PR exists, so no merge has ever been evaluated against a
+    real pull request.
+
+
+7. WHAT WAS DELIBERATELY NOT DONE
+----------------------------------
+  - live-gate.js was NOT edited. Not one line.
+  - live-gate.js was NOT wired into the Supervisor — that is C-20a(C).
+  - No ledger read was added to the merge transaction.
+  - No git call was added to the merge transaction.
+  - No policy was amended, no gate weakened, no threshold changed.
+  - No GitHub call was made.
+
+
+8. VERIFICATION
+---------------
+  tests/test_c04b_merge_gate_differential.py   19 tests  OK
+  tests/test_c04_merge_eligibility.py          18 tests  OK (unchanged)
+  Supervisor-path suites above               176 tests  OK
+  Full Python suite                        2,314 tests  OK (10 skipped)
+  Full apparatus suite                       222 tests  OK (unchanged —
+                                             live-gate.js was not touched)
