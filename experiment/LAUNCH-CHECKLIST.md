@@ -9,9 +9,11 @@ document, **they win**. This checklist orders and enumerates; it decides nothing
 T+00 remains **NOT_STARTED** (`experiment/TIMELINE.md`). Nothing in this
 document authorises launch, and no partial completion of it does either.
 
-**Session state as of 2026-10-01: `C05-3a-SESSION-HANDOVER.md` §42**, which
-supersedes §41. Branch `wip/c05-1-persistence`, HEAD **`a0d57f6`**, pushed,
-clean tree. The earlier approved decisions are all still applied (G1, G2,
+**Session state as of 2026-10-02: `C05-3a-SESSION-HANDOVER.md` §43**, the
+stop record, with **§42** for what was built and why. Both supersede §41.
+Branch `wip/c05-1-persistence`, HEAD **`ec45325`**, in sync with origin
+(`0 0`), clean tree, no stashes, nothing running and no subagent resumable.
+No work is uncommitted and none was discarded. The earlier approved decisions are all still applied (G1, G2,
 G3's phase limits, G4, G6, G7, G9, C-18a). **Three of the four pending
 decisions were delegated to the integration owner and are now APPLIED** -
 C-02a's frozen-prompt amendment, C-18 stage 7's bounds, and the
@@ -20,8 +22,15 @@ verbatim under `experiment/evidence/`. **One decision remains the
 operator's: C-20a(C), the GitHub App and worker UID**, for which a complete
 reviewable proposal now exists.
 
-Verification at `a0d57f6`: **2,273 Python tests, 218 apparatus tests**, both
-exit 0, secret scan clean, `git diff --check` clean.
+Verification at `ec45325`: **2,273 Python tests, 218 apparatus tests**, both
+exit 0, secret scan clean over 244 tracked files, `git diff --check` clean.
+
+**The single next concrete action is to provision the eight secrets**
+(`~/.config/run-002/secrets.env`, mode 600 — exact instructions in §43.5d).
+It is purely local, unblocks three gates immediately, and is a precondition
+for every remaining gate. The only other externally-blocked item is
+C-20a(C), for which a corrected proposal now exists and whose §41.7
+permission set must **not** be approved as written.
 
 **Test-count note.** This document previously carried 2,171/218 here and
 1,852/197 in the `control_plane_self_tests` row below, as if both were

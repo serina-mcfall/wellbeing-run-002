@@ -7720,3 +7720,263 @@ logged at any point in this session.**
   touched, no App or OS user created, no paid call made, no product worker
   launched, no merge to `main`. Run 001 untouched. C-18a stands.
 - **T+00 remains NOT_STARTED.**
+
+## 43. SESSION HANDOVER — safe stop for a fresh session (2026-10-02)
+
+**Read 42 first, then this.** §42 records what was built and why; §43 is the
+stop record: what is running (nothing), where every piece of work lives, and
+exactly how to resume. §41 is superseded, §16 is stale.
+
+### 43.1 Verified state — measured at handover, not remembered
+
+| | |
+|---|---|
+| Branch | `wip/c05-1-persistence` |
+| HEAD | **`ec45325`** |
+| Push | **In sync.** `git rev-list --left-right --count origin/wip/c05-1-persistence...HEAD` → `0 0` |
+| Working tree | **Clean.** `git status --porcelain --untracked-files=all` is empty |
+| Stashes | **None.** `git stash list` is empty |
+| Verification at HEAD | **2,273 Python tests OK · 218 apparatus tests OK**. Secret scan clean over 244 tracked files. `git diff --check` clean |
+| T+00 | **NOT_STARTED** (`started_at: None`) |
+| Run 001 | Untouched |
+
+### 43.2 Nothing will continue modifying the checkout
+
+- **Background processes: none.** No `supervisor.sh`, `watchdog.sh`,
+  `worker-entry.sh`, `ctl`, test runner or apparatus Node process is alive.
+- **Subagents: none active.** Three were dispatched this session; all three
+  completed and were integrated. No agent is waiting, resumable or mid-write.
+- **No scheduled or background task** was created at any point.
+- `.runtime/state.lock` and `.runtime/supervisor.lock` exist as **zero-byte
+  flock targets**, not held locks — there is no process to hold them, and no
+  `supervisor.pid` file exists.
+
+**Nothing about this checkout will change until a human or a new session
+changes it.**
+
+### 43.3 Where every piece of work lives — nothing was discarded
+
+Everything built this session is **committed and pushed** on
+`wip/c05-1-persistence`. Eight commits, `1387275..ec45325`:
+
+```
+ec45325  Audit: C-20 and C-09a reflect the dispatch that now exists
+35f5cea  Record section 42, and reconcile the three authoritative documents
+a0d57f6  Restart recovery for the qualitative claim
+01c0413  Propose the GitHub App and worker isolation, with §41.7 cross-checked
+ebe5b46  Close §41.5 item 3: merge confirmation and unblocking, in Python
+b9717da  C-05.3b: both accessibility halves actually reach the tick
+32ed612  The notification amendment: the last synchronous send leaves T1
+fa822f9  C-18 stage 7: every post-T1 phase declares a bound it can actually keep
+69cdd45  C-02a: the frozen prompt's example now names a real requirement
+```
+
+**There is no unfinished or uncommitted work.** The clean tree is not the
+result of discarding anything: no file was reverted, nothing was stashed, and
+no incomplete change was committed to tidy up. Every item in 43.5 is work
+**not yet started**, not work abandoned half-done.
+
+**Subagent worktrees — redundant, safe to leave, do not delete casually.**
+Two worktrees from this session still hold the branches their agents
+committed to:
+
+| Worktree | Branch | Commit | Status |
+|---|---|---|---|
+| `.claude/worktrees/agent-a3aad30af07c51248` | `worktree-agent-a3aad30af07c51248` | `8cf9816` | **Fully integrated** as `ebe5b46` |
+| `.claude/worktrees/agent-a6e4c1ce818c77616` | `worktree-agent-a6e4c1ce818c77616` | `4880436` | **Fully integrated** as `01c0413` |
+
+Those commits are **not ancestors of HEAD** — they were cherry-picked, so the
+SHAs differ. That is checked rather than assumed: `git show <branch>:<file>`
+diffed against `git show HEAD:<file>` is **byte-identical** for both, and
+`git diff --stat 1387275 <branch>` shows each agent touched **exactly one
+file**. Both worktrees are clean. **No work is lost if they are removed, and
+nothing is gained by removing them.** Nine older `agent-*` worktrees from
+earlier PR streams also remain, all with zero commits outside HEAD.
+
+**One gitignored transient:** `.claude/.test-change`, a hook's per-edit
+declaration log. Not work, not tracked, safe to ignore or delete.
+
+### 43.4 Approvals and delegated authority — ALL still in force
+
+Nothing here was reopened this session, and nothing may be reopened without
+the operator.
+
+| Authority | Status |
+|---|---|
+| **G1** accessibility timeout 1800, separate from browser deadlines | applied, unchanged |
+| **G2 / G9** claim-owned ports through C-09; claim in T1, execute outside, commit with re-verification | applied, unchanged |
+| **G3** phase limits (600/120/120-300/60, total 1080) and direction: clean isolated build at the trusted head, no artefact reuse, **no NOT_APPLICABLE route** | applied, unchanged |
+| **G4** cumulative evidence wait 18000 s, HUMAN_REQUIRED at exhaustion | applied, unchanged |
+| **G6** explicit reviewed maps, no wildcards, unmapped stays blocking | applied, unchanged |
+| **G7** `max_accessibility_auto = 1`, `max_accessibility_review = 1`, typed and required at load | applied, unchanged |
+| **C-18a** five-hour standalone rehearsal **waived** — and only that | applied, unchanged |
+| **C-20a A, D, E** draft→ready authority, distinct diagnostics, new-SHA invalidation | applied, unchanged |
+| **C-02a** frozen-prompt amendment | **DELEGATED 2026-10-01, APPLIED.** Authorisation verbatim in `experiment/evidence/C-02a-frozen-prompt-amendment.txt` |
+| **C-18 stage 7** bounded `declare_busy` | **DELEGATED 2026-10-01, APPLIED.** Reasoning in §42.5 and the C-18 audit row |
+| **Notification amendment** | **DELEGATED 2026-10-01, APPLIED.** Authorisation verbatim in `experiment/evidence/C-18-notification-amendment.txt` |
+| **C-20a(C)** GitHub App + worker UID | **NOT DELEGATED. Still the operator's.** Nothing created or changed |
+
+**Standing restrictions, all intact:** no live product actions; no additional
+paid calls; no new credentials or App; no host-user or branch-protection
+changes; no real status or review publication; no live product workers; no
+product merges; no merge to `main`; no 24-hour launch; Run 001 untouched;
+**T+00 remains NOT_STARTED**.
+
+### 43.5 The four remaining pieces, with enough detail to start cold
+
+#### (a) Local fixture scan — the first real exercise of the services factory
+
+**Why it is still open.** `control/accessibility_services.py` is built and
+has 36 fixture tests, but **every external edge in every one of them is
+injected**. No npm has run, no server has bound a port, no browser has been
+driven through the factory. The automated half is connected but has never
+actually executed.
+
+**Why it is doable without a product and without paid calls.** The previous
+authorisation explicitly permits *"local fixture servers, controlled test
+subprocesses and simulated GitHub/provider responses"*. This needs no
+GitHub, no provider, no credential and no product.
+
+**What does not yet exist.** `apparatus/accessibility/fixtures/` holds
+`clean.html` and `violations.html`, but `run.test.js` loads them over
+`file://`. The factory drives an npm-shaped product: it checks
+`package.json` and `package-lock.json`, runs `npm ci` then `npm run build`,
+then `npm run start` with `PORT` in the environment. **No fixture of that
+shape exists.**
+
+**Concrete next step.** Create a minimal fixture product — `package.json`
+with a `start` script serving `fixtures/clean.html` on `process.env.PORT`,
+a committed `package-lock.json`, and a trivial `build` script — then drive
+`accessibility_evidence.run_attempt` against a `ProductServices` built on
+that directory with **real** `runner`, `spawner`, `http_ok` and `listener`.
+Assert: install+build succeed, the server binds the claimed port, readiness
+polls true, the scan returns the nine `check_id`s bound to the SHA, teardown
+kills the process group, and `confirm_release` only then releases the port.
+Then repeat against `violations.html` and assert `ACCESSIBILITY_AUTO_FAIL`.
+
+**Watch for:** the fixture must not be picked up as the real product —
+`PRODUCT_ENTRYPOINT`/`PRODUCT_LOCKFILE` are resolved relative to the
+attempt's isolated checkout, so the fixture belongs under `apparatus/`, not
+at the repository root.
+
+#### (b) Merge-policy reconciliation — two gates, one language reachable
+
+**The fact.** `grep -rn "live-gate" control/` returns nothing.
+`control/routing.py::evaluate_merge` is the Python gate the Supervisor
+actually calls; `apparatus/pr-evidence/live-gate.js` composes the four
+adapters, the requirement registry and the severity floor into a live
+decision and **has no production caller** — only the C-04a fixture harness.
+
+**Two gates in two languages, and only one can decide a real merge.** They
+are not known to agree. Nothing has ever compared their verdicts on the same
+input.
+
+**What must be decided — this is a design decision, not a bug fix.** Either
+(i) the Supervisor invokes `live-gate.js` and trusts its decision, which
+means deciding how Node is invoked from the control plane and from **which
+revision** it executes; or (ii) `live-gate.js` is retired as an offline
+policy checker and `evaluate_merge` is extended to cover what it uniquely
+does; or (iii) they are kept deliberately separate with a documented,
+tested statement of which is authoritative for what.
+
+**It is coupled to C-20a(C):** the isolation proposal requires the gate to
+execute from a trusted revision rather than from the PR's own tree, so
+option (i) cannot be specified until that boundary is decided.
+
+**A useful step available now, under no new authority:** a differential test
+feeding identical evidence packages to both gates and asserting they reach
+the same verdict — or recording precisely where they diverge. That measures
+the gap without choosing an option.
+
+#### (c) The GitHub proposal — corrected, and what is still unsettled
+
+`experiment/GITHUB-APP-WORKER-ISOLATION-PROPOSAL.md` is **not merely a
+critique**: §1.2 carries a corrected permission set, §2.2 the three-principal
+analysis, §4.2 the literal protection payload, §5 the falsification plan and
+§6 an ordered runbook. **Nothing was created or changed to produce it** — no
+App, credential, account, OS user, container, setting or protection, and no
+secret was read.
+
+**Its recommendation, verbatim:** *"Do not provision the App as §41.7
+specifies it."* Three of the five blockers — F1 (missing `Checks: read`, so
+the gate denies every PR forever), F2 (no principal can actually merge) and
+F5 (a required context nothing can ever satisfy) — would make the system
+*strictly worse than today*. All fail closed, which is safe, but **a
+permanently closed gate at T+00 is an outage, not a control.**
+
+**Two questions the document cannot settle and the operator must:**
+1. Does the gate App also hold write permissions, or is there a **third
+   principal**? The document recommends a third; widening the gate App costs
+   you a publisher that can merge what it blessed.
+2. Does `origin` move from SSH to HTTPS? It uses no token today, so the
+   strongest write credential in the system is a personal SSH key sitting
+   entirely outside the scheme — **a larger hole than the one the App
+   closes.**
+
+**Also stale and load-bearing:** §41.7 pins the trusted apparatus revision
+to `4ae1488`. That is now several commits behind. Whatever is approved must
+re-pin to the then-current HEAD.
+
+#### (d) Secret provisioning — exact instructions
+
+**Measured 2026-10-01 by executing `gate_secrets()`: `ok=False`.**
+`~/.config/run-002/secrets.env` does not exist, and 7 of 8 names are unset.
+Only `OPENROUTER_API_KEY` is present, which is why the Jev gate could run.
+**Checked by name only; no value was read, printed or logged.**
+
+Create `~/.config/run-002/secrets.env`, **mode 600**, `KEY=VALUE` one per
+line, no quotes, no `export`. `control/config.py` loads it into the process
+environment and never prints, logs, traces or interpolates a value.
+
+```
+OPENROUTER_API_KEY=...          # already set in the environment
+DISCORD_WEBHOOK_URL=...
+LANGFUSE_PUBLIC_KEY=...
+LANGFUSE_SECRET_KEY=...
+LANGFUSE_BASE_URL=...
+SUPABASE_URL=...
+SUPABASE_PUBLISHABLE_KEY=...
+SUPABASE_SECRET_KEY=...
+```
+
+```sh
+mkdir -p ~/.config/run-002
+touch ~/.config/run-002/secrets.env
+chmod 600 ~/.config/run-002/secrets.env
+# then edit it in your editor — do not echo values on a shell command line
+```
+
+This gate blocks `langfuse_otel_trace`, `supabase_health` and
+`discord_delivery` outright and supplies the credentials the paid gates
+need. **An agent must never read, print or grep this file; existence is
+checked with `test -f` and names with presence-only lookups.**
+
+### 43.6 Genuine external blockers, and the single next concrete action
+
+Only two things are blocked on the outside world:
+
+| Blocker | Owner | Why no agent can clear it |
+|---|---|---|
+| **The eight secrets** | Serina | Credentials she holds; no agent may create or read them |
+| **C-20a(C)** — App + worker UID | Serina | Creates real GitHub objects and a real OS user, and changes branch protection |
+
+Everything downstream waits on those two: the real preflight run needs the
+secrets (and makes paid calls and sends a real notification, so it is
+prohibited until authorised); C-04a against real GitHub needs the App; and
+merge-policy reconciliation's option (i) needs the isolation boundary.
+
+**THE SINGLE NEXT CONCRETE ACTION: provision the eight secrets** (43.5d).
+It is the shortest step, it is purely local, it unblocks three gates
+immediately, and it is a precondition for every remaining gate. The C-20a(C)
+decision can then be taken at leisure against the corrected proposal.
+
+**Available to an agent with no new authority, in the meantime:** (a) the
+local fixture scan, and the differential-test step of (b). Neither needs a
+credential, a provider, GitHub or a product.
+
+### 43.7 Is it safe to clear?
+
+**Yes.** Tree clean, `0 0` against origin, no stashes, nothing running, no
+agent resumable, no uncommitted or discarded work, and every remaining item
+recorded above with its location and next step. T+00 remains NOT_STARTED and
+Run 001 is untouched.
