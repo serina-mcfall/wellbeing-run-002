@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime
@@ -305,6 +306,157 @@ def new_worker_record(role: str, task_id: str, branch: str, started_at: str, *,
         "worktree": worktree,
         "browser_profile": browser_profile,
         "port": port,
+    }
+
+
+# ------------------------------------------------ C-18: dispatch claims
+#
+# A dispatch claim is the durable reservation that lets the slow, external
+# half of a dispatch run with NO state lock held. It is the dispatch
+# equivalent of C-05.3a's `security_evidence` claim and obeys the same rule:
+# the state transaction chooses identity and reserves it; everything that
+# touches a file, a subprocess, a socket or the network happens afterwards.
+#
+# WHERE IT LIVES. `task["dispatch_claims"][role]` - one key per role, so a
+# task can hold at most one in-flight dispatch per role and two ticks cannot
+# plan the same one twice. Builder claims carry `pr: None`; reviewer and
+# fixer claims carry the pull request they were planned for, which is what
+# lets `Supervisor.has_worker` see a planned-but-unspawned dispatch and stop
+# `route_awaiting_dispatch` re-dispatching it on the next tick.
+#
+# WHY NOT A TOP-LEVEL MAP. Everything that reads a claim already has the
+# task in hand, the claim dies with the task, and keeping it on the task
+# means no second place can disagree with `doc["tasks"]` about who owns what.
+#
+# The accessors below setdefault, so a state document written before this
+# key existed keeps working unchanged - the same compatibility rule
+# `budget.reservations` and `notify.queue` follow.
+
+DISPATCH_CLAIMS_KEY = "dispatch_claims"
+DISPATCH_ROLES = ("builder", "reviewer", "fixer")
+
+# Claim states. PLANNED means the reservation is committed and the external
+# work has not been proven to have started. SPAWNED means a worker process
+# was started under this claim. Both are ACTIVE: both hold the role's slot,
+# and neither may be re-planned. A claim is REMOVED - never left behind in a
+# terminal state - once its outcome has been committed, so "active" and
+# "present" mean the same thing and there is only one rule to remember.
+DISPATCH_PLANNED = "PLANNED"
+DISPATCH_SPAWNED = "SPAWNED"
+DISPATCH_ACTIVE_CLAIM_STATES = (DISPATCH_PLANNED, DISPATCH_SPAWNED)
+
+# A worker name becomes a file name (`<worker>.job.json`) and a workmux
+# window name, so it must be one safe path component and nothing else.
+_DISPATCH_WORKER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
+_DISPATCH_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def dispatch_claims(task: dict) -> dict:
+    """Every dispatch claim this task holds, creating the map if absent."""
+    claims = task.setdefault(DISPATCH_CLAIMS_KEY, {})
+    if not isinstance(claims, dict):
+        claims = {}
+        task[DISPATCH_CLAIMS_KEY] = claims
+    return claims
+
+
+def dispatch_claim(task: dict, role: str) -> dict | None:
+    """This task's claim for one role, or None. Never creates anything."""
+    claim = (task.get(DISPATCH_CLAIMS_KEY) or {}).get(role)
+    return claim if isinstance(claim, dict) else None
+
+
+def dispatch_claim_active(claim: Any) -> bool:
+    """Whether a claim still reserves its role's slot.
+
+    A malformed claim is deliberately NOT active: it reserves nothing, so a
+    later tick is free to replace it. Fail-closed would strand the task
+    forever with no way back, and the claim carries no external effect of
+    its own - the job file is the evidence that anything was spawned.
+    """
+    return (isinstance(claim, dict)
+            and claim.get("claim_state") in DISPATCH_ACTIVE_CLAIM_STATES)
+
+
+def _aware_moment(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
+
+
+def new_dispatch_claim(*, role: str, task_id: str, worker: str, branch: str,
+                       claimed_at: str, lease_expires_at: str,
+                       pr: int | None = None,
+                       port_candidates: Any = (),
+                       observed_head: str | None = None,
+                       context: dict | None = None) -> dict:
+    """One PLANNED dispatch claim, for the state transaction.
+
+    Every identifier is ALREADY CHOSEN by the caller, under the exclusive
+    state lock, and nothing here derives one: a claim that picked its own
+    worker name or port would be making the choice somewhere two ticks
+    could make it simultaneously.
+
+    Raises ValueError on any input the rest of the control plane would later
+    refuse. A claim that cannot be acted on is worse than no claim, because
+    the role's slot would be reserved by something that can never spawn.
+
+    `port_candidates` is the ordered list `workers.select_port_candidates`
+    chose under the lock; the probe that proves one of them binds happens
+    outside. An empty list is legitimate and means this role needs no port.
+
+    `observed_head` is the commit a pre-lock observation was taken at, for
+    roles that have one. Carrying it durably is what lets the commit phase
+    refuse a plan whose head has since moved.
+
+    `context` carries the role-specific facts the execute and commit phases
+    need and nothing else may interpret - for the builder, the C-15
+    migration-lock evidence. It is copied, not referenced, so it cannot
+    alias anything in the transaction's document.
+    """
+    if role not in DISPATCH_ROLES:
+        raise ValueError(f"role must be one of {DISPATCH_ROLES}")
+    if not isinstance(task_id, str) or not task_id:
+        raise ValueError("task_id must be a non-empty string")
+    if not isinstance(worker, str) or not _DISPATCH_WORKER_RE.match(worker):
+        raise ValueError("worker must be a safe single path component")
+    if not isinstance(branch, str) or not branch:
+        raise ValueError("branch must be a non-empty string")
+    if pr is not None and (not isinstance(pr, int) or isinstance(pr, bool)
+                           or pr <= 0):
+        raise ValueError("pr must be a positive int or None")
+    candidates = list(port_candidates or [])
+    if any(not isinstance(port, int) or isinstance(port, bool) or port <= 0
+           for port in candidates):
+        raise ValueError("port_candidates must be positive ints")
+    if observed_head is not None and (not isinstance(observed_head, str)
+                                      or not _DISPATCH_SHA_RE.match(observed_head)):
+        raise ValueError(
+            "observed_head must be a full 40-character lowercase-hex git SHA")
+    claimed = _aware_moment(claimed_at)
+    expires = _aware_moment(lease_expires_at)
+    if claimed is None or expires is None:
+        raise ValueError("timestamps must be timezone-aware ISO-8601")
+    if expires <= claimed:
+        raise ValueError("lease_expires_at must be strictly after claimed_at")
+    if context is not None and not isinstance(context, dict):
+        raise ValueError("context must be a dict or None")
+    return {
+        "role": role,
+        "task_id": task_id,
+        "pr": pr,
+        "worker": worker,
+        "branch": branch,
+        "port_candidates": candidates,
+        "observed_head": observed_head,
+        "claim_state": DISPATCH_PLANNED,
+        "claimed_at": claimed_at,
+        "lease_expires_at": lease_expires_at,
+        "context": dict(context or {}),
     }
 
 

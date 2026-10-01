@@ -77,10 +77,19 @@ class LockLifecycleCase(unittest.TestCase):
 
     # ------------------------------------------------------------- helpers
     def dispatch_fail(self, doc, task_id="TASK-002", site="create"):
-        """Run dispatch_builder with the chosen pre-execution failure."""
+        """Drive a whole builder dispatch to the chosen pre-execution failure.
+
+        C-18 stage 4: `dispatch_builder` only claims now, so the helper runs
+        the same three phases `tick()` runs - plan inside the transaction,
+        execute with no lock held, commit the outcome. `apply_dispatch_result`
+        is used rather than `confirm_dispatches` so the assertions can read
+        the same `doc` the plan was made against, which is what every test in
+        this file already does.
+        """
         create_ok = site != "create"
         path = None if site == "path" else Path("/tmp/run-002-test/wt")
         start_ok = site != "start"
+        self.sup._dispatch_plans = []
         with mock.patch.object(supervisor_mod.prompts, "builder", return_value="p"), \
                 mock.patch.object(supervisor_mod.prompts, "write",
                                   return_value=Path("/tmp/p.md")), \
@@ -88,11 +97,17 @@ class LockLifecycleCase(unittest.TestCase):
                                   return_value=mock.Mock(ok=create_ok, stderr="", stdout="")), \
                 mock.patch.object(supervisor_mod.workers, "worktree_path",
                                   return_value=path), \
+                mock.patch.object(supervisor_mod.workers, "probe_port",
+                                  return_value=True), \
                 mock.patch.object(supervisor_mod.workers, "write_job",
                                   return_value=Path("/tmp/job.json")), \
                 mock.patch.object(supervisor_mod.workers, "start_job",
                                   return_value=mock.Mock(ok=start_ok, stderr="boom", stdout="")):
             self.sup.dispatch_builder(doc, doc["tasks"][task_id])
+            results = self.sup.execute_dispatches(self.sup._dispatch_plans,
+                                                  snapshot=doc)
+        for result in results:
+            self.sup.apply_dispatch_result(doc, result)
 
     def lock_events(self, task_id=None):
         out = []

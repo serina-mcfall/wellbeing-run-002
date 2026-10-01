@@ -3131,3 +3131,323 @@ T+00 remains **NOT_STARTED**.
 
 *(Section 9 described the read-only investigation session that produced the
 plan. The implementation session that followed is recorded in section 10.)*
+
+## 30. C-18 shared dispatch harness + stage 4 (builder) — implemented (2026-10-01)
+
+**The harness plus stage 4 only.** C-18 stays **OPEN**: stages 5, 6 and 7
+(§14.3) are untouched, and so is the `merge_invariant.annunciate` residual
+(§19.7 item 3, §20.6 item 5).
+
+Branch `wip/c18-stage4-builder`, off `wip/c05-1-persistence` at `f2aa539`.
+
+### 30.1 Why a harness came first
+
+An independent analysis found that stages 4, 5 and 6 cannot be built in
+parallel: they collide on `tick()` itself, the dispatch-claim schema,
+`has_worker`, `on_dispatch_failure`, and the stage-3 boundary-marker test.
+This session therefore treats **the harness as the deliverable** and the
+builder as its first consumer, so that reviewer and fixer can then be built
+independently on top of it.
+
+### 30.2 The harness interface — enough to use without reading the diff
+
+A role joins the harness by supplying **three methods and one table entry**.
+Nothing in `execute_dispatches`, `apply_dispatch_result`,
+`confirm_dispatches` or `resume_dispatch_claims` changes.
+
+```python
+DISPATCH_HANDLERS = {
+    "builder": _DispatchHandler(execute="_execute_builder_dispatch",
+                                commit="_commit_builder_dispatch",
+                                fail="_fail_builder_dispatch"),
+    # stage 5 adds "reviewer", stage 6 adds "fixer"
+}
+```
+
+**1. Plan — inside T1, STATE ONLY.**
+
+```python
+claim = state.new_dispatch_claim(
+    role="reviewer", task_id=task["id"], worker=worker, branch=branch,
+    claimed_at=clock.iso(self.now()),
+    lease_expires_at=self._lease_expires("reviewer"),
+    pr=pr_number,                 # None for the builder
+    port_candidates=candidates,   # () for a role that needs no port
+    observed_head=head,           # a full 40-hex SHA, or None
+    context={...})                # role-private durable facts
+state.dispatch_claims(task)["reviewer"] = claim
+self._plan_dispatch(self.dispatch_plan(claim))
+```
+
+`new_dispatch_claim` raises `ValueError` on anything the rest of the control
+plane would later refuse — unknown role, a worker name that is not one safe
+path component, a non-positive PR, a short or uppercase SHA, a naive
+timestamp, a lease that does not outlast the claim, non-integer port
+candidates. Catch it and fail the dispatch; a claim that can never spawn
+would hold the role's slot forever.
+
+`_plan_dispatch` is an **accumulator, not a return value**, and that is the
+whole reason it exists: reviewer and fixer plans originate inside
+`reap_workers`' role-finished callbacks, which are nested in T1 and cannot
+return anything to `tick`. Pinned by
+`test_plan_dispatch_accumulates_and_escapes_a_reap_callback`.
+
+**2. Execute — after T1 commits, NO LOCK HELD.**
+
+```python
+def _execute_reviewer_dispatch(self, plan: DispatchPlan) -> DispatchResult
+```
+
+May do anything external. **Must not touch the state document**: by the time
+it runs, the document T1 read has committed and may have moved on.
+Everything it needs travels on the frozen `DispatchPlan`
+(`role, task_id, pr, worker, branch, port_candidates, observed_head,
+context`), whose `context` is a read-only mapping copied out of the claim.
+
+**3. Commit / fail — inside a state transaction, STATE ONLY.**
+
+```python
+def _commit_reviewer_dispatch(self, doc, plan, result) -> None
+def _fail_reviewer_dispatch(self, doc, plan, result) -> None
+```
+
+Both run under a lock — `confirm_dispatches`' own per-result transaction on
+the ordinary path, and **T1 itself on the recovery path** — so they must be
+state-only and re-entrant. Both **must** re-verify identity with
+`self._current_dispatch_claim(doc, plan)` before changing anything, and both
+**must** clear the claim they acted on with `self._clear_dispatch_claim`.
+
+`_current_dispatch_claim` returns `(task, claim)` and re-checks task
+association, role, worker name and PR. `(task, None)` means superseded;
+`(None, None)` means the task is gone.
+
+**Recovery is free.** A role that stores a claim gets it:
+`observe_dispatch_claims(snapshot, entries)` reads each claim's job file
+before the lock; `resume_dispatch_claims(doc, observations)` then either
+commits a claim whose job file proves it spawned — through the role's own
+`commit`, from the job file's recorded worktree and port — or re-plans one
+that never got that far. A claim with no bound observation is left alone.
+
+**Slot reservation is free too.** `has_worker` consults
+`has_dispatch_claim`, so a planned-but-unspawned reviewer or fixer stops
+`route_awaiting_dispatch` dispatching a second one. `dispatchable` counts
+active builder claims against `max_builders` for the same reason.
+
+**Fixed positions in `tick()`:**
+
+| Where | What |
+|---|---|
+| Before the lock | `observe_dispatch_claims` — only when an active claim exists |
+| T1, first | `resume_dispatch_claims` — **before** `reap_workers`, so a recovered worker is reaped in the same tick |
+| T1, as before | `route_evidence` · `route_prs` · `dispatchable` → `dispatch_builder` |
+| After T1, first | `confirm_dispatches(execute_dispatches(self._dispatch_plans))` |
+
+`self._dispatch_plans` is reset at the top of every tick. Nothing durable
+lives in it.
+
+### 30.3 The dispatch claim
+
+`task["dispatch_claims"][role]` — one key per role, so a task holds at most
+one in-flight dispatch per role. Accessors setdefault, so a state document
+written before this key existed works unchanged (`budget.reservations` and
+`notify.queue` follow the same rule).
+
+| Field | Meaning |
+|---|---|
+| `role` · `task_id` · `pr` · `worker` · `branch` | identity; `pr` is None for a builder |
+| `port_candidates` | the ordered list `select_port_candidates` chose UNDER the lock; the bind proof happens outside |
+| `observed_head` | the commit a pre-lock observation was taken at (stage 5's head-moved rule) |
+| `claim_state` | `PLANNED` or `SPAWNED`; both ACTIVE |
+| `claimed_at` · `lease_expires_at` | timezone-aware, lease strictly later |
+| `context` | role-private durable facts, copied not aliased |
+
+A claim is **removed**, never parked in a terminal state, once its outcome
+commits — so "active" and "present" mean the same thing and there is one
+rule to remember. A malformed claim is deliberately **not** active: it
+reserves nothing and carries no external effect of its own, so a later tick
+may replace it rather than the task being stranded forever.
+
+### 30.4 Stage 4: what left T1
+
+| Call | Was | Now |
+|---|---|---|
+| `prompts.write` | inside T1 | `_execute_builder_dispatch` |
+| `workers.create_worker` (workmux/git subprocess) | inside T1 | `_execute_builder_dispatch` |
+| `workers.worktree_path` (workmux subprocess) | inside T1 | `_execute_builder_dispatch` |
+| `workers.allocate_port` (**real 127.0.0.1 bind**) | inside T1 | split: `select_port_candidates` in T1 (no bind), `probe_port` in execute |
+| `workers.write_job` | inside T1 | `_execute_builder_dispatch` |
+| `workers.start_job` (process/tmux spawn) | inside T1 | `_execute_builder_dispatch` |
+
+Commit-side state — `attempts += 1`, the ASSIGNED transition, `worker`,
+`branch`, `assigned_at`, `last_progress_at`, `progress_marker`, the
+`doc["workers"]` record and `retained_worktrees.pop` — commits afterwards,
+in `_commit_builder_dispatch`. `attempts` still counts exactly one per real
+dispatch, and still zero for a dispatch that failed.
+
+**One failure path deliberately does not cross the boundary.** An empty
+candidate list from `select_port_candidates` is decided in T1, so
+`on_builder_dispatch_failure` is reached from the same transaction that
+acquired the migration lock and the in-memory freshness answer is exactly as
+durable as the acquire it came from.
+
+### 30.5 The C-15 hazard, and how it is resolved
+
+`lock_newly_acquired` was a local boolean — `owner_before is None` — read a
+few statements earlier in the **same** transaction that acted on it. Once a
+dispatch failure can be handled after T1 has committed, that boolean
+describes a document that no longer exists: between the two transactions the
+lock can be released, re-acquired by this task, or acquired by another.
+
+`Supervisor._migration_lock_release_permitted(doc, plan)` rebuilds the
+answer from **four durable facts, all of which must hold**:
+
+1. **This plan acquired the lock rather than inheriting it** —
+   `context["lock_newly_acquired"]`, written under the lock that did it.
+2. **This task still owns the lock** — `migration_lock.owner_task`.
+3. **It is still the same ownership episode** —
+   `migration_lock.acquired_at` equals `context["lock_acquired_at"]`.
+   `acquired_at` is set on a fresh acquisition, left untouched by a
+   re-acquire from the same owner, and cleared on release, so an episode
+   that ended and began again has a different value and this plan knows
+   nothing about the new one.
+4. **No builder has been dispatched under that episode** —
+   `task["assigned_at"]` is written only by a committed builder dispatch, so
+   `assigned_at >= acquired_at` is literally C-15's "a previous builder ran
+   while it held the lock", read from state instead of inferred from
+   control flow.
+
+Every disagreement answers **False**, which RETAINS the lock. That is the
+safe direction: retaining a lock no builder ever used costs a human
+decision; releasing one a builder mutated schema under is the corruption
+C-15 exists to prevent.
+
+Timestamps are compared as **datetimes, never as strings**. Pacific/Auckland
+changes offset twice a year, and across that boundary a later instant can
+sort earlier lexicographically — `02:10+12:00` is later than `02:30+13:00`
+but sorts before it. An unparseable timestamp answers False. Pinned by
+`test_the_comparison_survives_a_daylight_saving_offset_change`.
+
+`on_builder_dispatch_failure`'s signature, both branches, its fail-closed
+`RuntimeError`s and its intervention are **unchanged**. All 18 pre-existing
+C-15 lifecycle tests pass with no assertion altered.
+
+**This is strictly more conservative than the pre-C-18 code in one case that
+code could not reach**: a claim whose ownership episode changed between plan
+and commit is now treated as re-entrant (HUMAN_REQUIRED) rather than
+released. Stated rather than hidden.
+
+### 30.6 Controls preserved
+
+`execute_dispatches` re-reads the committed document and refuses to spawn on
+`self.stopping`, `frozen_at`, a paused provider policy
+(`providers.may(doc, "new_builds")`, or `"review"` for the reviewer) and
+`providers.safe_hold` for the builder. Every one of these already governs
+this dispatch somewhere else; none is invented. Controls that cannot be read
+answer `CONTROLS_UNREADABLE` and **block** — a document whose controls are
+unreadable is not a document that permits spending. A held plan is not an
+error: its claim stays exactly as it is and the next tick resumes it.
+
+### 30.7 Files changed
+
+| File | Change |
+|---|---|
+| `control/state.py` | `re` import; `DISPATCH_*` constants; `dispatch_claims`; `dispatch_claim`; `dispatch_claim_active`; `_aware_moment`; `new_dispatch_claim` |
+| `control/supervisor.py` | `DispatchPlan`, `DispatchObservation`, `DispatchResult`, `_DispatchHandler`; `DISPATCH_HANDLERS`; `_plan_dispatch`, `dispatch_plan`, `observe_dispatch_claims`, `resume_dispatch_claims`, `_dispatch_block`, `execute_dispatches`, `apply_dispatch_result`, `confirm_dispatches`, `_current_dispatch_claim`, `_clear_dispatch_claim`; `dispatch_builder` rewritten as a planner; `_execute_builder_dispatch`, `_commit_builder_dispatch`, `_fail_builder_dispatch`, `_migration_lock_release_permitted`; `has_worker` plus `has_dispatch_claim`; `dispatchable` counts claims; `tick` wiring; `_dispatch_plans` in `__init__` |
+| `control/workers.py` | `allocate_port` docstring corrected — the builder no longer calls it |
+| `tests/test_c18_stage4_dispatch_harness.py` | **NEW** — 67 tests |
+| `tests/test_c18_stage3_port_split.py` | boundary marker rewritten (see §30.9) |
+| `tests/test_migration_lock_lifecycle.py` | `dispatch_fail` helper drives the three phases; **no assertion changed** |
+| `tests/test_c09_resource_lifecycle.py` | `TestDispatchPopulation.dispatch` helper, same; **no assertion changed** |
+
+`control/merge_invariant.py` was not touched. No frozen source
+(`product/`, `tasks/`, `protocol/`, `config/tasks.json`) was touched.
+
+### 30.8 Verification
+
+```
+python3 -m unittest discover -s tests   →  Ran 1664 tests ... OK   (was 1595)
+python3 scripts/check_no_secrets.py     →  no secret-shaped material, 185 files
+git diff --check                        →  exit 0
+preflight.gate_protocol()               →  ok=True, missing: []
+```
+
+The `[FAIL] c16_probe` stderr lines remain the C-16 deliberate-exception
+probe, not failures.
+
+**The transaction-boundary proof is measured, not structural.** A spy
+records `lock_is_held(store.lock_path)` — an independent `open()` plus
+`flock(LOCK_NB)` against the real lock file — at the moment of every
+`prompts.write`, `create_worker`, `worktree_path`, `probe_port` and
+`start_job` in a full real tick, and a second test leaves `probe_port`
+unmocked so a **genuine 127.0.0.1 bind** is measured through a spy socket.
+Two companion tests prove the probe detects a held lock and that the spy
+reports `True` for a deliberate in-transaction call, so neither guard can be
+green because the instrument is broken.
+
+**Mutations — 6 run, 6 caught.** `control/supervisor.py` and
+`control/state.py` restored byte-identical, SHA-256 verified before and
+after (`8127a2e5…` and `8e59bce3…`), and the full suite re-run green.
+
+| Mutation | Result |
+|---|---|
+| **M1 the harness is bypassed** — `dispatch_builder` executes and commits inline inside T1 | **caught, 8 tests.** The boundary spy reports `[('prompts.write', True), ('create_worker', True), ('worktree_path', True), ('probe_port', True), ('start_job', True)]` against the expected all-False |
+| **M2 an external call returns to T1** — the composed `allocate_port` restored under the lock | **caught, 5 tests.** The real-bind spy reports `[True, False]` against `[False, False]`; the stage-3 marker also fires |
+| **M3 the claim is invisible to `has_worker`** | caught, 3 tests — a second reviewer and a second fixer are both dispatched |
+| **M4 the C-15 branch is mis-derived** — the remembered flag alone, no re-derivation | caught, 7 tests |
+| **M5 `attempts` counted at plan instead of at commit** | caught, 3 tests |
+| **M6 the C-15 release is always permitted** — the dangerous direction | caught, 13 tests, including 4 pre-existing C-15 lifecycle tests |
+
+Every test uses temporary directories, mocked processes and mocked GitHub.
+No worker was launched, no notification sent and no paid call made. The only
+socket operation anywhere is a loopback bind on a port the test first proved
+was free.
+
+### 30.9 The stage-3 boundary marker, moved on rather than deleted
+
+`StageThreeDidNotMigrateTheDispatchSites` asserted
+`source.count("workers.allocate_port(doc)") == 2` plus the absence of
+`select_port_candidates` and `probe_port` from `supervisor.py`. Stage 4
+migrating the builder is **exactly the event that marker existed to make
+visible**, so it fired as designed. It is now
+`OnlyTheFixerStillBindsUnderTheLock` and pins the new boundary: exactly ONE
+composed call remains, that call is inside `dispatch_fixer`, the builder
+uses `select_port_candidates` in its planning half and `probe_port` in its
+execute half, and the surviving site is named so "stage 4 done" can never be
+read as "all port binds have left T1".
+
+Declared in `.claude/.test-change` before the edit, together with the two
+helper re-points.
+
+### 30.10 What stage 4 does NOT claim, and known limitations
+
+1. **Port binds have NOT fully left T1.** `dispatch_fixer` still calls the
+   composed `workers.allocate_port(doc)` under the lock. Stage 6.
+2. **`dispatch_reviewer` is unchanged** and still makes `gh.pr_diff_sha`,
+   `evidence.collect` and `routing.material_diff_hash` calls inside T1.
+   Stage 5.
+3. **`merge_invariant.annunciate` still sends synchronously inside T1.**
+   Untouched by instruction; it is a separate integration task.
+4. **The orphan-worktree window is longer than it was.** If `create_worker`
+   succeeds and the process then dies before the commit, a worktree exists
+   that `retained_worktrees` does not yet own, so `reconcile.detect_orphans`
+   may report it. The same exposure existed before C-18 — a failed
+   `start_job` committed BLOCKED with no retained entry either — but the
+   window now spans a crash rather than a few statements. Recovery still
+   converges: the claim names the worker, and the next tick either commits
+   it from its job file or re-plans it.
+5. **`start_job` success is not proof a process is running.** It reports
+   that `tmux send-keys` or `Popen` succeeded. Unchanged from before, and
+   the job file plus C-09's lease machinery remain the real evidence.
+6. **A fail-closed `RuntimeError` in the commit phase re-runs the external
+   work on the next tick.** The claim is not cleared when the transaction
+   aborts, so the next tick re-executes before failing again. The identical
+   loop existed before C-18 — the raise aborted T1 and `dispatch_builder`
+   ran again next tick with the same external calls — so this is not a
+   regression, but it is a real retry loop and it is named here.
+7. **`declare_busy` bounds are still stage 7.** Not applied.
+8. **No rehearsal, no live launch.** This change is not evidence of launch
+   readiness and does not claim any.
+
+Stages 5, 6 and 7 remain unstarted. C-18 remains **OPEN** and still carries
+*"REQUIRED BEFORE: unattended multi-cycle rehearsal, the 5-hour unattended
+stress test, and T+00."*
