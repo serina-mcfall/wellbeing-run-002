@@ -288,6 +288,13 @@ class Supervisor:
         self.telemetry = telemetry.Telemetry(experiment_id=self.cfg.experiment_id)
         self.jev = jev.DecisionService(self.cfg.roles["jev"].model)
         self.stopping = False
+        # C-18a: WHY the loop stopped, for the durable SUPERVISOR_STOPPED
+        # event. Run 002 is now itself the endurance experiment, so the
+        # stopping reason is evidence rather than a log line - an early
+        # stop must be reconstructible as an early stop, and must never be
+        # readable as a completed 24-hour run. None until a signal
+        # arrives; see _stop_reason for what each outcome means.
+        self._stop_signal: int | None = None
         # C-18: this tick's planned dispatches, accumulated inside T1 by
         # _plan_dispatch and executed after it commits. Reset at the top of
         # every tick - the durable claim, not this list, survives a crash.
@@ -4409,7 +4416,11 @@ class Supervisor:
         # It no longer carries any exclusion duty.
         config.PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
 
-        def stop(_signum, _frame):
+        def stop(signum, _frame):
+            # First signal wins. A second SIGTERM while the current tick
+            # finishes must not rewrite why the stop began.
+            if self._stop_signal is None:
+                self._stop_signal = signum
             self.stopping = True
 
         signal.signal(signal.SIGTERM, stop)
@@ -4429,8 +4440,59 @@ class Supervisor:
                          metadata_redacted={"phase": "SUPERVISOR_TICK",
                                             "error_code": "TICK_FAILED"})
             self._interruptible_sleep(self.cfg.poll_seconds)
-        self.log("SUPERVISOR_STOPPED", outcome="STOPPED", activity_class="ORCHESTRATION")
+        self.log("SUPERVISOR_STOPPED", outcome="STOPPED",
+                 activity_class="ORCHESTRATION",
+                 metadata_redacted={"stop_reason": self._stop_reason()})
         return 0
+
+    # The complete vocabulary. Fixed and finite, per C-16: no runtime prose
+    # reaches durable evidence, so this maps signal numbers to names rather
+    # than formatting whatever arrived.
+    STOP_REASONS = {
+        signal.SIGTERM: "SIGTERM",
+        signal.SIGINT: "SIGINT",
+    }
+
+    def _stop_reason(self) -> str:
+        """Why the supervisor loop ended, for durable evidence.
+
+        C-18a attaches this: with Run 002 itself serving as the endurance
+        experiment, "when and why did it stop" is a result, not an
+        operational detail. An early stop must be reconstructible as one.
+
+        THE THREE REACHABLE OUTCOMES, and the one that is not:
+
+        * SIGTERM / SIGINT - the ordinary governed stop. The loop finishes
+          its current tick and exits.
+        * LOOP_EXITED_WITHOUT_SIGNAL - the loop condition went false with
+          no signal recorded. Unreachable today, because `stopping` is set
+          only by the handler; it is named rather than omitted so that a
+          future stop path which forgets to record itself produces a
+          visible token instead of a confident "SIGTERM".
+        * UNKNOWN_SIGNAL_<n> - a signal was handled that this table does
+          not name. Recorded as unknown rather than silently dropped.
+
+        NOT COVERED, and deliberately so: SIGKILL, a power loss, or an
+        exception escaping run() leave NO SUPERVISOR_STOPPED event at all.
+        The absence is itself the evidence - a SUPERVISOR_STARTED with no
+        matching SUPERVISOR_STOPPED means the process died rather than
+        stopped - and the Watchdog's own SUPERVISOR_RESTARTED /
+        SUPERVISOR_RESTART_FAILED events are what distinguish an
+        autonomous recovery from a run that simply ended there. No event
+        this process writes could cover its own SIGKILL.
+        """
+        # getattr, not self._stop_signal, and the reason is not defensive
+        # habit: SUPERVISOR_STOPPED is the LAST thing this process writes,
+        # and C-18a makes it load-bearing evidence. A reason-reporter that
+        # raises would take the whole stop event down with it and leave a
+        # clean shutdown indistinguishable from a SIGKILL - destroying
+        # exactly the distinction it exists to record. It must answer for
+        # any Supervisor object, however constructed.
+        stop_signal = getattr(self, "_stop_signal", None)
+        if stop_signal is None:
+            return "LOOP_EXITED_WITHOUT_SIGNAL"
+        return self.STOP_REASONS.get(stop_signal,
+                                     f"UNKNOWN_SIGNAL_{stop_signal}")
 
     def _interruptible_sleep(self, seconds: int) -> None:
         """Sleep in short steps so a stop signal is honoured promptly."""

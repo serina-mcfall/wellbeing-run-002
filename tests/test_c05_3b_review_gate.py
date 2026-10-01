@@ -274,17 +274,24 @@ class SecurityClaimValidityCase(unittest.TestCase):
             routing.review_gate_fires(record(security_evidence=leg), HEAD))
 
     def test_an_unhashable_verdict_holds_the_gate_rather_than_raising(self):
-        # security_claim_is_valid raises TypeError on `verdict in
-        # SECURITY_VERDICTS` when the verdict is a dict or a list, both of
-        # which durable JSON can hold. That is a C-05.3a defect, recorded
-        # rather than patched from here. This gate must still DECIDE: a
+        # HISTORY. security_claim_is_valid used to RAISE TypeError on
+        # `verdict in SECURITY_VERDICTS` when the verdict was a dict or a
+        # list, both of which durable JSON can hold. This test pinned that
+        # defect, asserting the gate still DECIDED despite it - because a
         # crash mid-tick is not a hold, it is an unhandled exception in
         # the supervisor's own transaction.
+        #
+        # The defect is now fixed in the validator itself (handover
+        # section 36.5, D1, repaired in its owning C-05.3a code), so the
+        # assertion below is the stronger one it was always standing in
+        # for: the validator RETURNS a finite refusal. The gate's own
+        # behaviour is unchanged and still asserted.
         for verdict in ({}, [], {"verdict": "SECURITY_PASS"}):
             with self.subTest(verdict=verdict):
                 leg = security_leg(verdict=verdict)
-                with self.assertRaises(TypeError):
-                    routing.security_claim_is_valid(leg)
+                ok, diagnostic = routing.security_claim_is_valid(leg)
+                self.assertFalse(ok)
+                self.assertEqual(diagnostic, "CLAIM_VERDICT_UNRECOGNISED")
                 self.assertFalse(
                     routing.review_gate_fires(record(security_evidence=leg),
                                               HEAD))
@@ -309,6 +316,86 @@ class PurityCase(unittest.TestCase):
         doc["approval"] = {"verdict": "REVIEW_FAIL"}
         doc["merged"] = False
         self.assertTrue(routing.review_gate_fires(doc, HEAD))
+
+
+class ClaimValidatorRegistrationCase(unittest.TestCase):
+    """D4: a leg that gains a claim must gain its validator in the same commit.
+
+    C05-3a-SESSION-HANDOVER.md section 36.5 recorded this as an
+    instruction to a future implementer. An instruction nobody checks is
+    not a control, and the weakness it warns about is invisible at the
+    call site: a leg whose claim exists but whose validator is not
+    registered is checked structurally only, which is strictly weaker
+    than the security leg, and `review_gate_fires` still returns a
+    confident True.
+
+    These tests turn that instruction into an invariant. Adding an
+    accessibility claim builder turns this class red until that leg's
+    validator is registered.
+    """
+
+    def test_every_leg_is_either_validated_or_declared_unvalidated(self):
+        legs = {key for key, _ in routing.REVIEW_GATE_LEGS}
+        validated = set(routing.REVIEW_GATE_CLAIM_VALIDATORS)
+        unvalidated = set(routing.UNVALIDATED_REVIEW_GATE_LEGS)
+        self.assertEqual(validated | unvalidated, legs,
+                         "a gate leg is neither validated nor declared "
+                         "unvalidated; it would be silently weaker")
+        self.assertEqual(validated & unvalidated, set(),
+                         "a leg cannot be both validated and declared "
+                         "unvalidated")
+
+    def test_a_leg_with_a_claim_builder_must_have_a_validator(self):
+        # THE TRIPWIRE. The moment someone adds accessibility_auto_claim
+        # or accessibility_review_claim to control/routing.py, that leg's
+        # claims start existing - and this fails until its validator is
+        # registered alongside them.
+        for leg, builder_name in routing.REVIEW_GATE_CLAIM_BUILDERS.items():
+            with self.subTest(leg=leg, builder=builder_name):
+                if hasattr(routing, builder_name):
+                    self.assertIn(
+                        leg, routing.REVIEW_GATE_CLAIM_VALIDATORS,
+                        f"{builder_name} exists, so {leg} claims are being "
+                        f"minted, but no claim validator is registered for "
+                        f"that leg. Register one in "
+                        f"REVIEW_GATE_CLAIM_VALIDATORS in the same commit "
+                        f"that adds the builder (handover section 36.5, D4).")
+
+    def test_every_leg_names_a_claim_builder(self):
+        legs = {key for key, _ in routing.REVIEW_GATE_LEGS}
+        self.assertEqual(set(routing.REVIEW_GATE_CLAIM_BUILDERS), legs,
+                         "a leg with no named claim builder cannot be "
+                         "watched by the tripwire above")
+
+    def test_the_security_leg_is_validated_today_and_the_other_two_are_not(self):
+        # Pins the CURRENT, honest position so that a change to it is a
+        # deliberate edit to this assertion rather than a silent drift.
+        self.assertEqual(set(routing.REVIEW_GATE_CLAIM_VALIDATORS),
+                         {"security_evidence"})
+        self.assertEqual(set(routing.UNVALIDATED_REVIEW_GATE_LEGS),
+                         {"accessibility_auto", "accessibility_review"})
+
+    def test_every_registered_validator_is_actually_called_by_the_gate(self):
+        # A registry the gate does not read would be documentation, not a
+        # control. Registering a validator that always refuses must shut
+        # the gate on an otherwise-passing record.
+        doc = record()
+        self.assertTrue(routing.review_gate_fires(doc, HEAD))
+
+        original = dict(routing.REVIEW_GATE_CLAIM_VALIDATORS)
+        try:
+            routing.REVIEW_GATE_CLAIM_VALIDATORS["accessibility_auto"] = (
+                lambda claim: (False, "REFUSED_BY_TEST"))
+            self.assertFalse(
+                routing.review_gate_fires(doc, HEAD),
+                "a registered validator that refuses did not shut the gate, "
+                "so the registry is not being read")
+        finally:
+            routing.REVIEW_GATE_CLAIM_VALIDATORS.clear()
+            routing.REVIEW_GATE_CLAIM_VALIDATORS.update(original)
+
+        self.assertTrue(routing.review_gate_fires(doc, HEAD),
+                        "the registry was not restored")
 
 
 if __name__ == "__main__":

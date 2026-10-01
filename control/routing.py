@@ -1082,7 +1082,20 @@ def security_claim_is_valid(claim) -> tuple[bool, str]:
         return False, "CLAIM_WORKER_LEGACY_IDENTITY"
     if binding != "BOUND":
         return False, "CLAIM_WORKER_PROVENANCE_MISMATCH"
-    if claim["claim_state"] not in SECURITY_CLAIM_STATES:
+    # `in` hashes its left operand, so a claim_state holding a dict or a
+    # list - both of which durable JSON can carry - raised TypeError out of
+    # a function whose entire contract is to return a finite diagnostic. A
+    # corrupt PR record crashed the tick instead of failing closed. Failing
+    # closed means RETURNING a refusal, never raising one.
+    #
+    # The guard changes which branch produces the refusal, never whether
+    # one is produced: every member of these frozensets is a string, so a
+    # non-string could never have been a member. (A `set` value happened to
+    # survive already - CPython retries a failed set lookup as a frozenset -
+    # which is exactly the kind of accident that makes the hazard easy to
+    # miss by testing only one unhashable type.)
+    if not isinstance(claim["claim_state"], str) or \
+            claim["claim_state"] not in SECURITY_CLAIM_STATES:
         return False, "CLAIM_STATE_INVALID"
 
     claimed = _canonical_moment(claim["claimed_at"])
@@ -1111,7 +1124,10 @@ def security_claim_is_valid(claim) -> tuple[bool, str]:
     if verdict is None and reason == "":
         return False, "CLAIM_COMPLETE_WITHOUT_OUTCOME"
     if verdict is not None:
-        return ((True, "") if verdict in SECURITY_VERDICTS
+        # The same unhashable hazard as claim_state above, and the same
+        # resolution: an unrecognised verdict is refused, never raised.
+        return ((True, "") if isinstance(verdict, str)
+                and verdict in SECURITY_VERDICTS
                 else (False, "CLAIM_VERDICT_UNRECOGNISED"))
     return ((True, "") if reason in security_contract.SECURITY_FAILURE_REASONS
             else (False, "CLAIM_REASON_UNRECOGNISED"))
@@ -1315,6 +1331,35 @@ REVIEW_GATE_LEGS = (
 )
 
 
+# Leg key -> the claim validator that leg's claim must additionally
+# satisfy. A leg absent from this mapping is checked STRUCTURALLY ONLY,
+# which is strictly weaker, and the difference is invisible at the call
+# site - so the absence is declared below rather than left to be noticed.
+REVIEW_GATE_CLAIM_VALIDATORS = {
+    "security_evidence": security_claim_is_valid,
+}
+
+# Leg key -> the function that MINTS that leg's claim. Only the first
+# exists today. This mapping is what makes the rule above enforceable
+# instead of advisory: the moment someone adds an accessibility claim
+# builder, test_c05_3b_review_gate's registration invariant goes red
+# until that leg's validator is registered in the same commit.
+REVIEW_GATE_CLAIM_BUILDERS = {
+    "security_evidence": "security_claim",
+    "accessibility_auto": "accessibility_auto_claim",
+    "accessibility_review": "accessibility_review_claim",
+}
+
+# The two legs whose claims do not exist yet, and which therefore have no
+# validator to register. Declared explicitly so that "no validator" is a
+# stated position with a test behind it rather than an omission nobody
+# can see. C05-3a-SESSION-HANDOVER.md section 36.5, D4.
+UNVALIDATED_REVIEW_GATE_LEGS = frozenset({
+    "accessibility_auto",
+    "accessibility_review",
+})
+
+
 def _leg_passes(claim, head_sha: str, expected_verdict: str) -> bool:
     """Whether one evidence leg is a completed pass AT `head_sha`.
 
@@ -1378,20 +1423,30 @@ def review_gate_fires(record, head_sha: str) -> bool:
     # would pass vacuously.
     if not isinstance(head_sha, str) or not _CLAIM_SHA_RE.match(head_sha):
         return False
-    # Structural checks on all three legs FIRST, then the one claim
-    # validator that exists. The order matters for more than cost: it
-    # means no leg's fields reach a validator until they are known to be
-    # the scalars that validator expects. security_claim_is_valid raises
-    # TypeError on a claim whose verdict is unhashable - a dict or a list,
-    # both of which durable JSON can hold - and a gate that raises mid-tick
-    # is worse than one that holds, because a crash is not a decision.
-    # That defect is C-05.3a's to fix and is recorded rather than patched
-    # from here; this ordering keeps it unreachable through this gate.
+    # Structural checks on all three legs FIRST, then every registered
+    # claim validator. The order is kept for defence in depth: no leg's
+    # fields reach a validator until they are known to be the scalars that
+    # validator expects.
+    #
+    # It was originally load-bearing for a different reason -
+    # security_claim_is_valid raised TypeError on a claim whose verdict was
+    # unhashable, and a gate that raises mid-tick is worse than one that
+    # holds, because a crash is not a decision. That defect is now FIXED in
+    # security_claim_is_valid itself (it returns CLAIM_VERDICT_UNRECOGNISED
+    # and CLAIM_STATE_INVALID instead of raising), so this ordering is no
+    # longer the only thing standing between durable JSON and a crashed
+    # tick. It stays because ordering is free and a validator should still
+    # be handed scalars.
     if not all(_leg_passes(record.get(key), head_sha, verdict)
                for key, verdict in REVIEW_GATE_LEGS):
         return False
-    # A structurally plausible security claim that the C-05.3a validator
-    # refuses must not clear this gate just because its visible fields
-    # read well - a worker name addressing another attempt's artefacts is
-    # the case that motivated the validator in the first place.
-    return security_claim_is_valid(record.get("security_evidence"))[0]
+    # A structurally plausible claim that its own class validator refuses
+    # must not clear this gate just because its visible fields read well -
+    # a worker name addressing another attempt's artefacts is the case
+    # that motivated the security validator in the first place.
+    #
+    # Iterating the registry rather than naming one validator is what lets
+    # an accessibility claim's validator start being enforced here the
+    # moment it is registered, with no edit to this function.
+    return all(validate(record.get(key))[0]
+               for key, validate in REVIEW_GATE_CLAIM_VALIDATORS.items())

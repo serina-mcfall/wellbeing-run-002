@@ -410,6 +410,47 @@ class ClaimShapeCase(unittest.TestCase):
                 self.assertFalse(ok)
                 self.assertEqual(why, "CLAIM_STATE_INVALID")
 
+    def test_an_unhashable_claim_state_is_refused_not_raised(self):
+        # A membership test hashes its left operand. Durable JSON can carry
+        # an object or an array in any field, so a corrupt PR record must
+        # still produce a finite diagnostic rather than crash the tick.
+        for claim_state in ({}, [], {"a": 1}, [1, 2], set()):
+            with self.subTest(claim_state=repr(claim_state)):
+                ok, why = routing.security_claim_is_valid(
+                    a_claim(claim_state=claim_state))
+                self.assertFalse(ok)
+                self.assertEqual(why, "CLAIM_STATE_INVALID")
+
+    def test_an_unhashable_verdict_is_refused_not_raised(self):
+        # The second of the two sites, and the one C-05.3b's D1 reported.
+        # A COMPLETE claim whose verdict holds an object or an array is an
+        # unrecognised verdict, which is what it is refused as.
+        for verdict in ({}, [], {"verdict": "SECURITY_PASS"}, ["x"], set()):
+            with self.subTest(verdict=repr(verdict)):
+                ok, why = routing.security_claim_is_valid(
+                    a_claim(claim_state="COMPLETE", verdict=verdict))
+                self.assertFalse(ok)
+                self.assertEqual(why, "CLAIM_VERDICT_UNRECOGNISED")
+
+    def test_no_claim_field_can_raise_out_of_the_validator(self):
+        # The guards above are per-field, so this is the standing property
+        # they serve: whatever durable JSON puts in any field, the validator
+        # ANSWERS. It never raises, and a refusal always carries a non-empty
+        # diagnostic. A new membership test added later without a guard
+        # fails here even if nobody thinks to extend the two cases above.
+        hostile = ({}, [], {"k": [1]}, [{"k": 1}], set(), 0.5, b"bytes")
+        for field in sorted(routing.SECURITY_CLAIM_KEYS):
+            for value in hostile:
+                with self.subTest(field=field, value=repr(value)):
+                    try:
+                        ok, why = routing.security_claim_is_valid(
+                            a_claim(**{field: value}))
+                    except Exception as exc:  # noqa: BLE001 - that is the point
+                        self.fail(f"{field}={value!r} raised "
+                                  f"{type(exc).__name__}: {exc}")
+                    self.assertFalse(ok)
+                    self.assertTrue(why)
+
 
 class DiagnosticSeparationCase(unittest.TestCase):
     """Claim diagnostics and attempt failure reasons are different

@@ -48,7 +48,7 @@ Each row's C-number row in `CONTRADICTION-AUDIT.md` is authoritative.
 | Item | Status | Remaining action |
 |---|---|---|
 | C-05.3a security dispatch | **Implemented, UNCOMMITTED** | Review and commit the working tree; it is unprotected and invisible to CI |
-| C-18 transaction boundary | **OPEN — 6 of 7 stages done** | Stage 1 (`route_prs` GitHub observation moved outside T1) and stage 2 (notification delivery moved behind a durable intent queue and a bounded post-commit drain, corrected 2026-10-01 so the drain limits are per tick, the send budget is measured after the fence, and a transport-level ambiguous outcome is no longer retried as a failure) implemented and mutation-checked 2026-10-01. Stage 3 (`workers.allocate_port` split into a no-bind under-lock selection half and an external probe) implemented and mutation-checked 2026-10-01 — but the dispatch call sites were **not** migrated, so port binds have **not** left T1 yet. **Stage 4 (builder) landed 2026-10-01** on a shared dispatch harness — plan writes only state inside T1, execute runs lockless after it commits, commit/fail re-verify the claim — which is what makes stages 5 and 6 genuinely parallel from here. **Stages 5 (reviewer) and 6 (fixer) landed 2026-10-01**, built in parallel on separate branches and meeting at integration in one adjacent-line conflict. Stage 5 also SHA-binds the review ledger events and repairs a KeyError in `on_dispatch_failure`. **Only stage 7 (`declare_busy` bounds) remains**, plus the `merge_invariant.annunciate` residual — and both carry their own governance gate (§14.5 leaves the governed bound per call site undecided; §19.7 item 3 records that moving the annunciate send would change C-14.2's annunciation evidence and needs its own authorised change). Plus one item outside every numbered stage — `merge_invariant.annunciate` still sends synchronously under T1. Row C-18: "REQUIRED BEFORE: unattended multi-cycle rehearsal, the 5-hour unattended stress test, and T+00" — **three stages do not satisfy that** |
+| C-18 transaction boundary | **OPEN — 6 of 7 stages done** | Stage 1 (`route_prs` GitHub observation moved outside T1) and stage 2 (notification delivery moved behind a durable intent queue and a bounded post-commit drain, corrected 2026-10-01 so the drain limits are per tick, the send budget is measured after the fence, and a transport-level ambiguous outcome is no longer retried as a failure) implemented and mutation-checked 2026-10-01. Stage 3 (`workers.allocate_port` split into a no-bind under-lock selection half and an external probe) implemented and mutation-checked 2026-10-01 — but the dispatch call sites were **not** migrated, so port binds have **not** left T1 yet. **Stage 4 (builder) landed 2026-10-01** on a shared dispatch harness — plan writes only state inside T1, execute runs lockless after it commits, commit/fail re-verify the claim — which is what makes stages 5 and 6 genuinely parallel from here. **Stages 5 (reviewer) and 6 (fixer) landed 2026-10-01**, built in parallel on separate branches and meeting at integration in one adjacent-line conflict. Stage 5 also SHA-binds the review ledger events and repairs a KeyError in `on_dispatch_failure`. **Only stage 7 (`declare_busy` bounds) remains**, plus the `merge_invariant.annunciate` residual — and both carry their own governance gate (§14.5 leaves the governed bound per call site undecided; §19.7 item 3 records that moving the annunciate send would change C-14.2's annunciation evidence and needs its own authorised change). Plus one item outside every numbered stage — `merge_invariant.annunciate` still sends synchronously under T1. Row C-18: "REQUIRED BEFORE: unattended multi-cycle rehearsal, the 5-hour unattended stress test, and T+00" — the **5-hour clause is waived** by human decision 2026-10-01 (audit row C-18a); the other two clauses stand, and **one stage still does not satisfy them** |
 | C-19 Jev implementation is not Jev | **OPEN — `worker_health` path implemented and live-verified 2026-10-01; governance items remain** | `control/jev.py` now posts to `/api/alpha/decisions` with `typesafe/jev-1.13`, records requested and returned model identifiers separately, and refuses the four kinds whose `criteria` are unapproved before any HTTP call. Budget denial prevents the call from **both** the Supervisor and `gate_jev`, through a durable reservation committed before the request leaves and settled after it (governed bound $0.002688/call, basis in `config/experiment.json`). A request lost in flight — a crash between sending and settling — is marked `ABANDONED` and that one logical consultation is never re-sent, so neither a Supervisor restart nor a re-run of `ctl preflight` can re-buy an answer that may already have been paid for; the identity is the task plus its attempt, worker, progress marker and state (§25.4), so a new attempt or real progress is a new question that proceeds, while polling and the clock are not (§25; the earlier claim that exposure arithmetic alone did this was wrong and is withdrawn). Verified by mocked transport only: 1595/1595 tests, 8/8 plus 8/8 plus 6/6 mutations detected. **Live-verified 2026-10-01**: one budget-gated `worker_health` request returned `HEALTHY` from `typesafe/jev-1.13-20260917` for $0.000022764, settling its reservation to zero exposure (§27). **C-19's `worker_health` integration is complete and live-verified**; the endpoint remains alpha, which is a standing risk rather than an open task. The four governance questions about the kinds that are NOT wired moved to audit row **C-19a** on 2026-10-01 and are explicitly **not a T+00 blocker** — they concern kinds with no call site and imply no code change. Record in `C05-3a-SESSION-HANDOVER.md` §24 (implementation), §25 (crash/restart correction) and §27 (live verification) |
 | C-05.3b accessibility dispatch | **Full implementation SELECTED by the operator; foundations landed, not wired** | `WAITING_EVIDENCE` has no exit transition today; tasks stall there permanently |
 | C-04 live merge-gate composition | **OPEN — adapters and composition layer built; never run against real GitHub** | The CI-result and reviewer-identity adapters landed 2026-10-01 (57/57 tests, 17/17 mutations), and `ci.yml` now runs the apparatus suite and the validator — it previously ran **no Node test at all**. Still missing: the composition layer computing a live decision, and any exercise against real GitHub |
@@ -148,18 +148,40 @@ secret and security controls · evidence and artifact paths · Supervisor
 readiness · Watchdog readiness · repository and configuration cleanliness and
 freeze requirements · and every other applicable Protocol preflight gate.
 
-### Two distinct rehearsals, not one
+### One rehearsal, not two — amended 2026-10-01
 
-`CONTRADICTION-AUDIT.md` C-18 names them separately and in sequence. No
-authoritative rule in this repository permits collapsing them.
+`CONTRADICTION-AUDIT.md` C-18 named them separately and in sequence, and until
+2026-10-01 no authoritative rule permitted collapsing them. **Row C-18a is now
+that rule.**
 
 1. **C-04a realistic multi-cycle preflight** — Builder→PR→Review FAIL→Fix→CI→
    Accessibility/Security→fresh re-review→merge, **≥2 review cycles**, with
    exact-SHA evidence invalidation/regeneration and P2 demonstrably
-   non-blocking. Protocol v2 §"Preflight" requires this directly.
-2. **Five-hour unattended endurance rehearsal** — proposed in
-   `experiment/REHEARSAL-PLAN.md`, **not authorised**. Six decisions remain
-   open there (D5–D10), of which D7 blocks all rehearsal work.
+   non-blocking. Protocol v2 §"Preflight" requires this directly. **STILL
+   REQUIRED, and untouched by the amendment** — it is a separate prerequisite
+   and must run against the production apparatus, not a stand-in.
+2. **Five-hour unattended endurance rehearsal** — **WAIVED as a pre-T+00
+   requirement by human decision 2026-10-01 (audit row C-18a).** Run 002 itself
+   now serves as the endurance experiment: how long the apparatus operates is an
+   observed result, and its failures inform Run 003. The five-hour test must
+   **not** be started. `experiment/REHEARSAL-PLAN.md` is retained as the record
+   of what it would have been; its decisions D5–D10 are moot as rehearsal
+   blockers and are reclassified in that document.
+
+**What the waiver does not touch.** Realistic multi-cycle verification through
+the production apparatus, every required launch gate, independent review, the
+accessibility and security checks, exact-SHA evidence, budget enforcement,
+recovery checks and stop controls all stand exactly as before. The waiver is of
+one duration, not of any safeguard.
+
+**What it adds.** Because the run is now the experiment, its durable evidence
+must let a reader reconstruct the first failure, elapsed runtime, task and PR
+state, recovery attempts and the stopping reason, and must distinguish
+autonomous recovery from human intervention. The run clock must not be reset or
+extended to conceal downtime (Protocol v2: "The 24-hour clock never pauses"),
+and an early stop must never be reported as a completed 24-hour run. Verified
+against what the apparatus actually records in
+`C05-3a-SESSION-HANDOVER.md` §37.
 
 ---
 

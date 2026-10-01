@@ -1,0 +1,90 @@
+{
+  "_comment": "GENERATED from requirement-registry.js by generate-requirement-registry-json.js. Do not hand-edit. Canonical source: product/ACCESSIBILITY.md.",
+  "requirements": [
+    {
+      "id": "ACC-DOD-SEMANTIC_HTML",
+      "group": "definition-of-done",
+      "source_phrase": "semantic HTML"
+    },
+    {
+      "id": "ACC-DOD-KEYBOARD_OPERATION",
+      "group": "definition-of-done",
+      "source_phrase": "keyboard operation"
+    },
+    {
+      "id": "ACC-DOD-VISIBLE_FOCUS",
+      "group": "definition-of-done",
+      "source_phrase": "visible focus"
+    },
+    {
+      "id": "ACC-DOD-MEANINGFUL_LABELS",
+      "group": "definition-of-done",
+      "source_phrase": "meaningful labels"
+    },
+    {
+      "id": "ACC-DOD-SCREEN_READER_FORMS_ERRORS",
+      "group": "definition-of-done",
+      "source_phrase": "screen-reader understandable forms/errors"
+    },
+    {
+      "id": "ACC-DOD-COLOUR_INDEPENDENT_MEANING",
+      "group": "definition-of-done",
+      "source_phrase": "colour-independent meaning"
+    },
+    {
+      "id": "ACC-DOD-SUFFICIENT_CONTRAST",
+      "group": "definition-of-done",
+      "source_phrase": "sufficient contrast"
+    },
+    {
+      "id": "ACC-DOD-REDUCED_MOTION",
+      "group": "definition-of-done",
+      "source_phrase": "reduced motion"
+    },
+    {
+      "id": "ACC-DOD-RESPONSIVE_LAYOUT",
+      "group": "definition-of-done",
+      "source_phrase": "responsive layout"
+    },
+    {
+      "id": "ACC-DOD-TOUCH_TARGETS",
+      "group": "definition-of-done",
+      "source_phrase": "sensible touch targets"
+    },
+    {
+      "id": "ACC-DOD-HEADING_STRUCTURE",
+      "group": "definition-of-done",
+      "source_phrase": "heading structure"
+    },
+    {
+      "id": "ACC-DOD-CHART_SUMMARIES",
+      "group": "definition-of-done",
+      "source_phrase": "accessible chart summaries"
+    },
+    {
+      "id": "ACC-COG-PREDICTABLE_NAVIGATION",
+      "group": "cognitive",
+      "source_phrase": "predictable navigation"
+    },
+    {
+      "id": "ACC-COG-CONCISE_INSTRUCTIONS",
+      "group": "cognitive",
+      "source_phrase": "concise instructions"
+    },
+    {
+      "id": "ACC-COG-LOW_INFORMATION_DENSITY",
+      "group": "cognitive",
+      "source_phrase": "low information density"
+    },
+    {
+      "id": "ACC-COG-CLEAR_BACK_EXIT_ROUTES",
+      "group": "cognitive",
+      "source_phrase": "clear back/exit routes"
+    },
+    {
+      "id": "ACC-COG-NO_UNNECESSARY_URGENCY_PUNISHMENT",
+      "group": "cognitive",
+      "source_phrase": "no unnecessary urgency/punishment"
+    }
+  ]
+}

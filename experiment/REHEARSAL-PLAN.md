@@ -1,7 +1,32 @@
 # Run 002 — Five-Hour Endurance Rehearsal Plan
 
-**Status: PROPOSED, NOT AUTHORISED.** Nothing here is created, launched or spent.
-No external repository exists. No host setting is changed. No agent runs.
+> ## SUPERSEDED 2026-10-01 — DO NOT EXECUTE
+>
+> **The standalone five-hour endurance rehearsal was removed as a pre-T+00
+> requirement by human decision on 2026-10-01, recorded at
+> `CONTRADICTION-AUDIT.md` row C-18a.** Run 002 itself now serves as the
+> endurance experiment: how long the apparatus operates is an observed result,
+> and its failures inform Run 003.
+>
+> **This document is retained as the historical record of what the five-hour
+> test would have been, and for the workload, isolation and safeguard analysis
+> in sections 3–6, which remain useful.** It is no longer a plan to carry out.
+>
+> **Decisions D5–D10 are no longer rehearsal blockers.** D7, previously
+> recorded here as blocking all rehearsal work, blocks nothing now — the work
+> it gated does not happen. Any of D5–D10 that matters to the real run matters
+> on its own terms, under its own C-number, not as a rehearsal prerequisite.
+> Section 8's decision table is annotated accordingly.
+>
+> **What this waiver does NOT touch:** C-04a's realistic multi-cycle
+> verification through the production apparatus, the required launch gates,
+> independent review, accessibility and security checks, exact-SHA evidence,
+> budget enforcement, recovery checks, and stop controls. One duration was
+> waived; no safeguard was.
+
+**Status: PROPOSED, NOT AUTHORISED, NOW SUPERSEDED.** Nothing here is created,
+launched or spent. No external repository exists. No host setting is changed.
+No agent runs.
 
 Original Run 002 T+00 remains **NOT_STARTED**, its state, task graph, `main`
 branch and `.runtime/` untouched by anything in this document.
@@ -281,13 +306,21 @@ C-18 repairs are listed here as blockers, not as work in progress.
 
 ## 9. Decisions required
 
-| ID | Decision | Blocks |
-|---|---|---|
-| **D5** | Drain bound after `SIGTERM` at T+5:00 | shutdown definition |
-| **D6** | Minimum representative work; acceptable intervention count; evidence retention | pass/fail |
-| **D7** | `protocol_present` — retrieve/author the two missing spec files, or govern a rehearsal spec set | **everything; no work can start without it** |
-| **D8** | Rehearsal budget: carve-out, separate ceiling, or zero metered | budget gate |
-| **D9** | Subscription-quota reserve protecting the real run | launch safety |
-| **D10** | Whether the disposable repo may be created, and by whom | environment |
+**MOOT AS REHEARSAL BLOCKERS, 2026-10-01 (audit row C-18a).** Every entry below
+was a prerequisite of the five-hour rehearsal. That rehearsal is waived, so
+none of them blocks anything any longer *in that capacity*. The "Blocks" column
+is preserved as written; the "After C-18a" column records what, if anything,
+survives on its own terms.
 
-None of these is answered in this document, and none should be inferred from it.
+| ID | Decision | Blocks (as written) | After C-18a |
+|---|---|---|---|
+| **D5** | Drain bound after `SIGTERM` at T+5:00 | shutdown definition | **Moot as written** — there is no T+5:00 SIGTERM. The real run's stop controls and drain are governed by C-18 stage 2's notification drain and the Supervisor's own shutdown path, not by this |
+| **D6** | Minimum representative work; acceptable intervention count; evidence retention | pass/fail | **Partly survives, re-homed.** The rehearsal pass/fail criteria are moot. *Evidence retention* and *distinguishing autonomous recovery from human intervention* are now binding on the real run under C-18a's evidence obligations, verified in `C05-3a-SESSION-HANDOVER.md` §37 |
+| **D7** | `protocol_present` — retrieve/author the two missing spec files, or govern a rehearsal spec set | **everything; no work can start without it** | **RESOLVED and moot.** Both `SPEC_FILES` entries now exist — `experiment/LAUNCH-CHECKLIST.md` was authored and `skills/README.md` was imported and hash-verified — so `protocol_present` PASSES for the real run. There is no rehearsal spec set to govern |
+| **D8** | Rehearsal budget: carve-out, separate ceiling, or zero metered | budget gate | **Moot.** No rehearsal, no carve-out. The real run's single governed $25 ceiling is unchanged and unshared |
+| **D9** | Subscription-quota reserve protecting the real run | launch safety | **Moot as written** — there is no rehearsal consuming quota ahead of the run. Whether the real run needs a quota reserve is a live question, but it is not this one and has no C-number yet |
+| **D10** | Whether the disposable repo may be created, and by whom | environment | **Moot.** No disposable repository is to be created |
+
+None of these was answered in this document, and none should be inferred from
+it. D7's resolution above is a statement of fact about the two files, not an
+answer to the question as it was posed.
