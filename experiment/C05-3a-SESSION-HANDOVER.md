@@ -6244,3 +6244,641 @@ takes no port.
 C-18 remains **OPEN** and still carries *"REQUIRED BEFORE: unattended
 multi-cycle rehearsal, the 5-hour unattended stress test, and T+00."*
 T+00 remains **NOT_STARTED**.
+
+## 37. Integration session — D1–D4, C-18a, and the production gate (2026-10-01)
+
+Integration owner session on `wip/c05-1-persistence`. Two commits, both
+pushed: `8099db6` (D1–D4 and the C-18a amendment) and `4d0651e` (the C-04a
+fixture driven through the production composition).
+
+### 37.1 Recovery, verified against the checkout rather than the report
+
+| Claim in the handover | Verified | How |
+|---|---|---|
+| `6f43985` on `wip/c05-1-persistence`, pushed, clean, synchronized | **TRUE** | `git status` clean; `rev-list --left-right --count origin/...` = `0 0` |
+| PRs #1–#9 merged into that branch | **TRUE** | `gh pr list --state all` — nine PRs, all `MERGED`; `git branch -r --no-merged HEAD` is empty |
+| 1,852 Python tests | **TRUE** | re-run at HEAD: `Ran 1852 tests ... OK` |
+| 197 apparatus tests | **TRUE** | re-run at HEAD: `pass 197, fail 0` |
+| Secret scan clean | **TRUE** | 212 tracked files, clean; `git diff --check` clean |
+
+No unfinished git operation, no stash, nine agent worktrees all parked on
+their merged branches. Nothing newer than the checkpoint existed, so
+nothing had to be preserved.
+
+**One correction to the recovery brief itself.** Handover §16 ("Current
+status and next action") predates §§28–36 and is stale — it still reports
+C-19 as unimplemented and names stage 4 as the next action. The live
+status is `LAUNCH-CHECKLIST.md` plus the audit rows, which is what this
+session worked from.
+
+### 37.2 D1 — the malformed security-claim crash, repaired in its owning code
+
+§36.5 D1 asked whether this is repaired in C-05.3a or folded into
+C-05.3b. The operator directed the former: repair it in its owning code.
+
+**Two crash sites, not the one reported.** D1 named `verdict`.
+`claim_state` reaches a frozenset membership test on the same function and
+fails identically. `in` hashes its left operand, so a `dict` or a `list` —
+both of which durable JSON carries — raised `TypeError` out of a function
+whose entire contract is to return a finite diagnostic. A corrupt PR
+record crashed the tick instead of failing closed.
+
+**Why one unhashable type was not enough to find it.** A `set` value
+*survives* both sites, because CPython retries a failed set lookup as a
+frozenset. Probing with `set()` alone would have reported the function
+healthy.
+
+**Policy is unchanged.** Every member of both frozensets is a string, so a
+non-string could never have been a member. The guard decides whether the
+refusal is RETURNED or RAISED; it does not change what is refused, or the
+diagnostic it is refused with.
+
+Tests: three new cases, including a standing property that no value in any
+of the nine claim fields can raise out of the validator — so a membership
+test added later without a guard fails even if nobody extends the two
+specific cases. Mutations: each guard removed independently (4 failures +
+4 errors; 4 errors), restored, restoration checksum-verified.
+
+**Consequence elsewhere, recorded rather than left to be discovered.**
+`review_gate_fires` carried a comment saying the crash was C-05.3a's to
+fix and that its own check ordering kept the crash unreachable. That
+comment was true and is now false; it has been rewritten. The ordering is
+kept, for defence in depth, not because it is load-bearing. One test in
+`test_c05_3b_review_gate.py` *pinned the defect* with
+`assertRaises(TypeError)`; it now asserts the stronger thing it was
+standing in for — a finite refusal is returned — and still asserts the
+gate's own behaviour, which is unchanged.
+
+### 37.3 D2/D3 — the requirement registry, reachable from Python
+
+§36.3 found two of §31.10's three assumptions false: the registry landed
+as `ACC-DOD-*`/`ACC-COG-*` SCREAMING_SNAKE identifiers, not kebab-case,
+and as a **JavaScript module with no Python counterpart**. Until this
+session there was nothing for a Python caller to pass as
+`severity.apply_severity_policy`'s `known_requirement_ids`, so every
+accessibility FAILURE rated `INVALID` whatever it cited — fail-closed, but
+a gate that could never open.
+
+**What was rejected, and why.** Deriving the seventeen identifiers a
+second time in Python — parsing `product/ACCESSIBILITY.md` directly —
+would create exactly the competing source of truth the operator excluded:
+two parsers that can disagree, with no rule saying which wins.
+
+**What was built.** The canonical JS registry is serialised to a generated
+`apparatus/accessibility/requirement-registry.json`, which
+`control/accessibility_registry.py` reads **once at import** — so no
+filesystem read happens at call time and the read stays outside T1, as
+§31.10 requires. Every link in the chain is machine-checked:
+
+```
+product/ACCESSIBILITY.md          imported, frozen, never edited
+  -> requirement-registry.js        requirement-registry.test.js      (existing)
+    -> requirement-registry.json    requirement-registry-json.test.js (new, byte-identical)
+      -> control/accessibility_registry.py   reads it; derives nothing
+```
+
+The Python side re-derives the JSON's provenance from the frozen document
+**independently of both**, so the control plane does not take the
+artefact's word for where it came from.
+
+`control/severity.py` is untouched. It is a frozen-hash input
+(`manifest.SEVERITY_POLICY_FILES`) and editing it would move a frozen
+hash; this only supplies the argument it already takes. **No severity
+policy changed.**
+
+D3 is answered as a fact rather than a decision: all seventeen
+`ACC-DOD-*`/`ACC-COG-*` identifiers are asserted to rate through the real
+policy to P1, and the pre-C-02 kebab-case form still fails closed. G6 —
+what each automated check *proves* — remains a policy question and is
+unanswered (§37.8).
+
+A missing or malformed artefact **raises at import** rather than yielding
+an empty registry. An empty registry would be fail-closed at the gate and
+therefore safe, but silently so, and a permanently-shut gate nobody is
+told about is indistinguishable from a working one until a task stalls for
+a reason no diagnostic names.
+
+Mutations, both caught on both the Node and Python sides: a hand-renamed
+identifier (stale committed JSON), and an invented eighteenth requirement.
+
+### 37.4 D4 — claim-validator registration, made structural
+
+§36.5 D4 recorded an instruction to a future implementer: whoever builds
+the accessibility claims must register their validators in the same
+commit. An instruction nobody checks is not a control, and the weakness it
+warns about is invisible at the call site — a leg whose claim exists but
+whose validator is unregistered is checked structurally only, and
+`review_gate_fires` still returns a confident `True`.
+
+`review_gate_fires` now iterates `REVIEW_GATE_CLAIM_VALIDATORS` instead of
+naming the one validator that exists; `UNVALIDATED_REVIEW_GATE_LEGS`
+declares the two legs that have none; and `REVIEW_GATE_CLAIM_BUILDERS`
+drives a tripwire test that fails the moment an accessibility claim
+*builder* appears without its validator. Behaviour today is identical, and
+a test proves the registry is actually read by registering a
+always-refusing validator and asserting the gate shuts.
+
+### 37.5 C-18a — the five-hour rehearsal amendment, and what it obliges
+
+Recorded at audit row **C-18a**. The exact amended sentence is the
+"REQUIRED BEFORE" clause in C-18's status cell, left **unedited in place**
+with its original rationale so the history still reads; C-18a records what
+was waived and what was not.
+
+**Verified rather than assumed:** `protocol/RUN-002-PROTOCOL-v2.0.md`
+states no hour-bounded endurance or stress requirement anywhere. Its only
+hour figures are the 24-hour run itself and "The 24-hour clock never
+pauses". The five-hour duration originates in the audit's C-18 row and in
+`REHEARSAL-PLAN.md`. **Nothing frozen is rewritten by this amendment.**
+
+Only the duration is waived. Multi-cycle verification through the
+production apparatus, the launch gates, independent review, the
+accessibility and security checks, exact-SHA evidence, budget enforcement,
+recovery checks and stop controls all stand.
+
+**The obligation attached in its place was partly an engineering gap.**
+Run 002 is now itself the endurance experiment, so "how long did it run
+and why did it stop" is a result. Against the operator's five
+requirements:
+
+| Must be reconstructible | Status | Evidence |
+|---|---|---|
+| The first failure | **Already covered** | the append-only ledger is timestamped and carries `activity_class: FAILED_WORK`; the earliest such event is the first failure |
+| Elapsed runtime | **Already covered** | `doc["started_at"]` is the T+00 anchor; ledger timestamps measure from it |
+| Task / PR state | **Already covered** | `.runtime/state.json` — `tasks`, `prs`, `workers`, `counters` |
+| Recovery attempts | **Already covered** | `DISPATCH_RECOVERED`, `RECOVERED_FROM_JOB_FILE` (Supervisor); `SUPERVISOR_RESTARTED` and `SUPERVISOR_RESTART_FAILED` (Watchdog) — a restart that worked and one that did not are distinct events, so attempts can be counted honestly |
+| **The stopping reason** | **WAS MISSING — now closed** | `SUPERVISOR_STOPPED` carried no reason and the signal number was discarded (`def stop(_signum, _frame)`), so a governed stop and a mystery exit were indistinguishable |
+
+| Must be distinguishable | Status |
+|---|---|
+| Autonomous recovery vs human intervention | **Already covered** — `counters.recoveries` and the recovery events are written only by the Supervisor and Watchdog; `counters.human_interventions` and the whole `control/intervention.py` lifecycle (request / acknowledge / resolve, with human minutes) are the human side, and nothing autonomous increments them |
+| An early stop from a completed 24-hour run | **Covered by the stop reason plus the clock anchor** |
+| The run clock must not be reset or extended | **Already enforced** — `cli.cmd_start` refuses a second start: *"already started at …; the protocol is frozen"* |
+
+`_stop_reason()` now emits a fixed finite vocabulary — `SIGTERM`,
+`SIGINT`, `LOOP_EXITED_WITHOUT_SIGNAL`, `UNKNOWN_SIGNAL_<n>` — per C-16, no
+runtime prose. The first signal wins, so a second `SIGTERM` during the
+closing tick cannot rewrite why the stop began.
+
+**What no event this process writes could ever cover, stated plainly:**
+SIGKILL, power loss, or an exception escaping `run()` leave **no**
+`SUPERVISOR_STOPPED` at all. The absence is itself the evidence — a
+`SUPERVISOR_STARTED` with no matching `SUPERVISOR_STOPPED` means the
+process died rather than stopped — and the Watchdog's restart events are
+what separate an autonomous recovery from a run that simply ended there.
+
+`_stop_reason` reads its field through `getattr` deliberately. It is the
+last thing the process writes; a reason-reporter that raised would delete
+the very event that tells a SIGKILL apart from a clean shutdown. That was
+not hypothetical — the first version asserted the attribute and broke
+three existing C-16 tests that construct a Supervisor with `__init__`
+bypassed.
+
+### 37.6 C-04a — the fixture now drives the PRODUCTION gate, and that caught a defect
+
+§35.8 item 1 named the largest gap: the harness decided through a stub, so
+what it proved was the SCENARIO, not the SYSTEM.
+
+`apparatus/fixture-preflight/production-gate.js` now drives
+`apparatus/pr-evidence/live-gate.js` with **all four C-04 adapters real** —
+`git-head` against a real git repository and real worktree, `ci-result`,
+`task-record` against this repository's committed `config/tasks.json`, and
+`reviewer-identity` — and only the **external services** injected: the
+in-memory forge, the ledger, the durable PR record, and GitHub's
+`mergeStateStatus`. No network, no `gh`, no real pull request, no merge on
+a real forge, no paid call, no worker, no notification.
+
+`scenario.js` takes the decider as an input, so both deciders run the
+**same scenario definition**. Two copies would drift, and then "the
+production gate passes the scenario" would quietly stop meaning the same
+scenario.
+
+**THE DEFECT, which would have stalled every product PR at T+00.**
+`live-gate.js` required a `sha` on **every** security check.
+`PR-EVIDENCE-V2.schema.json`'s `securityCheck` requires
+`result`/`artifact_reference`/`sha` only under `if relevant === true`, and
+Protocol v2 defines twelve security surfaces, so any realistic package
+marks most of them irrelevant — each one then denying
+`EVIDENCE_SHA_UNBOUND` / `COULD_NOT_VERIFY`. **The live merge gate could
+never have returned `ELIGIBLE` for a real pull request.** Fail-closed, so
+nothing unsafe could merge; but a gate that can never open is an outage
+waiting for T+00, and it would have been found there, on every product PR
+at once.
+
+Repaired to follow the schema's own conditional. A `sha` that **is**
+present is still compared to the trusted head whether required or not:
+un-required is not un-checked.
+
+Two things worth keeping about how it was found. The pre-existing
+`live-gate.test.js` pinned **neither** behaviour — which is how the defect
+survived a reviewed, mutation-tested branch. And the first version of the
+new tests let a mutation through: setting every `sha` to not-required
+SURVIVED, because nothing covered an *absent* sha where the schema
+requires one. Three cases were added for that; the mutation is now caught.
+
+Driven through production the whole lifecycle completes: cycle 1 refused
+on the real offline policy; the cycle-1 package refused at the new head on
+`EVIDENCE_SHA_STALE` and, independently, `REVIEW_PROVENANCE_SHA_MISMATCH`;
+cycle 2 `ELIGIBLE` and merged at the trusted head; the draft lifecycle
+marked ready and merged with no `actor: human` event; dependents unblocked
+from the real task graph; a stale approval refused.
+
+C-20(b)'s branch-protection condition is **exercised, not hidden**:
+`mergeStateStatus` is a stated input with no concealed `CLEAN` default,
+and a test drives `BLOCKED` and asserts the gate names it as a
+repository-governance condition rather than an evidence defect.
+
+### 37.7 The autonomous product-PR lifecycle, step by step
+
+The operator's requirement: create → mark ready if drafted → required
+independent review and governed checks/evidence → merge when eligible →
+verify actual merged SHA → complete the task and unblock dependencies.
+
+| # | Step | Governing requirement | Implementation | Verification | Remaining gap |
+|---|---|---|---|---|---|
+| 1 | **Create PR** | Protocol v2 "PR contract"; BOOTSTRAP 4 | `gh.create_pr`; builder dispatch on the C-18 stage-4 harness | C-18 stage-4 tests; fixture scenarios | None known |
+| 2 | **Mark ready if drafted** | C-20a **A** (approved amendment) | `gh.mark_ready` (`gh.py:124`) called at `supervisor.py:1694`; re-verifies task/PR association and current head, defers with a finite diagnostic on failure | C-18 stage-5 tests; fixture asserts ready fires **only** when draft is the sole obstacle, and that `blockedOnlyByDraft` says so structurally | None known. Marking ready grants no approval and no merge eligibility — the gate still denies everything else |
+| 3 | **Required evidence: CI** | Protocol v2 "PR contract"; C-04 | `adapters/ci-result.js`, allow-list of exactly `success`, `REQUIRED_CHECK_MISSING` for a check GitHub never ran | 57 adapter tests; fixture proves the adapter beats the package's own `ci.status` claim | Never run against real GitHub |
+| 4 | **Required evidence: security** | C-05.3a, C-05b | `routing.parse_security`, the claim lifecycle, SHA-bound worker names | C-05.3a suites; D1 crash now repaired | None blocking |
+| 5 | **Required evidence: accessibility** | Protocol v2 "Accessibility gate"; C-02; C-05.3b | Contract, composite gate and automated normalisation **built**; the Python registry reader **now exists** | 58 + 20 tests | **BLOCKING — not wired.** `review_gate_fires` has **no caller in `control/`**, and `ROUTING_STATES = ("PR_OPEN", "REVIEW", "FIX_REQUIRED")` omits `WAITING_EVIDENCE`, so a task that reaches it is never routed again. This is C-20(a), still open |
+| 6 | **Independent review** | Protocol v2 "Agents cannot satisfy independent boxes by self-attestation" | `adapters/reviewer-identity.js`, seven fail-closed checks; review ledger events SHA-bound by C-18 stage 5 | Fixture refuses a verdict the ledger does not carry, and a review bound to a superseded commit | Never run against real GitHub |
+| 7 | **Merge when eligible** | C-04; C-14.1 | `live-gate.js` (composition) and `routing.evaluate_merge` (Python) | 218 apparatus tests incl. the production lifecycle | **Two merge gates in two languages.** The Supervisor calls `routing.evaluate_merge`; **nothing in `control/` calls `live-gate.js`**. Only the Python one is reachable from a tick. Plus C-20(b): GitHub requires an approving review nothing produces |
+| 8 | **Verify the actual merged SHA** | C-10.2; C-14.1 | Re-reads the PR after merge and stores `mergeCommit.oid` as `merge_sha_observed` (`supervisor.py:3514-3520`) | C-14 tests; fixture confirms the merge by reading the forge back rather than trusting the merge call | None known |
+| 9 | **Complete the task, unblock dependents** | Protocol v2 task graph | Completion only after a verified merge; dependents from `config/tasks.json` | Fixture unblocks TASK-002/003/004 from the **real** task graph | None known |
+
+**The lifecycle is blocked at step 5, and only at step 5, by engineering.**
+Step 7 carries a second blocker (C-20(b)) that is governance, not code.
+
+### 37.8 Engineering versus policy — the separation
+
+**Engineering, and no longer blocked by any decision.** Closed this
+session: D1, D2, D3, D4, the stopping-reason evidence gap, and the
+`live-gate.js` security-surface defect.
+
+**Engineering, unblocked, not yet done** — these need no governance answer
+and are the next implementable work:
+
+1. **Wire `review_gate_fires` into the Supervisor** and add
+   `WAITING_EVIDENCE` to `ROUTING_STATES`. This is C-20(a) and the single
+   thing standing between the apparatus and an unattended lifecycle. It
+   needs G1/G3/G4/G7 **only for the qualitative reviewer half**; the
+   automated half and the gate predicate are built and proved.
+2. **Join the two merge gates.** `live-gate.js` is unreachable from a
+   tick. Either the Supervisor calls it, or `routing.evaluate_merge`
+   gains the same adapter-backed checks, or one is explicitly declared
+   the offline half of the other. Leaving two gates in two languages with
+   different reason vocabularies is the defect.
+3. **Drive the fixture's CI and reviewer adapters from the C-02 registry
+   with a FAILURE-classified finding** citing a real `ACC-*` identifier
+   plus its negative (§35.8 item 3). The registry reader now exists, so
+   this is unblocked.
+4. **F1** — fold `gate_evidence._adjudicate`'s four inline literals into
+   `accessibility_contract`. Behaviour-neutral; the agreement test
+   prevents drift meanwhile.
+
+**Genuine policy decisions, with briefs below:** G1, G3, G4, G6, G7, C-18
+stage 7's bounds, the `merge_invariant.annunciate` residual, and C-20a(C).
+
+**No longer decisions:** D5–D10 were prerequisites of the five-hour
+rehearsal and are moot as rehearsal blockers under C-18a. D7 — previously
+"blocks everything" — is resolved as a matter of fact: both missing
+`SPEC_FILES` entries now exist, so `protocol_present` passes. The
+annotated table is in `REHEARSAL-PLAN.md` §9. The one fragment that
+survives, re-homed, is D6's *evidence retention* and
+*autonomous-vs-human* requirement, now binding on the real run under
+C-18a and discharged in §37.5.
+
+### 37.9 Decision briefs
+
+Each gives the governing text, concrete options, a recommendation, and the
+smallest amendment that would settle it. **None is implemented.**
+
+---
+
+**G1 — the qualitative accessibility reviewer's worker timeout.**
+*Governing text (§31.14):* "`timeouts` has no `accessibility` key and
+`_lease_expires("accessibility")` raises `KeyError`. Must not collide with
+the `_seconds` keys C-05a deliberately kept non-role-shaped." **Blocking.**
+
+C-05a already governs `accessibility_soft_seconds` = 120 and
+`accessibility_hard_seconds` = 300 — but those bound the **browser run**,
+not a reviewer **worker lease**. The reviewer is an agent, and its peers
+are `security` = 1800, `reviewer` = 1800, `fixer` = 2400.
+
+- **(a) `timeouts.accessibility = 1800`**, matching `security` and
+  `reviewer`. — *Recommended.* It is the same kind of thing as its two
+  nearest neighbours, and a number equal to an existing governed number
+  is the least novel choice available.
+- (b) A different value — requires a reason this role differs.
+- (c) Reuse `accessibility_hard_seconds` (300) — **rejected**: it would
+  silently bound an agent by a browser budget, and §31.14 explicitly
+  warns against colliding with the `_seconds` keys.
+
+*Smallest amendment:* add one key `"accessibility": 1800` to
+`config/experiment.json`'s `timeouts` object. No code change; the lease
+helper already reads the table.
+
+---
+
+**G3 — the product server lifecycle.**
+*Governing text (§31.14):* "What command starts the product server;
+whether dependency install sits inside the 120 s readiness budget; what
+happens on the first PR, before any product exists. `product/` is
+specifications only." **Blocking** for the automated accessibility half.
+
+§31.17 already notes this "may not be answerable before a product exists
+at all". That is the key asymmetry: it is a question about an artefact the
+run is supposed to *produce*.
+
+- **(a) Defer the automated half until a product exists, and make the
+  pre-product state explicit** — an accessibility run with no server to
+  drive is `NOT_APPLICABLE` with a stated reason, not a silent pass and
+  not a stall. — *Recommended.* It is the only option that does not
+  require inventing a command for software that does not exist, and the
+  schema already models explicit applicability
+  (`accessibility.applicable` plus `not_applicable_reason`, which
+  `validate.js` enforces).
+- (b) Govern a start command now against `product/ARCHITECTURE.md` —
+  guesses at a build that has not been made.
+- (c) Require the builder to declare its own start command in the
+  evidence package — lets the thing being judged choose how it is judged.
+
+*Smallest amendment:* a governed sentence stating that before the first
+product server exists, the automated accessibility leg is
+`NOT_APPLICABLE` with a fixed reason, and that it becomes required from
+the first PR that ships a runnable server. Install-time budget stays open
+until there is something to install.
+
+---
+
+**G4 — how long `WAITING_EVIDENCE` may hold before `HUMAN_REQUIRED`.**
+*Governing text (§31.14):* "How long `WAITING_EVIDENCE` may hold on
+unobtainable evidence before `HUMAN_REQUIRED`." **Blocking before ship,
+not before start** (§36.2: "how long a hold may last is G4" — the gate
+predicate itself does not need it).
+
+This one is sharper after C-18a: with Run 002 as the endurance
+experiment, a task silently holding forever is no longer merely untidy —
+it consumes run time that is now the measured result.
+
+- **(a) A governed wall-clock bound, then `HUMAN_REQUIRED`** with a
+  finite condition code. — *Recommended*, with the bound set to the
+  longest single evidence timeout plus one retry — on today's numbers
+  `1800 × 2 = 3600 s`. Derived from existing governed numbers rather
+  than chosen.
+- (b) Bound by attempts rather than time — attempts may never be made if
+  dispatch itself is what is stuck, which is the case the bound exists
+  for.
+- (c) No bound — the present behaviour, and the C-20(a) failure mode.
+
+*Smallest amendment:* one governed key, e.g.
+`timeouts.waiting_evidence_hold = 3600`, plus a named condition code on
+the `HUMAN_REQUIRED` transition. The escalation path and the intervention
+lifecycle already exist.
+
+---
+
+**G6 — the nine `check_id` → requirement map.** *Partial blocker:*
+"Blocks the automated-FAIL path only; the PASS path and the gate work
+without it."
+
+D3 is settled: the map must be written in landed `ACC-DOD-*`/`ACC-COG-*`
+identifiers, and a Python reader now exists. What remains is genuinely
+policy — *what each automated check proves*.
+
+Eight of the nine map cleanly onto registry entries
+(`RESPONSIVE_375PX` → `ACC-DOD-RESPONSIVE_LAYOUT`, `TOUCH_TARGETS` →
+`ACC-DOD-TOUCH_TARGETS`, `KEYBOARD_OPERATION` →
+`ACC-DOD-KEYBOARD_OPERATION`, `FOCUS_ORDER_VISIBLE_NO_TRAPS` →
+`ACC-DOD-VISIBLE_FOCUS`, `LABELS_AND_TEXT_ERRORS` →
+`ACC-DOD-MEANINGFUL_LABELS`, `REDUCED_MOTION_…` →
+`ACC-DOD-REDUCED_MOTION`, and so on). **`AXE_SCAN` is the real question**:
+one axe run covers many requirements at once.
+
+- **(a) Map `AXE_SCAN` coarsely to one requirement.** — *Recommended*,
+  and §36.5 D3 notes it is "the only option available without widening
+  C-02's charter": the registry derives strictly from
+  `product/ACCESSIBILITY.md` and has no room for axe violation ids.
+- (b) Make axe violation ids registry identifiers in their own right —
+  widens C-02's charter and breaks the frozen-document derivation.
+
+*Smallest amendment:* a governed nine-row table in
+`protocol/SEVERITY-POLICY.md` or a new governed file, written in the
+landed identifier form. Until it exists the map stays empty and every
+automated FAIL yields an uncited finding that `severity.py` rates
+`INVALID` with `merge_blocked: True` — the designed inert-but-safe state,
+pinned by a test.
+
+---
+
+**G7 — `max_accessibility_auto` and `max_accessibility_review`.**
+*Governing text (§31.14):* "Budget and rate-limit judgement, as
+`max_security` was." **Blocking.**
+
+- **(a) Both `1`**, matching `max_security: 1`, `max_fixers: 1`,
+  `max_reviewers: 1`. — *Recommended.* Every non-builder role in the
+  governed concurrency table is already 1; the automated half also drives
+  a real browser, which is the heaviest single resource the run uses, and
+  C-08c inotify headroom is already failing on this host.
+- (b) Higher for the automated half — buys throughput against the one
+  resource the host is already short of.
+
+*Smallest amendment:* two keys in `config/experiment.json`'s
+`concurrency` object, both `1`.
+
+---
+
+**C-18 stage 7 — `declare_busy` bounds per call site.**
+*Governing text (§14.5):* "whether `declare_busy` gets a governed bound
+per call site … All three are governance calls." C-18's row:
+"Where an external call must remain slow, bound it with `declare_busy` so
+a waiting Supervisor is not read as a dead one."
+
+- **(a) One governed bound for all call sites**, set to the longest
+  external operation plus margin. — *Recommended.* Simplest to reason
+  about, and a single number cannot drift between sites. Per-site bounds
+  are the kind of configuration that earns its complexity only once a
+  site is demonstrably different.
+- (b) Per-call-site bounds — more precise, more surface, and §14.5 left
+  precisely this undecided.
+- (c) Derive the bound from each site's existing timeout — attractive,
+  but several sites have no timeout of their own today.
+
+*Smallest amendment:* one governed key plus a statement that every
+`declare_busy` call site uses it until a site is shown to need its own.
+**Note:** six of seven stages are done, so this is the last numbered
+stage, and C-18's "REQUIRED BEFORE … T+00" clause still stands after
+C-18a — the amendment waived only the five-hour clause.
+
+---
+
+**The `merge_invariant.annunciate` residual.**
+*Governing text (§19.7 item 3):* "It calls `notifier.send` directly rather
+than through `notify_out`, and `Supervisor.invariant_violated` reaches it
+from `route_prs`. … moving it would change C-14.2's annunciation
+evidence. It is the one remaining synchronous outbound send under T1 and
+needs its own authorised change."
+
+The tension is real: the whole point of C-14.2's annunciation evidence is
+that the notification is *proof* the invariant violation was announced,
+and routing it through a durable queue makes the announcement eventual.
+
+- **(a) Move it behind the stage-2 durable intent queue and restate
+  C-14.2's evidence as the durable NOTIFICATION_QUEUED commit rather than
+  the send.** — *Recommended.* Stage 2 already established that the
+  business event and `NOTIFICATION_QUEUED` are both durable at least one
+  commit before any send, which is a **stronger** guarantee than a
+  synchronous send that can fail silently. It also removes the last
+  synchronous outbound call from T1, which is what C-18 exists for.
+- (b) Leave it synchronous and accept one blocking send under T1 —
+  keeps C-14.2's evidence untouched, leaves C-18 permanently incomplete.
+- (c) Make it synchronous but hard-bounded — a smaller stall, same shape.
+
+*Smallest amendment:* a governed sentence stating that C-14.2's
+annunciation evidence is satisfied by the durable queued intent rather
+than by a completed send, plus the authorisation to move the call.
+
+---
+
+### 37.10 C-20a(C) — the GitHub approving-review / status-check mechanism
+
+**Read-only investigation only.** No protection was changed, no credential
+created, no review or status published. The operator's hold stands.
+
+**The repository and branch.** `serina-mcfall/wellbeing-run-002`, branch
+`main` (`config/experiment.json` → `github.repo`, `github.main_branch`).
+
+**Protection as it actually is today**, read via
+`gh api repos/serina-mcfall/wellbeing-run-002/branches/main/protection`:
+
+| Setting | Current value |
+|---|---|
+| `required_status_checks.strict` | `true` |
+| `required_status_checks.contexts` | `["ci"]` |
+| `required_status_checks.checks` | `[{context: "ci", app_id: 15368}]` — **pinned to one app** |
+| `required_pull_request_reviews.required_approving_review_count` | `1` |
+| `required_pull_request_reviews.dismiss_stale_reviews` | **`false`** |
+| `required_pull_request_reviews.require_last_push_approval` | **`false`** |
+| `required_pull_request_reviews.require_code_owner_reviews` | `false` |
+| `enforce_admins` | **`false`** |
+| `allow_force_pushes` / `allow_deletions` | `false` / `false` |
+| `required_linear_history` | `false` |
+| `required_conversation_resolution` | `false` |
+
+**The finding that settles the approving-review half.** All nine PRs were
+authored by `serina-mcfall`, and the authenticated identity is
+`serina-mcfall` (`gh api user`) — **measured, not assumed**. GitHub does
+not permit a user to approve their own pull request; that is documented
+platform behaviour and was **deliberately not tested here**, because
+testing it would mean attempting to publish a real review, which the
+operator has not authorised. So the Supervisor posting an approving review
+under this identity cannot satisfy `required_approving_review_count: 1` —
+not as a matter of policy, but because the author and the approver are the
+same account. The operator's instinct in holding C was correct, and the
+option is not merely unapproved: on this repository, with this identity,
+it is unavailable.
+
+If it were ever pursued it would require a **second, distinct GitHub
+identity** that does not author the PRs — which is a new credential, and
+therefore outside what is authorised.
+
+**Three further facts the investigation surfaced, which matter
+independently of C:**
+
+1. **`dismiss_stale_reviews: false` and `require_last_push_approval:
+   false`** mean GitHub will **not** invalidate an approval when a new
+   commit lands. Decision E — a new head invalidates the prior review — is
+   therefore enforced **only** by the control plane's own SHA binding
+   (`routing.evaluate_merge`'s head comparison and `live-gate.js`'s ledger
+   provenance). Nothing on the GitHub side backs it up.
+2. **`enforce_admins: false`** means an admin can merge past every rule
+   above. An autonomous run must never rely on protection as its last
+   line of defence, because for an admin identity there is no line.
+3. **The `ci` context is pinned to `app_id: 15368`** (GitHub Actions).
+   That pin is the only thing that makes `ci` unforgeable by a token with
+   write access.
+
+**Could builders publish the same passing status? — Yes, as things
+stand.** `control/gh.py` shells out to the `gh` CLI with **no explicit
+token**, inheriting the ambient host authentication, and
+`control/worker_entry.py:113` copies `os.environ` into every worker
+process. A builder worker therefore runs with **the same GitHub identity
+as the Supervisor**. Any status the Supervisor can POST to
+`/repos/{repo}/statuses/{sha}`, a builder can POST — including a passing
+one on its own commit. A new required context added **without** an
+`app_id` pin would be self-attestable by the thing being judged, which is
+precisely what Protocol v2's PR contract forbids: *"Agents cannot satisfy
+independent boxes by self-attestation."*
+
+**What a sound mechanism would therefore require** — stated as a proposal,
+not a request to proceed:
+
+| Element | Requirement |
+|---|---|
+| Context name | A new context, e.g. `run-002/independent-review`, distinct from `ci` |
+| Before | `contexts: ["ci"]`, `required_approving_review_count: 1` |
+| After | `contexts: ["ci", "run-002/independent-review"]` with the new context **pinned to a dedicated app_id**; `required_approving_review_count` **reduced to 0** only if the new context genuinely replaces the human-approval requirement — which is itself a governance decision, not an implementation detail |
+| Evidence provenance | The status may be published **only** from the SHA-bound `REVIEW_RESULT` ledger event plus `live-gate.js`'s verdict — never from the submitted evidence package |
+| Credential boundary | **The publishing credential must not be reachable by any worker.** Today it is, via inherited `os.environ`. This requires a dedicated GitHub App installation token held by the Supervisor process alone, and `worker_entry.py` scrubbing it from the child environment. Without both, the mechanism is self-attestation with extra steps |
+| Expected-head protection | The status must be posted against the exact 40-hex SHA and the merge must use `--match-head-commit` (or the API's `expected_head_sha`), so a push between publish and merge cannot inherit the status |
+| Stale-approval protection | Set `dismiss_stale_reviews: true` and/or `require_last_push_approval: true`, so decision E is enforced by GitHub as well as by the control plane |
+| Verification plan | On a **throwaway repository**, not `wellbeing-run-002`: prove a worker-held credential **cannot** post the context; prove a push after publishing invalidates the merge; prove the gate still denies when the ledger lacks a SHA-bound `REVIEW_RESULT`; prove an admin merge is still possible and record that as an accepted residual risk or set `enforce_admins: true` |
+
+**Recommendation.** Do not pursue the approving-review option at all — it
+is unavailable for the reasons above. The status-check mechanism is
+viable **only** with the dedicated-app credential boundary and the
+`worker_entry.py` environment scrub; without those two it is strictly
+worse than the current state, because it would convert a visible block
+into an invisible self-attestation. **No change is requested here.**
+
+### 37.11 Remaining launch prerequisites after the C-18a amendment
+
+**Implementation blockers**
+
+1. **C-20(a) — the accessibility dispatch wiring.** The one thing stopping
+   an unattended lifecycle. Needs G1, G3, G4, G7.
+2. **C-18 stage 7** (`declare_busy` bounds) — governance-gated.
+3. **The `merge_invariant.annunciate` residual** — governance-gated.
+4. **The two unjoined merge gates** — engineering, unblocked.
+
+**Governance**
+
+5. G1, G3, G4, G6, G7; stage 7's bound; the annunciate authorisation;
+   C-20a(C) (recommended: do not pursue).
+
+**Environment and gates**
+
+6. **`required_secrets` WILL FAIL** — `~/.config/run-002/secrets.env` does
+   not exist and 7 of 8 required names are absent. Checked **by name
+   only**; no value was read. Human action, and it blocks
+   `langfuse_otel_trace`, `supabase_health` and `discord_delivery`.
+7. **`host_headroom` FAILS** — inotify instances 77/128 = 60% against a
+   governed 50% ceiling. RepoQL owns 67 of 77; two `rql serve` daemons
+   indexing unrelated projects hold 41. Stopping those two alone would
+   reach 36/128 = 28%. **Human decision; not actioned — the brief forbids
+   unrelated host-process shutdowns.** The ceiling must not be raised.
+8. **No `preflight.json` exists**, so `ctl start` would refuse on all 24
+   gates as never-run. The PASS rows in the checklist are documented
+   manual observations, not durable machine records.
+9. **`clean_baseline`** — its recorded cause is gone and the tree is
+   clean, but the gate has not been executed, and an unexecuted gate is
+   not a PASS.
+10. **C-04a** remains PARTIAL-with-better-evidence, **not** GREEN: nothing
+    has run against real GitHub.
+
+**No longer a prerequisite:** the five-hour endurance rehearsal (C-18a).
+
+### 37.12 What this section does not claim
+
+- It does not claim C-05.3b is implemented. It is still not wired; a task
+  reaching `WAITING_EVIDENCE` still holds forever.
+- It does not claim C-04 or C-04a is GREEN. The fixture exercises the
+  production composition; it is not the integrated system, and no run has
+  touched real GitHub.
+- It does not claim the run is fully reconstructible. §37.5 states exactly
+  which cases no event this process writes could cover.
+- It answers none of G1–G10. Nine briefs are offered; none is a decision.
+- No gate was run, no threshold changed, no branch protection touched, no
+  credential created, no paid call made, no product worker launched, and
+  no merge to `main`.
+- **T+00 remains NOT_STARTED.**
