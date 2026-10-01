@@ -37,6 +37,7 @@
       "dismiss_stale_reviews": false,
       "require_code_owner_reviews": false,
       "required_approving_review_count": 0,
+      "require_last_push_approval": false,
       "bypass_pull_request_allowances": { "users": [], "teams": [], "apps": [] }
     },
     "restrictions": null,

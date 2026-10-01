@@ -112,8 +112,33 @@ check(len(new_ctx) == 1 and new_ctx[0]["app_id"] == "__GATE_APP_ID__",
 
 # Every key present in BEFORE must be present in AFTER: the PUT replaces the
 # whole object, so an omitted key is a silently cleared setting.
-missing = sorted(set(before) - set(after))
-check(not missing, "B. AFTER restates every field BEFORE sets", f"missing: {missing}")
+#
+# RECURSIVE, and it has to be. This compared top-level keys only until an
+# independent review walked the two documents by hand and found
+# `required_pull_request_reviews.require_last_push_approval` set in BEFORE and
+# absent from AFTER - a nested field dropped by a check that reported
+# "missing: []" and a §3 table that claimed every field was restated. The
+# shallow version could not have caught it, and the protection PUT clears
+# exactly this kind of field without comment.
+def _paths(node, prefix=""):
+    """Every dotted key path in a nested object. Lists are leaves.
+
+    A list is a leaf because `required_status_checks.checks` is compared
+    element-wise by the `ci`-preservation check above; descending into it
+    here would report index paths that say nothing about a cleared setting.
+    """
+    out = set()
+    for key, value in node.items():
+        path = f"{prefix}{key}"
+        out.add(path)
+        if isinstance(value, dict):
+            out |= _paths(value, path + ".")
+    return out
+
+
+missing = sorted(_paths(before) - _paths(after))
+check(not missing, "B. AFTER restates every field BEFORE sets, at every depth",
+      f"missing: {missing}")
 
 # -------------------------------------------------------- C. the separation
 perms = {k: docs[f"app-manifest-{k}.json"]["manifest"]["default_permissions"]
@@ -226,13 +251,20 @@ if pin:
           + ("" if reachable else " — the pin names a commit this branch "
                                   "does not contain; it cannot be exported"))
     if reachable:
+        # `bin/` and `.github/` added 2026-10-02. `bin/` was protected by
+        # the proposal's §6 asset table but absent from this list, so a
+        # change to an entry point the gate's own run depends on would not
+        # have gone red. `.github/` defines the `ci` check run that
+        # ci-result.js treats as authoritative, and it is matched by NAME
+        # alone - so the definition of "CI passed" is part of what the pin
+        # must hold still.
         drift = git("diff", "--name-only", sha, "HEAD",
                     "--", "apparatus", "control", "protocol", "prompts",
-                    "config").stdout.split()
+                    "config", "bin", ".github").stdout.split()
         check(not drift,
               "F2. nothing the gate executes has changed since the pin",
               f"pin={sha[:7]}..head={head[:7]} clean across apparatus/, "
-              "control/, protocol/, prompts/, config/"
+              "control/, protocol/, prompts/, config/, bin/, .github/"
               if not drift else
               f"{len(drift)} file(s) changed since the pin, including "
               f"{drift[0]} — RE-PIN before approving")
