@@ -3723,3 +3723,237 @@ helper re-points.
 Stages 5, 6 and 7 remain unstarted. C-18 remains **OPEN** and still carries
 *"REQUIRED BEFORE: unattended multi-cycle rehearsal, the 5-hour unattended
 stress test, and T+00."*
+
+---
+
+## 29. C-02 accessibility requirement registry — BUILT AND WIRED (2026-10-01)
+
+Branch: `wip/c02-requirement-registry`, cut from `wip/c05-1-persistence`
+@ `4eeaa7c`. Worked in an isolated worktree.
+
+**Document-provenance note.** This handover document is untracked in the
+main checkout and therefore did not exist in this worktree. To append
+section 29 without losing anyone else's work, the main checkout's copy was
+copied in verbatim and this section appended. The branch therefore carries
+a point-in-time snapshot of the shared document. If another agent appended
+a section to the main checkout's copy after that snapshot was taken, the
+two copies must be reconciled by hand before merge — this branch's copy is
+not authoritative for sections 1-27.
+
+### 29.1 The defect, verified before fixing
+
+`apparatus/pr-evidence/validate.js:126` called
+`applySeverityPolicy(f, undefined)`. The second parameter is
+`knownRequirementIds`. `apparatus/severity/severity-floor.js:73-81` reads:
+
+```js
+const registry = knownRequirementIds ? new Set(knownRequirementIds) : null;
+if (!registry || !registry.has(unmet_requirement)) { return invalid(...); }
+```
+
+So every FAILURE-classified accessibility finding returned INVALID
+regardless of its citation, and the validator then set
+`blockingFindingFound = true`. The old header comment in `validate.js`
+(lines 24-28) stated this openly: the registry was "equally unbuilt".
+
+That fail-closed behaviour is correct and is preserved. What was missing
+was the registry that lets a legitimate finding be valid. Without it the
+accessibility box could never go green, so the gate was not deterministic
+policy — it was an unconditional block.
+
+### 29.2 What was built
+
+**`apparatus/accessibility/requirement-registry.js`** (new) — a frozen,
+identifier-keyed list of the 17 accessibility requirements, each entry
+carrying `id`, `group`, and `source_phrase`.
+
+Derivation, mechanical and recorded in the module header:
+
+| Source | Group | Entries |
+|---|---|---|
+| `product/ACCESSIBILITY.md` line 2, "Definition of done: ..." | `definition-of-done` | 12 |
+| `product/ACCESSIBILITY.md` line 3, "Cognitive accessibility: ..." | `cognitive` | 5 |
+
+Each comma-separated phrase in those two lines becomes exactly one entry.
+`source_phrase` holds the phrase verbatim; that is the provenance link.
+`product/ACCESSIBILITY.md` was **not** edited — it is an imported frozen
+source and is covered by `experiment/imported-source.sha256`.
+
+Identifiers are **semantic, not positional** — `ACC-DOD-VISIBLE_FOCUS`, not
+`ACC-DOD-03`. A positional identifier would silently re-point at a
+different requirement if the source list were ever reordered, making
+already-filed evidence cite the wrong thing. (This is the same stability
+concern recorded for finding IDs under "Unclassified: finding-ID
+stability".) The full set:
+
+```
+ACC-DOD-SEMANTIC_HTML                    ACC-DOD-RESPONSIVE_LAYOUT
+ACC-DOD-KEYBOARD_OPERATION               ACC-DOD-TOUCH_TARGETS
+ACC-DOD-VISIBLE_FOCUS                    ACC-DOD-HEADING_STRUCTURE
+ACC-DOD-MEANINGFUL_LABELS                ACC-DOD-CHART_SUMMARIES
+ACC-DOD-SCREEN_READER_FORMS_ERRORS       ACC-COG-PREDICTABLE_NAVIGATION
+ACC-DOD-COLOUR_INDEPENDENT_MEANING       ACC-COG-CONCISE_INSTRUCTIONS
+ACC-DOD-SUFFICIENT_CONTRAST              ACC-COG-LOW_INFORMATION_DENSITY
+ACC-DOD-REDUCED_MOTION                   ACC-COG-CLEAR_BACK_EXIT_ROUTES
+                                         ACC-COG-NO_UNNECESSARY_URGENCY_PUNISHMENT
+```
+
+**The derivation is checked, not asserted.**
+`apparatus/accessibility/requirement-registry.test.js` re-parses
+`product/ACCESSIBILITY.md` independently of the registry's data and asserts
+the two phrase sets are equal in both directions. A phrase added to the
+frozen source, or an entry invented in the registry, turns the suite red
+rather than silently widening or narrowing the gate. The registry is also
+`Object.freeze`d at both levels so a caller cannot push an identifier in at
+runtime; the test proves the freeze actually throws (the test file is
+`'use strict'` for exactly this reason — in sloppy mode a write to a frozen
+property fails silently and the test would have been vacuous).
+
+### 29.3 What was wired
+
+`apparatus/pr-evidence/validate.js:126` now passes `REQUIREMENT_IDS`
+instead of `undefined`. The stale header paragraph that claimed the
+registry was unwired was replaced — leaving it would have been a false
+claim in the file that the claim is about.
+
+A CLI entry point was added to `validate.js` (`require.main === module`) so
+CI can actually execute the checker over a package file. It fails closed:
+no arguments exits 2; an unreadable file or unparseable JSON exits 1; any
+`policyValid: false` exits 1.
+
+**No severity semantics changed.** `apparatus/severity/severity-floor.js`
+has a zero-byte diff against `HEAD` and `control/severity.py` was not
+touched, so `manifest.SEVERITY_POLICY_FILES`
+(`protocol/SEVERITY-POLICY.md` + `control/severity.py`) hashes to the same
+value. Both modules already took `knownRequirementIds` as a caller-supplied
+parameter; building the registry outside them was sufficient, exactly as
+their own headers predicted ("the identifier registry the PR evidence
+validator maintains").
+
+### 29.4 Decision — the schema asymmetry, and why `unmet_requirement` stays a free string
+
+`protocol/PR-EVIDENCE-V2.schema.json:534` types `unmet_requirement` as a
+bare `{"type": "string"}`, whereas `check_id` is enum-constrained at
+:588, :652 and :708. The question was whether the registry should close
+that asymmetry by constraining the field in the schema.
+
+**Decision: no. Enforce at the validator; leave the schema's free string.**
+Reasons, in order of weight:
+
+1. **The two failures mean different things and have different remedies.**
+   `SEVERITY-POLICY.md` rule 3 makes an unrecognised citation *INVALID
+   evidence*, and rule 4 names its resolution path: escalation to an
+   independent reviewer who supplies a clarified classification. A schema
+   enum would instead emit `SCHEMA_INVALID` — "this package is malformed"
+   — which has no such path and would read as a producer bug rather than
+   a judgement that needs a human. Collapsing them would destroy
+   information the policy depends on.
+2. **It matches the layering the schema itself declares.** The
+   `accessibilityFinding` description already says post-floor severity "is
+   computed by the validator, so the ACCEPTED_NONBLOCKING/P0-P1 exclusion
+   for these findings is a validator rule, not a schema rule". Registry
+   membership belongs on the same side of that line.
+3. **The schema is a frozen imported source** this work is forbidden to
+   edit, so the option was unavailable in any case — but points 1 and 2
+   are why it should stay that way even if it were editable.
+
+Consequence to be aware of: a producer can still emit a syntactically
+valid package containing a nonsense `unmet_requirement`. It will be
+rejected — loudly, as `INVALID_ACCESSIBILITY_EVIDENCE` — but by the
+validator, not the schema. Anything that validates the schema *without*
+running `validate.js` therefore does not enforce the registry. That is the
+reason for the CI work in 29.5.
+
+### 29.5 Defect found in CI, and what was done about it
+
+`.github/workflows/ci.yml` as it stood ran exactly two things
+unconditionally: `python -m unittest discover -s tests -v` and
+`python scripts/check_no_secrets.py`. Its five Node steps were every one of
+them gated on `steps.app.outputs.present == 'true'`, which is true only if
+a **root** `package.json` exists. It does not. `apparatus/package.json`
+exists and declares `"test": "node --test"`, but nothing ran it.
+
+So: **no Node test in this repository had ever run in CI**, and nothing
+invoked `apparatus/pr-evidence/validate.js` — despite Protocol v2 line 236
+stating "CI validates the schema". The 64 apparatus tests that existed
+before this work were green only because somebody ran them by hand.
+
+Four unconditional steps were added before the product-app block (which is
+left untouched):
+
+1. `Set up Node (apparatus)` — Node 24, npm cache keyed on
+   `apparatus/package-lock.json`.
+2. `Install apparatus dependencies` — `npm ci` in `apparatus/`.
+3. `Install Playwright Chromium` — `apparatus/accessibility/run.test.js`
+   drives a real Chromium and a real axe-core scan; without the browser
+   those tests error rather than skip, so installing it is part of running
+   the suite honestly.
+4. `Apparatus tests` — `npm test` in `apparatus/`.
+5. `Validate PR evidence packages` — runs the `validate.js` CLI over every
+   `*.json` under `evidence/`.
+
+The YAML was parsed with `yaml.safe_load` and the step list inspected (16
+steps, correct `if:` distribution). The discovery shell was executed in
+both states: empty (exit 0, explicit message) and populated with a
+deliberately bad package (exit 1, all twelve policy errors printed).
+
+### 29.6 Verification performed
+
+Apparatus suite, full, real Chromium: **76 pass, 0 fail** (was 64 before
+this work; +12). Control-plane suite:
+`python3 -m unittest discover -s tests` — **914 tests, OK**, unaffected by
+this branch. `python3 scripts/check_no_secrets.py` — "No secret-shaped
+material found in 164 tracked files", exit 0. `git diff --check` — clean,
+exit 0.
+
+Mutation checks — each applied, run, observed red, reverted, and the
+revert confirmed by SHA-256 against a pre-mutation baseline of all three
+source files:
+
+| # | Mutation | Tests that went red |
+|---|---|---|
+| 1 | Registry bypassed — `validate.js` back to `applySeverityPolicy(f, undefined)` | 1 (`a FAILURE citing a real registry identifier is no longer INVALID evidence`) |
+| 2 | P1 floor removed — `Math.min(rawRank, floorRank)` → `rawRank` | 2, including the pre-existing RUN001-F1 regression test |
+| 3 | Registry membership check bypassed — `if (!registry \|\| !registry.has(...))` → `if (false)` | 4, including two pre-existing severity-floor tests |
+| 4 | Registry drift — an entry whose phrase is not in the frozen source | 3 derivation tests |
+
+After mutation 4 was reverted, all three files hashed byte-identical to
+baseline and `git diff apparatus/severity/severity-floor.js` was empty.
+
+Mutation 1 is caught by only one test. That is a deliberately narrow
+guard — the other registry tests call `applySeverityPolicy` directly with
+`REQUIREMENT_IDS`, so they test the policy, not the wiring. The one test
+that exercises the wiring is the one that must go red, and it does.
+
+### 29.7 Limitations — what this does NOT establish
+
+- **It does not resolve C-02 or C-04.** C-02's status is PROPOSED and
+  becomes RESOLVED only when the contradiction audit checks the rule
+  against its tested implementation. This is one input to that, not the
+  audit.
+- **It does not claim launch readiness.** T+00 remains NOT_STARTED. Per
+  `AGENTS.md`, a partial pass cannot authorize launch.
+- **A recognised citation is not a confirmed one.** Matching an identifier
+  proves only that the reviewer named a real requirement from the frozen
+  product spec. Whether that requirement is actually unmet at the reviewed
+  SHA is still the independent Accessibility Reviewer's judgement, and
+  nothing here verifies it.
+- **The CI validator step validates nothing today.** No PR evidence package
+  exists before T+00, so with an empty `evidence/` directory the step
+  reports that it validated nothing and passes. It becomes a real gate only
+  once packages are committed there. The `evidence/` path is a convention
+  this work introduces; no other component reads or writes it yet.
+- **The CI steps have not been observed running on GitHub.** The YAML was
+  parsed and every command was executed locally, but no workflow run has
+  happened — this branch has not been merged to a branch CI triggers on
+  (`ci.yml` triggers on `main` only, for push and pull_request).
+- **The Python port is unwired.** `control/severity.py`'s
+  `apply_severity_policy` still defaults `known_requirement_ids=None`. It
+  has no production caller today (only `tests/test_severity.py`), so
+  nothing is currently broken by that — but if a Python caller is ever
+  added it will fail closed exactly as `validate.js` did, and it will need
+  a Python-side registry. Wiring one was out of scope here and would touch
+  a frozen-manifest input if done carelessly.
+- **The registry is derived from the frozen spec, not from WCAG.** It says
+  what `product/ACCESSIBILITY.md` says and nothing more. It is not a
+  conformance checklist.
