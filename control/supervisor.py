@@ -2539,6 +2539,59 @@ class Supervisor:
 
     EVIDENCE_STATES = ("PR_OPEN", "WAITING_EVIDENCE")
 
+    # G4. The condition code the ledger and the intervention record key on,
+    # so durable evidence does not have to be parsed as English.
+    EVIDENCE_WAIT_EXHAUSTED = "evidence_wait_exhausted"
+
+    def _evidence_wait_allowance(self) -> float | None:
+        """The governed cumulative allowance, or None if it is not governed.
+
+        None is NOT "no limit". `state_mod.evidence_wait_exhausted` treats
+        an unusable allowance as exhausted, because an ungoverned bound is
+        precisely the condition this check exists to prevent.
+        """
+        return self.cfg.extra["timeouts"].get("waiting_evidence_total_seconds")
+
+    def _evidence_wait_exhausted(self, task: dict) -> bool:
+        return state_mod.evidence_wait_exhausted(
+            task, self.now(), self._evidence_wait_allowance())
+
+    def _escalate_evidence_wait(self, doc: dict, task: dict,
+                                pr_number: int) -> None:
+        """G4 exhaustion: the governed HUMAN_REQUIRED path, once.
+
+        Already in HUMAN_REQUIRED means a previous tick escalated; the
+        intervention record deduplicates, but transitioning again would
+        append a second history entry per tick forever.
+        """
+        if task["state"] == "HUMAN_REQUIRED":
+            return
+        waited = state_mod.evidence_wait_seconds(task, self.now())
+        allowance = self._evidence_wait_allowance()
+        # Bounded integers and fixed template only - C-08b.2 requires the
+        # durable reason be structurally generated, never free text.
+        self.transition(
+            doc, task["id"], "HUMAN_REQUIRED",
+            f"cumulative evidence wait exhausted after "
+            f"{int(min(waited, 10 ** 9))}s")
+        self.log("EVIDENCE_WAIT_EXHAUSTED", task_id=task["id"], pr_id=pr_number,
+                 activity_class="ORCHESTRATION", outcome="HUMAN_REQUIRED",
+                 metadata_redacted={
+                     "waited_seconds": int(min(waited, 10 ** 9)),
+                     "allowance_seconds": allowance
+                     if isinstance(allowance, (int, float)) else None})
+        self.request_intervention(
+            doc, type_="HUMAN_PRODUCT_DECISION",
+            condition_code=self.EVIDENCE_WAIT_EXHAUSTED,
+            task_id=task["id"], pr_id=pr_number,
+            reason=f"{task['id']} spent the governed cumulative evidence-wait "
+                   f"allowance without every required evidence class passing",
+            title=f"{task['id']}: evidence wait exhausted",
+            body="The governed cumulative allowance is an experiment limit, "
+                 "not a guarantee that all valid work fits inside it. Decide "
+                 "whether to extend the allowance, reduce contention, or stop "
+                 "this task.")
+
     def route_evidence(self, doc: dict, observations: dict) -> list:
         """T1. STATE ONLY - claim what needs claiming, ingest what is already
         durable, and return identifiers for the work to be done outside."""
@@ -2546,6 +2599,22 @@ class Supervisor:
         for task in sorted(doc["tasks"].values(), key=lambda t: t["id"]):
             pr_number = task.get("pr")
             if pr_number is None or task["state"] not in self.EVIDENCE_STATES:
+                continue
+            # G4. The governed cumulative evidence-wait allowance, checked
+            # BEFORE anything else this task might do, and checked whether
+            # or not an observation arrived - a task starved of
+            # observations is exactly the one that would otherwise wait
+            # forever, so gating this on `seen` would skip the case it
+            # exists for.
+            #
+            # The allowance is an explicit experiment limit, not a claim
+            # that all valid work fits inside it: a maximally contended
+            # task can legitimately need about 4 h 06 m against an
+            # allowance of 5 h. Exhaustion therefore escalates to a human
+            # with a finite reason rather than failing the task.
+            if task["state"] == state_mod.EVIDENCE_WAIT_STATE and \
+                    self._evidence_wait_exhausted(task):
+                self._escalate_evidence_wait(doc, task, pr_number)
                 continue
             seen = observations.get(pr_number)
             if seen is None:

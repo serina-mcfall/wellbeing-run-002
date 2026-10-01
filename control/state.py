@@ -460,6 +460,127 @@ def new_dispatch_claim(*, role: str, task_id: str, worker: str, branch: str,
     }
 
 
+# =====================================================================
+# G4: cumulative evidence wait. Approved 2026-10-01, 18000 s, as an
+# explicit Run 002 experiment limit - NOT a guarantee that all valid work
+# fits inside it. A maximally contended task can legitimately need about
+# 4 h 06 m; the allowance clears that with margin, and at exhaustion the
+# governed HUMAN_REQUIRED path is taken with a finite reason.
+#
+# THE ARITHMETIC, stated because getting it wrong is silent:
+#
+#   accumulated = sum of CLOSED intervals  +  the OPEN interval, if any
+#
+# `waiting_evidence_total_seconds` holds only closed intervals.
+# `waiting_evidence_since` holds the start of the open one, or None when
+# the task is not waiting. Nothing is counted twice because an interval is
+# added to the total exactly once, at the moment it closes, and `since` is
+# cleared in the same step.
+#
+# A NEW SHA STARTS A NEW INTERVAL AND NEVER RESETS THE TOTAL. The
+# remediation loop runs WAITING_EVIDENCE -> FIX_REQUIRED -> PR_OPEN ->
+# WAITING_EVIDENCE, so each cycle simply opens another interval on top of
+# the accumulated total. Retries and Supervisor restarts retain it too:
+# both fields are durable state, so a restart reloads the total AND the
+# open interval's start, rather than beginning from zero - which is what
+# would otherwise let a crash loop wait forever.
+EVIDENCE_WAIT_STATE = "WAITING_EVIDENCE"
+EVIDENCE_WAIT_TOTAL = "waiting_evidence_total_seconds"
+EVIDENCE_WAIT_SINCE = "waiting_evidence_since"
+
+
+def _closed_evidence_wait(task: dict) -> float:
+    total = task.get(EVIDENCE_WAIT_TOTAL, 0)
+    return float(total) if isinstance(total, (int, float)) \
+        and not isinstance(total, bool) and total >= 0 else 0.0
+
+
+def open_evidence_wait(task: dict, moment: str) -> None:
+    """Start an interval, unless one is already open.
+
+    Idempotent on purpose: re-entering the state while already waiting
+    must not restart the clock, which would make a task that bounces
+    within the state immortal.
+    """
+    if task.get(EVIDENCE_WAIT_SINCE) is None:
+        task[EVIDENCE_WAIT_SINCE] = moment
+
+
+def close_evidence_wait(task: dict, moment: str) -> None:
+    """Close the open interval, adding it to the total exactly once."""
+    since = task.get(EVIDENCE_WAIT_SINCE)
+    if since is None:
+        return
+    task[EVIDENCE_WAIT_TOTAL] = _closed_evidence_wait(task) + \
+        _interval_seconds(since, moment)
+    task[EVIDENCE_WAIT_SINCE] = None
+
+
+def _interval_seconds(since, until) -> float:
+    """One interval in seconds, or `inf` if it cannot be established.
+
+    `inf` rather than 0 for an unreadable timestamp. A broken accounting
+    record cannot show a task is INSIDE its allowance, and the safe
+    reading of "we cannot tell" is escalation to a human, never an
+    unbounded wait.
+
+    A backwards clock contributes 0 rather than a negative number, so the
+    accumulated total can never decrease.
+    """
+    try:
+        start = datetime.fromisoformat(since) if isinstance(since, str) else since
+        end = datetime.fromisoformat(until) if isinstance(until, str) else until
+    except (ValueError, TypeError):
+        return float("inf")
+    if not isinstance(start, datetime) or not isinstance(end, datetime):
+        return float("inf")
+    # A naive timestamp cannot be compared with an aware one, and Run 002
+    # runs in Pacific/Auckland where a DST offset change makes any
+    # offset-less arithmetic wrong rather than merely imprecise.
+    if start.tzinfo is None or end.tzinfo is None:
+        return float("inf")
+    return max(0.0, (end - start).total_seconds())
+
+
+def evidence_wait_seconds(task: dict, now) -> float:
+    """Total time this task has spent waiting for evidence, ever.
+
+    `now` is injected rather than read here, so the arithmetic is testable
+    against a controlled clock and no wall-clock test is needed.
+    """
+    if not isinstance(task, dict):
+        return float("inf")
+    accumulated = _closed_evidence_wait(task)
+    since = task.get(EVIDENCE_WAIT_SINCE)
+    if since is None:
+        return accumulated
+    return accumulated + _interval_seconds(since, now)
+
+
+def evidence_wait_exhausted(task: dict, now, allowance) -> bool:
+    """Whether the governed cumulative allowance is spent.
+
+    Two rules, in this order, and the order is the point:
+
+    1. A task that has not waited cannot have exhausted its wait. This is
+       simply true, and checking it first means a configuration fault
+       never escalates a task that has done nothing wrong - the task is
+       not the thing that is broken.
+
+    2. An unusable allowance is NOT a licence to wait forever. For a task
+       that IS accumulating wait, an ungoverned bound means an unbounded
+       one, which is the condition this check exists to prevent, so it
+       escalates immediately and loudly rather than silently waiting.
+    """
+    waited = evidence_wait_seconds(task, now)
+    if waited <= 0:
+        return False
+    if not isinstance(allowance, (int, float)) or isinstance(allowance, bool) \
+            or allowance < 0:
+        return True
+    return waited >= float(allowance)
+
+
 def transition(doc: dict, task_id: str, new_state: str, reason: str, tz: str) -> tuple[str, str]:
     task = doc["tasks"][task_id]
     old = task["state"]
@@ -473,6 +594,16 @@ def transition(doc: dict, task_id: str, new_state: str, reason: str, tz: str) ->
     task["updated_at"] = _now(tz)
     task["history"].append({"at": task["updated_at"], "from": old, "to": new_state,
                             "reason": reason})
+    # G4. Hooked HERE, at the one chokepoint every state change passes
+    # through, rather than at each call site - an accounting a caller can
+    # forget to update is an accounting that silently under-counts, and
+    # under-counting is the direction that lets a task wait forever. The
+    # same `updated_at` moment is used, so the arithmetic agrees with the
+    # history entry above rather than drifting from it by a clock read.
+    if old == EVIDENCE_WAIT_STATE:
+        close_evidence_wait(task, task["updated_at"])
+    if new_state == EVIDENCE_WAIT_STATE:
+        open_evidence_wait(task, task["updated_at"])
     return old, new_state
 
 

@@ -92,8 +92,12 @@
     "accessibility": 1800,
     "accessibility_soft_seconds": 120,
     "accessibility_hard_seconds": 300,
+    "accessibility_install_build_seconds": 600,
+    "accessibility_teardown_seconds": 60,
+    "accessibility_attempt_seconds": 1080,
     "product_server_readiness_seconds": 120,
-    "lease_grace_seconds": 60
+    "lease_grace_seconds": 60,
+    "waiting_evidence_total_seconds": 18000
   },
   "supervisor": {
     "poll_seconds": 30,
