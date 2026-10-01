@@ -169,9 +169,17 @@ grep = subprocess.run(
     ["git", "grep", "-n", "statuses/", "--", "*.py", "*.js"],
     cwd=ROOT, capture_output=True, text=True,
 )
-hits = [l for l in grep.stdout.splitlines() if "/experiment/" not in l and "node_modules" not in l]
+# `git grep` prints REPO-RELATIVE paths with no leading slash, so the
+# original `"/experiment/" not in l` filter matched nothing and this check
+# found ITSELF the moment this file became tracked — a false positive that
+# would have made the whole run untrustworthy. `git grep` only searches
+# tracked files, which is exactly why committing the checker was the event
+# that broke it.
+hits = [l for l in grep.stdout.splitlines()
+        if not l.startswith("experiment/") and "node_modules" not in l]
 check(not hits, "E. F7 still true — no code anywhere posts a commit status",
-      f"{len(hits)} hit(s)" if hits else "the publisher is still unwritten")
+      f"{len(hits)} hit(s): {hits[0]}" if hits
+      else "the publisher is still unwritten")
 
 required = json.loads((ROOT / "config" / "experiment.json").read_text())["github"]["required_checks"]
 check(required == ["ci"],

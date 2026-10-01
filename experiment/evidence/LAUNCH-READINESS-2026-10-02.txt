@@ -1,0 +1,246 @@
+LAUNCH READINESS — READ-ONLY RECONCILIATION
+============================================
+Date:      2026-10-02
+Authority: Explicit operator instruction, this session, quoted verbatim in
+           section 1.
+Branch:    wip/c05-1-persistence
+Method:    Every gate classified by READING control/preflight.py, then the
+           side-effect-free ones executed ONE AT A TIME. No aggregate
+           entry point was invoked.
+
+NO SECRET VALUE WAS READ, PRINTED, LOGGED OR GREPPED AT ANY POINT.
+Presence was established by name lookup against the process environment;
+file existence by `test -f`; permissions by `stat`. The secrets file does
+not exist, so there were no contents to avoid reading.
+
+
+1. THE OPERATOR'S AUTHORISATION, VERBATIM
+-----------------------------------------
+    "5. Reconcile launch readiness.
+
+    Inspect current environment and preflight requirements read-only. Run
+    permitted local/non-billable checks individually where possible; do not
+    invoke a broad command that may trigger paid calls or real
+    notifications.
+
+    Provide the exact required secret names, purposes, presence/absence and
+    secure local provisioning instructions. Never print secret values or
+    search credential-file contents. Do not ask me to paste secrets into
+    chat.
+
+    Missing secrets do not block local fixture work, policy reconciliation
+    or proposal preparation. Do not stop all work while provisioning is
+    pending."
+
+
+2. THE 24 GATES, CLASSIFIED FROM THE CODE
+------------------------------------------
+control/preflight.py's GATES tuple. 11 SAFE-LOCAL, 10 NETWORK/PAID,
+3 SIDE-EFFECTING-BUT-LOCAL. Classified by reading each gate's body and the
+modules it calls, not by its name.
+
+SAFE-LOCAL — side-effect-free, no network, no cost. ALL ELEVEN EXECUTED:
+
+  protocol_present               PASS  all specification files present
+  task_graph_valid               PASS  no cycles/dangling/self/duplicate;
+                                       9 tasks
+  manifest_readiness             PASS  all 5 frozen-input hashes compute
+  host_headroom                  PASS  load 1.9/12 · RAM 41.3 GB ·
+                                       disk 491.9 GB · inotify watches
+                                       36538/524288 (7%) · instances
+                                       48/128 (37.5%) · 97 free ports in
+                                       [3200,3299]
+  control_plane_self_tests       PASS  returncode 0
+  clean_baseline                 PASS  at the moment it ran
+  budget_configured_by_human     PASS  $25.00 matches config.budget_usd
+  migration_lock_free            PASS  FREE, no owner, no waiters
+  provider_and_cost_state        PASS  4 providers AVAILABLE; spent
+                                       $0.000023 of $25.00; hard_stop False
+  supervisor_watchdog_healthy    FAIL  supervisor_pid None, watchdog_pid
+                                       None — EXPECTED pre-launch; nothing
+                                       was started to change it
+  required_secrets               FAIL  see section 3
+
+NETWORK/PAID — NOT RUN, and each would cost money, make a live GitHub
+call, or send a real notification:
+
+  github_remote · github_main_protection · ci_baseline_passing ·
+  claude_worker_heartbeat · codex_readonly_review · grok_bounded_observer ·
+  jev_minimal_decision (its own docstring: "this gate spends real money") ·
+  langfuse_otel_trace · supabase_health · discord_delivery
+
+SIDE-EFFECTING BUT LOCAL — NOT RUN. These are not billable and not
+network, but each CHANGES something, which the "read-only" instruction
+excludes:
+
+  ledger_append_read     appends a PREFLIGHT_LEDGER_PROBE line to
+                         .runtime/ledger.jsonl
+  tmux_master_session    creates a persistent named tmux session
+  workmux_lifecycle      creates a real git worktree and branch, then
+                         removes them
+
+
+3. THE EIGHT REQUIRED SECRETS — NAMES, PURPOSES, PRESENCE
+----------------------------------------------------------
+Authoritative list: control/config.py, REQUIRED_SECRETS.
+
+  NAME                      PURPOSE                              PRESENT
+  OPENROUTER_API_KEY        Bearer auth for Jev's decisions       YES
+                            endpoint (control/jev.py:154,194)
+  DISCORD_WEBHOOK_URL       the notification webhook target        no
+                            (control/notify.py:42,68)
+  LANGFUSE_PUBLIC_KEY       OTLP Basic-auth username half          no
+                            (control/telemetry.py:62)
+  LANGFUSE_SECRET_KEY       OTLP Basic-auth password half          no
+                            (control/telemetry.py:63)
+  LANGFUSE_BASE_URL         OTLP endpoint base                     no
+                            (control/telemetry.py:58)
+  SUPABASE_URL              Supabase project base URL              no
+                            (control/supabase_health.py:25)
+  SUPABASE_PUBLISHABLE_KEY  Supabase apikey header                 no
+                            (control/supabase_health.py:26)
+  SUPABASE_SECRET_KEY       REQUIRED BY NAME ONLY. The control     no
+                            plane deliberately never uses it
+                            (supabase_health.py:3-4)
+
+  ~/.config/run-002/secrets.env   DOES NOT EXIST
+  ~/.config/run-002/              the directory does not exist either
+
+Seven of eight absent. Only OPENROUTER_API_KEY is set, which is why the
+Jev gate could run on 2026-10-01.
+
+
+4. SECURE PROVISIONING — EXACTLY WHAT THE CODE DOES
+----------------------------------------------------
+control/config.py:23
+  SECRETS_FILE = Path.home() / ".config" / "run-002" / "secrets.env"
+
+control/config.py:107-126, load_secrets_file()
+  Reads line by line; skips blanks and `#` comments; splits on the FIRST
+  `=`; strips surrounding quotes; sets os.environ[name] ONLY IF the name
+  is not already set, so an existing environment variable always wins.
+  Returns NAMES ONLY.
+
+control/config.py:129-134, secrets_file_permissions_ok()
+  (path.stat().st_mode & 0o077) == 0 — owner read/write only. gate_secrets
+  appends "WARNING: the secrets file is readable by other users" when this
+  is False.
+
+The exact steps, for a human at a terminal:
+
+  mkdir -p ~/.config/run-002
+  touch ~/.config/run-002/secrets.env
+  chmod 600 ~/.config/run-002/secrets.env
+  # then open it in an editor and add one KEY=VALUE per line.
+
+  OPENROUTER_API_KEY=...
+  DISCORD_WEBHOOK_URL=...
+  LANGFUSE_PUBLIC_KEY=...
+  LANGFUSE_SECRET_KEY=...
+  LANGFUSE_BASE_URL=...
+  SUPABASE_URL=...
+  SUPABASE_PUBLISHABLE_KEY=...
+  SUPABASE_SECRET_KEY=...
+
+  No quotes. No `export`. No trailing spaces.
+
+DO NOT type the values on a shell command line — they would land in shell
+history. Use an editor. DO NOT paste them into a chat with any agent,
+including this one. An agent must never read, print or grep this file;
+existence is checked with `test -f` and names with presence-only lookups.
+
+
+5. HOST FACTS AT MEASUREMENT
+-----------------------------
+  inotify             max_user_instances 128 · max_user_watches 524288
+                      in use: 48 instances (37.5%) · 36538 watches (7%)
+  disk                459 GB available on the repository filesystem
+  supervisor/watchdog NEITHER RUNNING. No pid files. Confirmed by the
+                      gate and independently.
+  .runtime/           ledger.jsonl (332 B) · state.json (9283 B, mode
+                      600) · state.lock · supervisor.lock · observer/ ·
+                      workers/ (empty)
+  .runtime/preflight.json   DOES NOT EXIST
+
+The inotify headroom passes TODAY. It tracks concurrent tooling, so a PASS
+taken on a busy host says nothing about the host at launch, and a PASS
+taken on a quiet one says nothing about a busy launch. The 60% failure on
+record was caused by unrelated `rql serve` daemons. RE-MEASURE IMMEDIATELY
+BEFORE THE REAL PREFLIGHT. The ceiling must not be raised to make it pass.
+
+
+6. TWO FINDINGS THAT ARE NOT IN THE CHECKLIST
+----------------------------------------------
+F-A. THE TEST SUITE WAS WRITING THE LIVE RUN STATE. Found by hashing
+     .runtime/state.json either side of a suite run. FIXED this session —
+     see the commit "The test suite was writing the live run state".
+     tests/test_watchdog_liveness.py called watchdog.main() without
+     patching config.STATE_PATH, so reconcile_worker_state and
+     annunciate_orphans both defaulted to the real document. 16 writes per
+     full suite run. Now zero, verified by hash.
+
+     RESIDUE, NOT RESET — resetting durable run state is outside this
+     session's authority, and the instruction forbids it explicitly. One
+     entry remains in .runtime/state.json:
+
+       orphan_annunciations["BROWSER_EVIDENCE_UNREADABLE:…/.runtime/evidence"]
+         status             OBSERVED
+         attempt            586
+         first_observed_at  2026-10-01T14:28:51+13:00
+         resource_id        …/.runtime/evidence   (does not exist)
+
+     OPERATOR DECISION: leave it, or clear that one key before T+00. It is
+     status OBSERVED rather than ATTEMPTING, so it is not suppressing a
+     pending send; the only effect is that the retry counter for that one
+     fingerprint starts at 587 if the same condition ever recurs. Low
+     consequence, but it is test residue in the document T+00 starts from.
+
+     THE REST OF THE DOCUMENT IS PRISTINE, checked key by key:
+       started_at   None          (T+00 NOT_STARTED)
+       tasks        all nine QUEUED
+       prs          empty
+       workers      empty
+
+F-B. A SUBAGENT AUDITING THIS REPORTED "A CONCURRENT AGENT IS MODIFYING
+     THE WORKING TREE" AS EVIDENCE AGAINST THE ISOLATION PROOF. It is NOT.
+     The concurrent writer was this session and a second subagent it had
+     dispatched, both working on the repository as authorised. Recorded
+     here so the observation is not inherited as a launch blocker by
+     whoever reads the audit next. The isolation requirement in AGENTS.md
+     is about Run 001 and about the product runtime, and neither was
+     touched.
+
+
+7. THE LAUNCH CHECKLIST, RECONCILED
+------------------------------------
+  Header session state           STALE. It named HEAD ec45325 and a clean
+                                 tree. Corrected in this session's update.
+  The 24 governed gates list     MATCHES control/preflight.py exactly.
+  "Eight gates executed          REPRODUCED, and extended to eleven. Same
+   2026-10-01, 7 pass /          outcome for the original eight.
+   required_secrets fails"
+  clean_baseline row's HEAD      STALE (01c0413). Corrected.
+  jev_minimal_decision PASS      NOT RE-RUN. It spends real money. Its
+                                 2026-10-01 result is neither confirmed
+                                 nor refuted here.
+  host_headroom 48/128           REPRODUCED IDENTICALLY (37.5%).
+  "No preflight.json exists"     STILL TRUE. ctl start refuses on all 24
+                                 as never-run regardless of any individual
+                                 gate's truth.
+  Phase 2/3/4 procedures         Process instructions, not measurable
+                                 facts. Out of scope for a read-only pass.
+
+
+8. WHAT BLOCKS WHAT
+--------------------
+  required_secrets FAIL blocks        langfuse_otel_trace, supabase_health,
+                                      discord_delivery outright, and
+                                      supplies the credentials the paid
+                                      gates need.
+  No preflight.json blocks            ctl start, unconditionally.
+  C-20a(C) undecided blocks           the real C-04a run against GitHub,
+                                      and merge-gate option (i).
+
+  NONE of them blocked the work done this session: the local fixture scan,
+  the merge-policy reconciliation and the proposal all completed without a
+  credential, a provider, GitHub or a product.

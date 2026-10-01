@@ -7980,3 +7980,138 @@ credential, a provider, GitHub or a product.
 agent resumable, no uncommitted or discarded work, and every remaining item
 recorded above with its location and next step. T+00 remains NOT_STARTED and
 Run 001 is untouched.
+
+## 44. SESSION HANDOVER — the autonomous launch-preparation session (2026-10-02)
+
+**Read this first. It supersedes §43 and §42.** §41 is superseded; §16 is
+stale. §42 and §43 remain accurate about what they describe and are not
+contradicted — they are simply older, and §43.5's four open items are now
+four closed ones plus one that was never in the list.
+
+### 44.1 Verified state — measured at handover, not remembered
+
+| | |
+|---|---|
+| Branch | `wip/c05-1-persistence` |
+| HEAD | **`915aa3a`**, plus this section's own documentation commit, which touches only `experiment/` |
+| Baseline at session start | `dbee92c` — 2,273 Python / 218 apparatus |
+| Verification | **2,315 Python tests OK · 222 apparatus tests OK**, both exit 0. Secret scan clean over 262 tracked files. `git diff --check` clean |
+| T+00 | **NOT_STARTED** (`started_at: None`, all nine tasks QUEUED, no PRs, no workers) |
+| Run 001 | Untouched |
+| Subagents | Two dispatched, both complete, both reviewed and integrated by the integration owner. None resumable |
+
+### 44.2 What the operator delegated, and what was done with it
+
+| Decision | Record | Outcome |
+|---|---|---|
+| **C-02b** — the stale automation disclosure | `experiment/evidence/C-02b-frozen-prompt-stale-disclosure.txt` | **APPLIED.** One hunk of `prompts/accessibility.md` |
+| **C-05.3c** — exercise the real services | `experiment/evidence/C-05.3c-local-fixture-scan.txt` | **DONE.** The pipeline has now actually run |
+| **C-04b** — reconcile the two merge gates | `experiment/evidence/C-04b-merge-gate-differential.txt` | **DONE.** Three fail-open holes closed |
+| **C-20a(C)** — the GitHub App proposal | `experiment/GITHUB-APP-WORKER-ISOLATION-PROPOSAL.md` §9 + `experiment/github-app/` | **PREPARED, NOT APPLIED. Still the operator's.** |
+| Launch readiness | `experiment/evidence/LAUNCH-READINESS-2026-10-02.txt` | **MEASURED, read-only** |
+
+All earlier approvals — G1, G2/G9, G3, G4, G6, G7, C-18a, C-20a A/D/E —
+are **unchanged and still applied**. None was reopened.
+
+### 44.3 The three things static review had missed for four sessions
+
+This is the section worth keeping. Each was found by **running the code**,
+and each had survived precisely because it was invisible to the tests.
+
+**1. G6's composite mapping had never fired.** `run.js` writes
+`{checks, details}` — results and diagnostics in separate top-level
+fields — and `ProductServices.scan` returned `checks` alone, while
+`findings_for` reads `check["detail"]`. So the approved sub-condition
+structure was handed `None` on every real run.
+
+The effect was a **downgrade, not a hole**: every composite failure
+collapsed to one uncited finding, which `severity.py` rates INVALID with
+`merge_blocked` True. *Nothing merged that should not have* — which is
+exactly why no test caught it. Every assertion about blocking stayed true.
+What was lost was the citation.
+
+**2. `evaluate_merge` merged on absent facts.** An absent
+`mergeStateStatus` merged. GitHub's `UNKNOWN` — "mergeability has not been
+computed yet" — merged. An absent `isDraft` merged. Each proved by
+reverting the fix and watching `decision.allowed` come back `True`.
+
+**3. The test suite wrote the live `.runtime/state.json`.** 16 writes per
+run, through `watchdog.main()` in a test that stubbed the ledger, the
+notifier, the pid path and the clock — but not the store.
+
+**The pattern in all three: the defect was invisible because the system
+failed SAFE.** A blocking-but-uncited finding still blocks. A merge gate
+that is lax about absent fields still denies on every field that is
+present. A test that writes real state still passes. Fail-safe defects do
+not announce themselves; only running the thing finds them.
+
+### 44.4 What was deliberately NOT done, and why
+
+- **`live-gate.js` was not edited, and not wired in.** The reconciliation
+  is option (iii) — kept separate, with the separation measured. Option
+  (i) cannot be specified until C-20a(C) decides which revision the
+  JavaScript gate executes from; running it from the PR's own tree would
+  let a pull request supply the code that judges it.
+- **The `.runtime/state.json` residue was not reset.** Resetting durable
+  run state is outside this session's authority and the instruction said
+  so. It is reported in 44.6 for the operator.
+- **No ledger read and no git call were added to the merge transaction.**
+  Both are real differences from `live-gate.js`; both are recorded as
+  accepted differences with the reasoning, not as oversights. The ledger
+  provenance check is the strongest candidate if the gates ever converge.
+- **Nothing was created for C-20a(C).** No App, credential, OS user,
+  container, setting or protection. No GitHub write of any kind.
+
+### 44.5 Verification — what grade each claim holds
+
+Passing test counts do not establish readiness. Three grades:
+
+| | Grade | Where |
+|---|---|---|
+| install/build, server readiness, browser scan, ingest, cleanup | **REAL SERVICE** | `test_c05_3c_local_fixture_scan` — real npm, socket, Chromium, axe, process group, `/proc` scan, `git worktree` |
+| port claimed, held, and released only after the listener is gone | **REAL SERVICE** | same file — refused while a live server held it, permitted after a real stop |
+| evidence gating, repair cycles, head invalidation, restart recovery, merge-before-unblock | **SIMULATED** | the real Supervisor over a real store, external services injected: `test_c05_3b_*` (176 tests) |
+| the merge gate's conditions and their ordering | **COMPONENT** | `test_c04b_merge_gate_differential` (19) |
+| severity policy and claim validators at live call sites | **READ FROM THE LIVE PATH** | `accessibility_is_consistent` refuses a PASS carrying a blocking finding, before any verdict is recorded; `review_gate_fires` iterates all three registered claim validators |
+
+**NOT VERIFIED AT ANY GRADE, and this is the honest limit: NO REAL GITHUB
+CALL HAS EVER BEEN MADE.** `gh.pr_view`, `gh.merge`, `gh.checks_state`,
+auth, rate limiting and pagination are entirely unexercised. Every
+simulated test above stubs them. No product PR exists, so no merge has ever
+been evaluated against a real pull request, and `live-gate.js` has never
+faced real GitHub either — every adapter in every one of its tests is a
+stub.
+
+### 44.6 What remains, and who owns it
+
+| # | Item | Owner | Next action |
+|---|---|---|---|
+| 1 | **Provision the eight secrets** | **HUMAN, on the host** | `~/.config/run-002/secrets.env`, mode 600. Names, purposes and steps in `experiment/evidence/LAUNCH-READINESS-2026-10-02.txt` §3–4. Unblocks three gates and supplies the paid gates' credentials. **Still the shortest step and still the one everything waits on.** |
+| 2 | **C-20a(C)** — approve, reject, or amend the arrangement | **OPERATOR** | Read proposal §9. One concrete arrangement, three principals, pin `183959e`. §9.6 states plainly that it takes `main` from "a human approved this" to "the gate approved this" — that is the hinge, and if it is unacceptable the arrangement should be rejected rather than trimmed. **Do not approve §41.7's permission set.** |
+| 3 | **The `orphan_annunciations` residue** | **OPERATOR** | One key in `.runtime/state.json`, status OBSERVED, attempt 586, resource gone. Leave it or clear that one key before T+00. Low consequence; it is test residue in the launch document. Deliberately not reset here. |
+| 4 | **inotify headroom at launch** | **HUMAN, on the host** | 48/128 = 37.5% on 2026-10-02, identical to 2026-10-01. Re-measure on a quiet host immediately before preflight. The ceiling must not be raised. |
+| 5 | **Run the real preflight** | ENGINEERING, after 1 | Produces `preflight.json`, without which `ctl start` refuses on all 24 as never-run. Cannot be done now: it makes paid calls and sends a real notification. |
+| 6 | **C-04a against real GitHub** | ENGINEERING, after 2 | The `gh` path, auth, rate limiting and pagination are all unexercised. |
+| 7 | **Push the branch** | ENGINEERING | The pinned trusted revision is not fetchable by anyone else until `wip/c05-1-persistence` is pushed. Proposal runbook step 0b. |
+
+### 44.7 For whoever picks this up cold
+
+- **Run the thing.** Four sessions of careful static review did not find any
+  of 44.3. One session that executed the pipeline found all three in an
+  afternoon.
+- **Mutate every guard.** Two guards written THIS session were vacuous
+  until mutation exposed them: a worktree-leak check that pruned before it
+  asserted, and a pin check that asserted `pin == HEAD` and therefore could
+  never be satisfied by any commit. Both were green and both proved
+  nothing.
+- **Use file copies for mutation backups.** §42.9 records `git checkout --`
+  destroying uncommitted work during a mutation. Every mutation this
+  session used `cp` and verified the restoration by SHA-256.
+- **Check what else touches it.** The fixture scan leaked eight stale git
+  worktree registrations into a list this repository shares with eleven
+  live subagent worktrees. Found by printing `git worktree list`, not by
+  any assertion.
+- **A subagent's finding is a claim, not a fact.** One reported "a
+  concurrent agent is modifying the working tree" as evidence against the
+  isolation proof. The concurrent agent was this session. Verified before
+  it was inherited.
