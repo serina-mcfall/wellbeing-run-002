@@ -4812,3 +4812,350 @@ discovered during implementation.
   package. It does not (§31.9).
 - It does not answer G1–G10. Ten questions are escalated; none is guessed.
 - C-05.3b remains **not begun**. T+00 remains **NOT_STARTED**.
+
+---
+
+## 32. C-18 stage 5 (reviewer) on the shared dispatch harness, plus the approved draft-to-ready authority (2026-10-01)
+
+Branch `wip/c18-stage5-reviewer`, off `wip/c05-1-persistence` at `8425e32`
+(which already carries the stage-4 harness, `d39ad95`). Stage 5 only. C-18
+stays **OPEN**: stage 7 and the `merge_invariant.annunciate` residual are
+untouched, and stage 6 is a separate branch.
+
+### 32.1 What left T1
+
+| Call | Was | Now |
+|---|---|---|
+| `gh.pr_diff_sha` | inside T1 | `observe_review_heads`, before the lock |
+| `routing.material_diff_hash` | inside T1 | `observe_review_heads`, before the lock |
+| `gh.pr_view` (the re-derivation) | did not exist | `_review_preflight`, after T1 commits |
+| `evidence.collect` (two GitHub calls) | inside T1 | `_execute_reviewer_dispatch` |
+| `prompts.write` | inside T1 | `_execute_reviewer_dispatch` |
+| `workers.acquire_worktree` (workmux/git) | inside T1 | `_execute_reviewer_dispatch` |
+| `workers.write_job` | inside T1 | `_execute_reviewer_dispatch` |
+| `workers.start_job` (process/tmux spawn) | inside T1 | `_execute_reviewer_dispatch` |
+| `gh.mark_ready` (new) | did not exist | `_review_preflight` |
+
+Commit-side state — `review_cycles += 1`, `approval_current = False`,
+`review_verdict = None`, `reviewed_head`, `reviewed_diff_hash`,
+`task["worker"]`, the `doc["workers"]` record, the retained-worktree pop and
+the REVIEW transition — commits afterwards in `_commit_reviewer_dispatch`.
+`review_cycles` still counts exactly one per review that actually started.
+
+The reviewer joins the harness exactly as §30.2 specifies: three methods
+(`_execute_reviewer_dispatch`, `_commit_reviewer_dispatch`,
+`_fail_reviewer_dispatch`) and one `DISPATCH_HANDLERS` entry. Nothing in
+`execute_dispatches`, `apply_dispatch_result`, `confirm_dispatches` or
+`resume_dispatch_claims` changed.
+
+### 32.2 The head-moved hazard, and how it is resolved
+
+`reviewed_head` used to be written from a head fetched *inside* T1, so it was
+necessarily current. Once the head is observed before the lock, the claim can
+outlive the commit it names — most sharply on the recovery path, where
+`resume_dispatch_claims` re-plans a claim observed a whole tick earlier. A
+review cut from a superseded commit would still write `reviewed_head` as
+though it had reviewed the current one, and the merge gate would then approve
+code no reviewer ever saw.
+
+Two gates, at the two places the plan can go stale:
+
+1. **Execute, before any worker exists.** `_review_preflight` re-resolves the
+   pull request with one `gh.pr_view` and requires `headRefOid` to still equal
+   `plan.observed_head`. Any disagreement — **including an unresolvable head**
+   — invalidates the plan: a head that cannot be *proved* unchanged has not
+   been proved unchanged. Nothing is acquired, written or spawned.
+2. **Commit, state-only.** `_commit_reviewer_dispatch` additionally requires
+   `claim["observed_head"] == plan.observed_head`. This is load-bearing and
+   not redundant: a claim re-planned at the *same cycle* has the same worker
+   name and the same PR, so `_current_dispatch_claim` alone would accept it,
+   and committing the old result against it would bind the new reservation's
+   record to the old reservation's SHA.
+
+A failed preflight releases the claim through `_fail_reviewer_dispatch`, so
+`route_awaiting_dispatch` re-routes the task on the next tick against a
+*freshly observed* head. Nothing retries inside the call. The existing
+dispatch-failure limit bounds the re-routing — see §32.8 item 3 for the cost
+of that choice.
+
+### 32.3 THE LEDGER EVENT CONTRACT (for the merge-gate composition layer)
+
+The defect: a review was bound to a SHA only by `prs[<n>].reviewed_head` in
+**mutable** `state.json`, which every later cycle overwrites. The ledger is
+append-only and is the right home. The security worker name is already
+SHA-bound (`routing.security_worker_name`); the review path was the
+asymmetric side of that defence.
+
+**Consume these two events. The contract is exact.**
+
+| | `REVIEW_DISPATCHED` | `REVIEW_RESULT` |
+|---|---|---|
+| Emitted by | `Supervisor._commit_reviewer_dispatch` | `Supervisor.on_reviewer_finished` |
+| When | the dispatch commits, after the worker has started | the reviewer's verdict is read out of the finished worker |
+| `task_id` | the task | the task |
+| `pr_id` | the pull request number (int) | the pull request number (int) |
+| `agent_id` | the reviewer worker name | the same worker name |
+| `role` | `"reviewer"` | `"reviewer"` |
+| `outcome` | `"DISPATCHED"` | the verdict (`REVIEW_PASS` / `REVIEW_FAIL` / `REVIEW_UNPARSEABLE`) |
+| **`metadata_redacted.head_sha`** | **the 40-char lowercase-hex SHA the review worktree was cut from** | **the SHA the verdict applies to** |
+| other `metadata_redacted` | `review_cycle` (int, post-increment) | everything `routing.Review.as_dict()` already produced: `verdict`, `gates`, `summary`, `finding_ids`, `counts` |
+
+Field name is **`head_sha`**, nested under **`metadata_redacted`**, agreed
+with the C-04 composition layer that consumes it.
+
+**Mechanism, and why there is exactly one spelling.** `ledger.FIELDS` has no
+`head_sha`, and `Ledger.append` merges every unrecognised kwarg into
+`metadata_redacted`. So the emitting code passes `head_sha=<sha>` as a bare
+kwarg — `ledger.py` is **not changed**, and a top-level `head_sha` is
+structurally impossible. The composition layer also reads a top-level spelling
+for forward compatibility and treats **disagreement between the two as fatal**,
+which is why it is emitted in one place only. Verified end to end through the
+real `Ledger` and the file on disk, not only through a mocked `log`
+(`test_the_real_ledger_writes_head_sha_into_metadata_redacted_only`).
+
+Note this is the one place that deliberately departs from the control plane's
+older `metadata_redacted.head` convention (`REVIEW_EVIDENCE_GATHERED`, the
+security events, and this stage's own `REVIEW_PREFLIGHT_DEFERRED`,
+`DISPATCH_CLAIMED` and `PR_MARKED_READY_FOR_REVIEW`). Those are diagnostics;
+these two are a consumed contract, and the consumer's spelling wins.
+
+**Semantics a consumer may rely on:**
+
+- On `REVIEW_DISPATCHED`, `head_sha` is **always** a full SHA. The dispatch
+  cannot commit without one — `new_dispatch_claim` refuses anything that is
+  not 40 lowercase hex, and the preflight has proved GitHub still reports that
+  exact commit.
+- On `REVIEW_RESULT`, `head_sha` is read from the **worker record**
+  (`meta["head"]`, written at dispatch and destroyed at reap), falling back to
+  `prs[<n>].reviewed_head`. The worker-record binding is preferred precisely
+  because the per-PR field is mutable and a later cycle overwrites it.
+- **`head_sha` may be `null` on `REVIEW_RESULT`**, for a worker record minted
+  before this binding existed. The key is **always present**; a null means
+  *this verdict is not attributable to a commit*. It must be read as an
+  unbound review, never as "not checked" and never as a pass. A missing key
+  would be indistinguishable from an old ledger line, which is why null is
+  emitted explicitly.
+- **`agent_id` names the worker on both events**, so a SHA-bound result can be
+  checked by reviewer-identity verification. A head with no worker beside it
+  would prove nothing about who produced the verdict.
+- Pairing: `(task_id, pr_id, agent_id)` identifies one review cycle.
+  `agent_id` is `<task-id-lowercased>-review-<cycle>` and is unique per cycle.
+- These events are **evidence of what was reviewed, not of approval.**
+  Approval lives in `REVIEW_PASS_RECORDED` and in `prs[<n>].approval_current`.
+
+This is what closes the §28.3 defect: an older cycle's REVIEW_PASS could not
+previously be proved not to have been re-presented for a newer commit, because
+the only SHA binding was a mutable field the newer cycle had already
+overwritten.
+
+Pinned by `TheLedgerBindsAReviewToItsCommit` (9 tests).
+
+### 32.4 The approved authority amendment — draft to ready for review
+
+Recorded verbatim, as approved by the operator:
+
+> "The Supervisor may mark a draft PR for a governed task ready for review
+> before independent review dispatch. This action grants no approval or merge
+> eligibility."
+
+Implemented in `Supervisor._review_preflight`, in the **execute** phase. All
+four operator conditions:
+
+1. **Re-verify first.** Association and head are re-derived from GitHub in one
+   `gh.pr_view` — pull request found, still `OPEN`, `headRefName` still equal
+   to the claim's branch, `headRefOid` still equal to `observed_head`. The
+   plan supplies only what the fresh answer is checked *against*; nothing is
+   marked ready off bookkeeping built earlier in the tick. The state-side half
+   of the same check (`task["pr"]`, `task["branch"]`) is re-made at commit.
+2. **Defer on failure, with a finite diagnostic.** Every disagreement returns
+   one code from `supervisor.REVIEW_PREFLIGHT_CODES` —
+   `PR_NOT_FOUND`, `PR_NOT_OPEN`, `PR_ASSOCIATION_MISMATCH`, `HEAD_MOVED`,
+   `READY_FOR_REVIEW_REFUSED` — annunciated as
+   `REVIEW_PREFLIGHT_DEFERRED` with the code as `outcome`, and carried into
+   the durable `DISPATCH_FAILED` record as `reason`. **Never exception prose**,
+   which is the C-16 rule. The review is not dispatched anyway and nothing
+   retries inside the call.
+3. **It grants nothing, structurally.** `_review_preflight` runs in the
+   execute phase, which holds no state document and no lock, so there is no
+   `approval_current`, `review_verdict` or merge record in scope for it to
+   touch. Its only channel back into the control plane is `DispatchResult`,
+   whose fields are `(plan, ok, worktree, port, reason)` — no field an
+   approval could ride on. And the commit half of a *successful* dispatch sets
+   `approval_current = False` and `review_verdict = None` unconditionally, so
+   marking ready can only ever move a pull request **away** from merge
+   eligibility. All three are asserted, not merely stated.
+4. **Success is annunciated** as `PR_MARKED_READY_FOR_REVIEW`
+   (`outcome="READY"`, `metadata_redacted.head`, and
+   `metadata_redacted.grants = "NO_APPROVAL_NO_MERGE_ELIGIBILITY"`).
+
+**This path is EXCEPTIONAL, not routine.** `prompts/builder.md` opens pull
+requests with a bare `gh pr create` and `--draft` appears nowhere in the
+repository, so a governed task's pull request is ready by construction. A
+draft here means a human or an external tool made one. That claim is pinned by
+a test that greps the two files that could introduce it, so it cannot
+silently stop being true.
+
+**This is the first fixture in the repository that sets `isDraft: True`.**
+Every pre-existing fixture hard-codes it False, so the draft path had never
+executed once before this stage.
+
+### 32.5 `on_dispatch_failure`, generalised for both roles
+
+Signature **unchanged** — `(doc, task, pr_number, role, reason)`, positional,
+state-only, as the stage-6 fixer requires. One behaviour added: the pull
+request record is now looked up with `.get` and a missing record is **refused
+and logged** (`DISPATCH_FAILURE_REFUSED`, `outcome="PR_RECORD_GONE"`) instead
+of raising `KeyError`.
+
+This is not cosmetic. Before C-18 the only caller had just read that record
+inside the same transaction, so it was certain to exist. A harness role now
+calls this from the commit transaction that runs *after* T1, and in that
+window an externally merged pull request can complete its task and take the
+record with it. The `KeyError` would abort the commit transaction — discarding
+the claim release beside it and stranding the dispatch in a retry loop. With
+the record present, every line is exactly what it was; all pre-existing
+callers and assertions are unchanged.
+
+Stage 6 reported hitting this and guarding its own call site. **The guard is
+now inside the function and no caller needs to repeat it.** Pinned by
+`test_a_pull_request_record_gone_is_refused_not_raised` (both roles) and
+`test_the_commit_half_also_refuses_a_vanished_record`.
+
+### 32.6 The pre-lock observation, and what it costs
+
+`observe_review_heads(snapshot, open_prs) -> {pr_number: ReviewObservation}`
+is narrowed the way the security heads are. A pull request is asked about only
+when its task is in `ROUTING_STATES`, the record exists and is unmerged, the
+pull request is open, it is not already a merge candidate, it is not routed to
+a fixer by a `REVIEW_FAIL` verdict with findings, and `has_worker` sees no
+reviewer or fixer (worker **or** claim). A snapshot whose worker map cannot be
+read yields no observations at all, so every pull request defers rather than
+being dispatched from a document that could not be understood.
+
+`head` and `diff_hash` are taken in the same breath, so the committed
+`reviewed_diff_hash` always describes the committed `reviewed_head`.
+
+**Costs, stated rather than hidden:**
+
+- A tick with a pull request genuinely awaiting review now makes
+  `gh.pr_diff_sha` + `material_diff_hash` **before** the lock and one
+  `gh.pr_view` **after** it. Previously it made all three inside T1. The call
+  count per successful dispatch is the same; the lock-held time is not.
+- A pull request that is eligible but whose dispatch is held (paused review
+  provider, frozen run) is re-observed every tick. Those are `gh` reads, not
+  paid calls, and the narrowing above keeps a quiet tick at zero.
+- `observation` is a **required** parameter of `dispatch_reviewer`, so a
+  caller that forgets it defers loudly (`REVIEW_DISPATCH_DEFERRED`,
+  `outcome="OBSERVATION_MISSING"`) rather than silently reviewing nothing.
+  `route_prs` and `route_awaiting_dispatch` take it as an optional keyword
+  with a `None` default, which is the plumbing only.
+- **`on_fixer_finished` now defers by one tick.** It calls
+  `dispatch_reviewer(..., None)` from inside T1, where no observation exists —
+  at observation time the fixer was still live. The task is left in REVIEW
+  with its verdict cleared and no worker, which is exactly what
+  `route_awaiting_dispatch` picks up next tick, against a head observed
+  *after* the fix landed rather than before it. One tick of latency, bought
+  for a fresher head.
+
+### 32.7 Files changed, and verification
+
+| File | Change |
+|---|---|
+| `control/supervisor.py` | `REVIEW_PREFLIGHT_CODES`; `ReviewObservation`; `observe_review_heads`; `dispatch_reviewer` rewritten as a planner; `_review_preflight`, `_review_deferred`, `_execute_reviewer_dispatch`, `_commit_reviewer_dispatch`, `_fail_reviewer_dispatch`; `DISPATCH_HANDLERS` reviewer entry; `on_dispatch_failure` generalised; `route_prs`/`route_awaiting_dispatch` plumbing; `on_fixer_finished` deferral; `on_reviewer_finished` SHA binding; `tick` wiring |
+| `control/gh.py` | `mark_ready` (new) |
+| `tests/test_c18_stage5_reviewer.py` | **NEW** — 64 tests |
+| `tests/test_dispatch_invariant.py` | three tests re-pointed at plan → execute → commit; **no assertion changed** |
+| `tests/test_c09_resource_lifecycle.py` | one test re-pointed, same; **no assertion changed** |
+| `tests/test_c18_stage4_dispatch_harness.py` | the no-handler marker moved from `"reviewer"` (which stage 5 claims) to `"observer"`; **no assertion changed** |
+
+`control/merge_invariant.py`, `control/state.py`, `dispatch_fixer`,
+`tests/test_c18_stage3_port_split.py` and everything under `apparatus/` were
+not touched. No frozen source (`product/`, `tasks/`, `protocol/`,
+`config/tasks.json`) was touched. All three test-file changes were declared in
+`.claude/.test-change` before the edits.
+
+```
+python3 -m unittest discover -s tests   ->  Ran 1728 tests ... OK   (was 1664)
+python3 scripts/check_no_secrets.py     ->  no secret-shaped material, 194 files
+git diff --check                        ->  exit 0
+Preflight(cfg).gate_protocol()          ->  ok=True, missing: []
+```
+
+The `[FAIL] c16_probe` stderr lines remain the C-16 deliberate-exception
+probe, not failures.
+
+**The transaction-boundary proof is measured, not structural.** A spy records
+`lock_is_held(store.lock_path)` — an independent `open()` plus
+`flock(LOCK_NB)` against the real lock file — at the moment of every
+`gh.pr_diff_sha`, `material_diff_hash`, `gh.pr_view`, `gh.mark_ready`,
+`evidence.collect`, `prompts.write`, `acquire_worktree`, `write_job` and
+`start_job` in a full real tick. Two companion tests prove the probe detects a
+held lock and that the same spy reports `True` for a deliberate
+in-transaction call, so neither guard can be green because the instrument is
+broken.
+
+**Mutations — 7 run, 7 caught.** `control/supervisor.py` restored
+byte-identical after every one, SHA-256 verified against a pre-mutation
+baseline, and the full suite re-run green. M1–M3 and M5 were run against
+baseline `1f1a9417…`; M4, M6 and M7 against `e699d437…` after the ledger field
+name was agreed with the C-04 composition layer.
+
+| Mutation | Result |
+|---|---|
+| **M1 the harness is bypassed** — `dispatch_reviewer` executes and commits inline inside T1 | **caught, 16 tests.** The boundary spy reports `[('gh.pr_diff_sha', False), ('material_diff_hash', False), ('gh.pr_view', True), ('evidence.collect', True), ('prompts.write', True), ('acquire_worktree', True), ('write_job', True), ('start_job', True)]` against the expected all-False |
+| **M2 an external call returns to T1** — the head and diff-hash fetches restored inside `dispatch_reviewer` | **caught, 11 tests.** The spy reports a second `gh.pr_diff_sha` and `material_diff_hash` pair, both `True` |
+| **M3 a moved head does NOT invalidate the plan** | caught, 7 tests, including a draft marked ready on a superseded head |
+| **M4 the SHA binding dropped from both ledger events** | caught, 5 tests |
+| **M7 the SHA emitted under the WRONG spelling** — `metadata_redacted.head` instead of `metadata_redacted.head_sha` | caught, 5 tests. The consumer treats a spelling disagreement as fatal, so a silently renamed field had to be a red suite |
+| **M5 the claim is invisible to `has_worker`** | caught, 5 tests — a second reviewer and a second fixer are both dispatched |
+| **M6 the draft is marked ready WITHOUT re-verifying the head** — ordering inverted, everything else intact | **caught, 2 tests, both by EXTERNAL-EFFECT assertions.** No state outcome can see this: a draft wrongly marked ready leaves state identical to one correctly deferred. Only the absence of `gh.mark_ready` in the recorded call list proves it |
+
+M6 is deliberately the answer to stage 6's finding that state-outcome
+assertions cannot catch a lost external guard. M1, M2 and M3 are likewise
+caught by call-site assertions, not only by state.
+
+Every test uses temporary directories, mocked processes and mocked GitHub. No
+worker was launched, no notification sent, no paid call made and no network
+reached. Unlike stage 4 there is no socket operation anywhere: the reviewer
+takes no port.
+
+### 32.8 What stage 5 does NOT claim, and known limitations
+
+1. **No rehearsal, no live launch, no GitHub call was actually made.** Every
+   `gh` entry point is mocked, including `gh.mark_ready`, which has therefore
+   **never run against a real pull request**. The command
+   (`gh pr ready <n> --repo <repo>`) is unexercised outside tests. This change
+   is not evidence of launch readiness and does not claim any.
+2. **`dispatch_fixer` is unchanged** and still calls the composed
+   `workers.allocate_port(doc)` under the lock. Stage 6, separate branch.
+3. **A legitimately moving head consumes dispatch-failure budget.** Every
+   preflight deferral increments `prs[<n>].dispatch_failures`, which escalates
+   to HUMAN_REQUIRED at `max_repair_cycles`. A branch being pushed to
+   repeatedly will therefore eventually raise a human intervention rather than
+   waiting it out. That is a deliberate choice — something pushing during
+   review is worth a human looking — but it is a behaviour change from "the
+   head is whatever T1 saw", and a separate counter was not invented for it.
+4. **The one-tick deferral after a fixer finishes** (§32.6) is new latency on
+   the repair loop. It was chosen over fetching a head inside T1.
+5. **`REVIEW_RESULT.head` can be null** for a worker record minted before this
+   stage. A consumer must handle that explicitly; see §32.3.
+6. **`merge_invariant.annunciate` still sends synchronously inside T1.**
+   Untouched by instruction.
+7. **The amendment's authority is narrow.** It permits exactly one action on
+   exactly one kind of pull request. Nothing here authorises the Supervisor to
+   approve, to merge, or to change a review verdict, and §32.4 condition 3
+   makes that structural rather than conventional.
+8. **`declare_busy` bounds are still stage 7.** Not applied.
+9. **Nothing here touches the merge gate.** `routing.evaluate_merge`, the
+   head-SHA-before-diff-hash invalidation and the 14 finite `MERGE_*`
+   condition codes all landed elsewhere and were deliberately not duplicated.
+   `REVIEW_PREFLIGHT_CODES` is a separate, reviewer-dispatch vocabulary and
+   shares no identifier with them.
+10. **The C-04 composition layer has not been run against this branch.** The
+    event contract in §32.3 was agreed in writing and verified from this side
+    end to end through the real `Ledger`, but the two halves have not been
+    executed together.
+
+C-18 remains **OPEN** and still carries *"REQUIRED BEFORE: unattended
+multi-cycle rehearsal, the 5-hour unattended stress test, and T+00."*
+T+00 remains **NOT_STARTED**.

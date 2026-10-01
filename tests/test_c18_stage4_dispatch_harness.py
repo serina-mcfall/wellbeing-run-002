@@ -464,8 +464,12 @@ class TheHarnessContract(HarnessCase):
             self.assertTrue(callable(getattr(self.sup, name)), name)
 
     def test_a_role_with_no_handler_is_held_rather_than_crashing(self):
+        # "observer" is a real role that is deliberately never dispatched
+        # through this harness, so this stays an unhandled role however many
+        # stages register themselves. (Stage 5 took "reviewer", which is what
+        # this test originally used.)
         plan = supervisor_mod.DispatchPlan(
-            role="reviewer", task_id="TASK-001", pr=7, worker="task-001-review-1",
+            role="observer", task_id="TASK-001", pr=7, worker="task-001-observer-1",
             branch="task/task-001")
         self.seed()
         results = self.sup.execute_dispatches([plan], snapshot=self.durable())

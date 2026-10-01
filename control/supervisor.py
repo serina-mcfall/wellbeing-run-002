@@ -143,6 +143,40 @@ class DispatchObservation:
     worker_live: bool | None = None
 
 
+# C-18 stage 5. The FINITE diagnostic vocabulary of the pre-dispatch
+# re-verification. Every reason a review may be deferred immediately before
+# dispatch is one of these codes and nothing else - never an exception string,
+# which is the C-16 rule that exception prose must not reach durable evidence.
+# `_review_preflight` returns one of these, or "" to mean "proceed".
+REVIEW_PREFLIGHT_CODES = (
+    "PR_NOT_FOUND",             # GitHub returned nothing for this number
+    "PR_NOT_OPEN",              # closed or merged since the observation
+    "PR_ASSOCIATION_MISMATCH",  # the pull request no longer tracks this branch
+    "HEAD_MOVED",               # the commit the claim is bound to is superseded
+    "READY_FOR_REVIEW_REFUSED",  # the draft-to-ready call was refused
+)
+
+
+@dataclass(frozen=True)
+class ReviewObservation:
+    """What GitHub says about one pull request, read BEFORE the lock.
+
+    C-18 stage 5. `head` is the commit a review dispatched now would be cut
+    from and `diff_hash` the material diff at that same instant; both used to
+    be fetched from inside T1, which is the defect. Either may be None when
+    GitHub could not answer - a `None` head is a dispatch failure, never a
+    reason to review something else.
+
+    The pair is deliberately taken at ONE moment: the diff hash describes the
+    head beside it, and the head is re-proved unchanged before any worker
+    starts, so a committed `reviewed_diff_hash` always describes the
+    committed `reviewed_head`.
+    """
+    pr_number: int
+    head: str | None
+    diff_hash: str | None
+
+
 @dataclass(frozen=True)
 class DispatchResult:
     """What the external phase actually achieved, for the commit phase."""
@@ -786,14 +820,16 @@ class Supervisor:
 
     # ------------------------------------------------ C-18 dispatch harness
 
-    #: role -> the three methods that role supplies. Stages 5 and 6 add one
-    #: entry each; nothing else in `execute_dispatches`,
-    #: `apply_dispatch_result`, `confirm_dispatches` or
-    #: `resume_dispatch_claims` changes.
+    #: role -> the three methods that role supplies. Stage 6 adds the fixer;
+    #: nothing else in `execute_dispatches`, `apply_dispatch_result`,
+    #: `confirm_dispatches` or `resume_dispatch_claims` changes.
     DISPATCH_HANDLERS: dict[str, _DispatchHandler] = {
         "builder": _DispatchHandler(execute="_execute_builder_dispatch",
                                     commit="_commit_builder_dispatch",
                                     fail="_fail_builder_dispatch"),
+        "reviewer": _DispatchHandler(execute="_execute_reviewer_dispatch",
+                                     commit="_commit_reviewer_dispatch",
+                                     fail="_fail_reviewer_dispatch"),
     }
 
     def _plan_dispatch(self, plan: DispatchPlan) -> None:
@@ -865,6 +901,69 @@ class Supervisor:
                     job_file=present, worktree=worktree, port=port,
                     worker_live=(worker in entries)
                     if entries is not None else None)
+        return observations
+
+    def observe_review_heads(self, snapshot: dict, open_prs: list[dict]) -> dict:
+        """Phase A for the reviewer. Read-only, OUTSIDE the state lock.
+
+        Returns {pr_number: ReviewObservation} for every open pull request a
+        reviewer could be dispatched against this tick. The `gh.pr_diff_sha`
+        and `routing.material_diff_hash` calls `dispatch_reviewer` used to
+        make under the lock are made here instead.
+
+        Narrowed the same way the security heads are: a pull request whose
+        task is not in a routing state, is already merged, already has a
+        reviewer or fixer (worker OR claim), or whose verdict routes it to a
+        fixer rather than a reviewer, is not asked about at all. A tick with
+        nothing to review therefore adds no GitHub round trip.
+
+        The snapshot is non-authoritative. Everything here is a question, not
+        a decision: T1 re-reads under the lock and re-checks the task, the
+        record and the verdict before it plans anything. A snapshot whose
+        worker map cannot be read yields no observations, so every pull
+        request defers rather than being dispatched from an unreadable
+        document.
+        """
+        if not isinstance(snapshot.get("workers"), dict):
+            return {}
+        open_numbers = {pr.get("number") for pr in open_prs}
+        records = snapshot.get("prs") or {}
+        wanted: set[int] = set()
+        for task in (snapshot.get("tasks") or {}).values():
+            if not isinstance(task, dict):
+                continue
+            pr_number = task.get("pr")
+            if not isinstance(pr_number, int) or pr_number not in open_numbers:
+                continue
+            if task.get("state") not in self.ROUTING_STATES:
+                continue
+            record = records.get(str(pr_number))
+            if not isinstance(record, dict) or record.get("merged"):
+                continue
+            if task.get("state") == "REVIEW" and \
+                    record.get("review_verdict") == routing.REVIEW_PASS and \
+                    record.get("approval_current"):
+                # route_prs makes this one a merge candidate and never reaches
+                # route_awaiting_dispatch at all.
+                continue
+            if record.get("review_verdict") == routing.REVIEW_FAIL and \
+                    record.get("pending_findings"):
+                # route_awaiting_dispatch sends this one to the fixer. Asking
+                # GitHub for a head nothing will use is a round trip for work
+                # nobody is waiting on.
+                continue
+            if self.has_worker(snapshot, pr_number, ("reviewer", "fixer")):
+                continue
+            wanted.add(pr_number)
+
+        observations: dict[int, ReviewObservation] = {}
+        for pr_number in sorted(wanted):
+            head = gh.pr_diff_sha(self.cfg.github_repo, pr_number)
+            observations[pr_number] = ReviewObservation(
+                pr_number=pr_number, head=head,
+                diff_hash=(routing.material_diff_hash(self.cfg.github_repo,
+                                                      pr_number)
+                           if head else None))
         return observations
 
     def resume_dispatch_claims(self, doc: dict, observations: dict) -> None:
@@ -1430,81 +1529,355 @@ class Supervisor:
                 return True
         return False
 
-    def dispatch_reviewer(self, doc: dict, task: dict, pr_number: int) -> None:
+    def dispatch_reviewer(self, doc: dict, task: dict, pr_number: int,
+                          observation: "ReviewObservation | None") -> None:
+        """C-18 stage 5, planning half. STATE ONLY - this runs inside T1.
+
+        `observation` is `observe_review_heads`' answer for this pull request,
+        taken before the lock. It is REQUIRED rather than defaulted so a
+        caller that forgets it defers loudly instead of silently reviewing
+        nothing, and there is deliberately no fallback fetch: a GitHub call
+        under the lock is the defect this stage removes.
+
+        Everything external - the evidence collection, the prompt, the
+        worktree, the job file and the spawn - happens in
+        `_execute_reviewer_dispatch` after T1 commits. All this half does is
+        reserve the reviewer slot with a durable claim bound to the observed
+        head.
+        """
         if not providers.may(doc, "review"):
             self.transition(doc, task["id"], "WAITING_PROVIDER_RESET",
                             "reviewer provider paused")
             return
+        if state_mod.dispatch_claim_active(
+                state_mod.dispatch_claim(task, "reviewer")):
+            # A claim already reserves this pull request's reviewer. Planning
+            # again would mint a second worker name for one reservation;
+            # resume_dispatch_claims drives the existing one instead.
+            return
         record = doc["prs"][str(pr_number)]
-        worker = f"{task['id'].lower()}-review-{record['review_cycles'] + 1}"
-        role_cfg = self.cfg.roles["reviewer"]
 
-        # Each cycle reviews in its own worktree, on its own branch, cut from the
-        # pull request's CURRENT head. A per-cycle branch cannot collide with an
-        # earlier cycle's checkout, and basing it on the live head guarantees the
-        # re-review sees the Fixer's changes rather than superseded code.
-        branch = task["branch"]
-        cycle = record["review_cycles"] + 1
-        head = gh.pr_diff_sha(self.cfg.github_repo, pr_number)
-        if head is None:
+        if observation is None or observation.pr_number != pr_number:
+            # No pre-transaction observation was taken for this pull request,
+            # or the answer failed its binding check. Defer to the next tick.
+            self.log("REVIEW_DISPATCH_DEFERRED", task_id=task["id"],
+                     pr_id=pr_number, role="reviewer", outcome="OBSERVATION_MISSING",
+                     activity_class="ORCHESTRATION",
+                     metadata_redacted={
+                         "reason": "no pre-transaction GitHub observation"})
+            return
+        if observation.head is None:
             self.on_dispatch_failure(doc, task, pr_number, "reviewer",
                                      "could not resolve the pull request head")
             return
 
+        # Each cycle reviews in its own worktree, on its own branch, cut from the
+        # pull request's observed head. A per-cycle branch cannot collide with an
+        # earlier cycle's checkout, and basing it on the observed head guarantees
+        # the re-review sees the Fixer's changes rather than superseded code.
+        branch = task["branch"]
+        cycle = record["review_cycles"] + 1
+        worker = f"{task['id'].lower()}-review-{cycle}"
+        try:
+            claim = state_mod.new_dispatch_claim(
+                role="reviewer", task_id=task["id"], worker=worker, branch=branch,
+                claimed_at=clock.iso(self.now()),
+                lease_expires_at=self._lease_expires("reviewer"),
+                pr=pr_number, observed_head=observation.head,
+                context={
+                    "cycle": cycle,
+                    # Cycle segment first. `review/<branch>/c2` would nest a
+                    # ref under the existing `review/<branch>` ref, which git
+                    # stores as a file and cannot also be a directory.
+                    # `review/c2/<branch>` cannot collide with any other review
+                    # branch by construction.
+                    "review_branch": f"review/c{cycle}/{branch}",
+                    # Observed in the SAME breath as the head, so the hash
+                    # committed below always describes the head committed
+                    # beside it. The execute phase proves that head has not
+                    # moved before either is used.
+                    "diff_hash": observation.diff_hash,
+                    # The prompt is rendered outside the lock, so the one field
+                    # it reads travels as a frozen copy rather than a reference
+                    # into this transaction's document.
+                    "task_title": task.get("title") or task["id"],
+                })
+        except ValueError as exc:
+            # A claim state would refuse is worse than no claim: the reviewer
+            # slot would be reserved by something that can never spawn.
+            self.log("DISPATCH_CLAIM_REFUSED", task_id=task["id"], pr_id=pr_number,
+                     role="reviewer", activity_class="FAILED_WORK",
+                     outcome="CLAIM_REFUSED",
+                     metadata_redacted={"error": str(exc)})
+            self.on_dispatch_failure(doc, task, pr_number, "reviewer",
+                                     "reviewer claim refused")
+            return
+
+        state_mod.dispatch_claims(task)["reviewer"] = claim
+        self.log("DISPATCH_CLAIMED", task_id=task["id"], pr_id=pr_number,
+                 role="reviewer", branch=branch, agent_id=worker,
+                 activity_class="REVIEW", outcome="CLAIMED",
+                 metadata_redacted={"head": observation.head, "review_cycle": cycle,
+                                    "lease_expires_at": claim["lease_expires_at"]})
+        self._plan_dispatch(self.dispatch_plan(claim))
+
+    def _review_preflight(self, plan: DispatchPlan) -> str:
+        """Re-verify a pull request immediately before its review is
+        dispatched, and take it out of draft if it is one.
+
+        Returns "" when the review may proceed, or ONE finite code from
+        `REVIEW_PREFLIGHT_CODES`. Never an exception string.
+
+        GOVERNANCE. The approved authority amendment reads, verbatim:
+
+            "The Supervisor may mark a draft PR for a governed task ready for
+            review before independent review dispatch. This action grants no
+            approval or merge eligibility."
+
+        That grant is narrow and the four operator conditions are load-bearing:
+
+          1. RE-VERIFY FIRST. Association and head are re-derived from GitHub
+             in this one `pr_view`, not read off the plan. The plan was built
+             inside T1 earlier in this tick - or, on the recovery path, in a
+             previous tick - and marking a pull request ready on bookkeeping
+             that stale is exactly the mistake the amendment forbids. The plan
+             supplies only what the answer is checked AGAINST.
+          2. FAIL BY DEFERRING. Every disagreement returns a code, which fails
+             this dispatch; `_fail_reviewer_dispatch` releases the claim and
+             `route_awaiting_dispatch` re-routes the task next tick against a
+             freshly observed head. Nothing retries inside this call, and the
+             existing dispatch-failure limit bounds the re-routing.
+          3. IT GRANTS NOTHING, structurally. This method runs in the execute
+             phase, which holds no state document and no lock - there is no
+             `approval_current`, `review_verdict` or merge record in scope for
+             it to touch. The only thing it can return to the control plane is
+             a `DispatchResult`, and the commit half of a successful dispatch
+             sets `approval_current = False` and `review_verdict = None`
+             unconditionally. Marking ready can therefore only ever move the
+             pull request AWAY from merge eligibility, never towards it.
+          4. The draft path is EXCEPTIONAL, not routine: the builder opens
+             pull requests ready (`prompts` passes no `--draft` anywhere), so
+             a draft here means a human or an external tool made one.
+        """
+        repo = self.cfg.github_repo
+        view = gh.pr_view(repo, plan.pr)
+        if not isinstance(view, dict) or not view:
+            return self._review_deferred(plan, "PR_NOT_FOUND")
+        if (view.get("state") or "").upper() != "OPEN":
+            return self._review_deferred(plan, "PR_NOT_OPEN",
+                                         state=view.get("state"))
+        if view.get("headRefName") != plan.branch:
+            # The task/PR association, re-derived: this pull request must still
+            # be the one tracking this task's branch.
+            return self._review_deferred(plan, "PR_ASSOCIATION_MISMATCH",
+                                         branch=view.get("headRefName"))
+        if view.get("headRefOid") != plan.observed_head:
+            return self._review_deferred(plan, "HEAD_MOVED",
+                                         observed=view.get("headRefOid"))
+
+        if not view.get("isDraft"):
+            return ""
+        result = gh.mark_ready(repo, plan.pr)
+        if not result.ok:
+            return self._review_deferred(plan, "READY_FOR_REVIEW_REFUSED")
+        self.log("PR_MARKED_READY_FOR_REVIEW", task_id=plan.task_id,
+                 pr_id=plan.pr, role="reviewer", branch=plan.branch,
+                 activity_class="ORCHESTRATION", outcome="READY",
+                 metadata_redacted={
+                     "head": plan.observed_head,
+                     "grants": "NO_APPROVAL_NO_MERGE_ELIGIBILITY"})
+        return ""
+
+    def _review_deferred(self, plan: DispatchPlan, code: str, **detail) -> str:
+        """Annunciate one finite preflight diagnostic and return it."""
+        self.log("REVIEW_PREFLIGHT_DEFERRED", task_id=plan.task_id,
+                 pr_id=plan.pr, role="reviewer", agent_id=plan.worker,
+                 activity_class="REVIEW", outcome=code,
+                 metadata_redacted={"head": plan.observed_head, **detail})
+        return code
+
+    def _execute_reviewer_dispatch(self, plan: DispatchPlan) -> DispatchResult:
+        """C-18 stage 5, Phase C. NO STATE LOCK IS HELD.
+
+        Every call here used to run inside T1: the head resolution, the two
+        GitHub calls `evidence.collect` makes, the prompt file write, the
+        workmux/git worktree acquisition, the job file write and the spawn.
+
+        THE HEAD-MOVED RULE lives in `_review_preflight`, and it is the point
+        of the stage. The head was observed before T1; by the time this runs,
+        T1 has committed and - on the recovery path - the claim may have been
+        planned a whole tick ago. A review cut from a superseded commit would
+        still write `reviewed_head` as if it had reviewed the current one, and
+        the merge gate would then approve code no reviewer ever saw. So the
+        head is re-resolved and must still equal the one the claim is bound to.
+        Anything else, INCLUDING an unresolvable head, invalidates the plan:
+        a head that cannot be proved unchanged is not a head that has been
+        proved unchanged.
+        """
+        role_cfg = self.cfg.roles["reviewer"]
+        head = plan.observed_head
+        blocked = self._review_preflight(plan)
+        if blocked:
+            return DispatchResult(plan=plan, ok=False, reason=blocked)
+
         # Evidence Codex cannot reach from a read-only, no-network sandbox, bound
         # to this exact head. Agent self-assertions are deliberately excluded.
         items = evidence.collect(self.cfg.github_repo, head, self.ledger)
-        self.log("REVIEW_EVIDENCE_GATHERED", task_id=task["id"], pr_id=pr_number,
+        self.log("REVIEW_EVIDENCE_GATHERED", task_id=plan.task_id, pr_id=plan.pr,
                  activity_class="REVIEW", outcome="COLLECTED",
                  metadata_redacted={"head": head,
                                     "items": [i.as_dict() for i in items],
                                     "applicable": sum(1 for i in items if i.applies)})
 
-        prompt_text = prompts.reviewer(task, pr_number, branch, self.cfg.github_repo,
-                                       cycle, evidence.render(items, head))
-        prompt_path = prompts.write(worker, prompt_text)
-        # Cycle segment first. `review/<branch>/c2` would nest a ref under the
-        # existing `review/<branch>` ref, which git stores as a file and cannot
-        # also be a directory. `review/c2/<branch>` cannot collide with any other
-        # review branch by construction, so the question never arises.
+        cycle = plan.context.get("cycle") or 1
+        prompt_text = prompts.reviewer(
+            {"id": plan.task_id,
+             "title": plan.context.get("task_title") or plan.task_id},
+            plan.pr, plan.branch, self.cfg.github_repo, cycle,
+            evidence.render(items, head))
+        prompt_path = prompts.write(plan.worker, prompt_text)
         path, why = workers.acquire_worktree(
-            worker, f"review/c{cycle}/{branch}", head, self.cfg.tmux_session,
-            prompt_path, reuse_if_checked_out=False,
+            plan.worker, plan.context.get("review_branch")
+            or f"review/c{cycle}/{plan.branch}",
+            head, self.cfg.tmux_session, prompt_path, reuse_if_checked_out=False,
         )
         if path is None:
-            self.on_dispatch_failure(doc, task, pr_number, "reviewer", why)
-            return
+            return DispatchResult(plan=plan, ok=False, reason=why)
 
-        record["reviewed_head"] = head
-        record["reviewed_diff_hash"] = routing.material_diff_hash(
-            self.cfg.github_repo, pr_number
-        )
         job = workers.write_job(
-            worker, "reviewer", role_cfg.provider, role_cfg.model, task["id"], path,
-            prompt_path, self.tz, pr=pr_number,
+            plan.worker, "reviewer", role_cfg.provider, role_cfg.model,
+            plan.task_id, path, prompt_path, self.tz, pr=plan.pr,
             hard_timeout_seconds=self.cfg.extra["timeouts"]["reviewer"],
             effort=role_cfg.effort,
         )
-        started = workers.start_job(worker, job, path)
+        started = workers.start_job(plan.worker, job, path)
         if not started.ok:
-            self.on_dispatch_failure(doc, task, pr_number, "reviewer",
-                                     f"worker did not start: {started.stderr[:200]}")
+            self.log("WORKER_START_FAILED", task_id=plan.task_id, pr_id=plan.pr,
+                     role="reviewer", activity_class="FAILED_WORK", outcome="FAILED",
+                     metadata_redacted={"stderr": started.stderr[:500]})
+            return DispatchResult(
+                plan=plan, ok=False,
+                reason=f"worker did not start: {started.stderr[:200]}")
+        return DispatchResult(plan=plan, ok=True, worktree=str(path))
+
+    def _commit_reviewer_dispatch(self, doc: dict, plan: DispatchPlan,
+                                  result: DispatchResult) -> None:
+        """C-18 stage 5, commit side. STATE ONLY.
+
+        `review_cycles`, the cleared approval, the worker record and the REVIEW
+        transition used to commit in the same transaction as the spawn. They
+        now commit after it, which is what makes `review_cycles` honest - it
+        still counts exactly one per review that actually started.
+
+        `reviewed_head` is written from the claim's `observed_head`, never from
+        a fresh fetch, because that is the commit the worktree was cut from and
+        the commit the reviewer is actually reading. The identity re-check
+        below includes it: a claim whose head differs is a DIFFERENT
+        reservation that happens to share a worker name - the same cycle
+        re-planned at a newer head - and committing this result against it
+        would bind the new reservation's record to the old reservation's SHA.
+        """
+        task, claim = self._current_dispatch_claim(doc, plan)
+        if task is None:
+            self.log("DISPATCH_COMMIT_REFUSED", task_id=plan.task_id,
+                     pr_id=plan.pr, role="reviewer", agent_id=plan.worker,
+                     activity_class="ORCHESTRATION", outcome="TASK_GONE")
+            return
+        if doc.get("workers", {}).get(plan.worker):
+            # Already committed - a lost confirm converged by recovery, or a
+            # recovery that raced its own confirm. Idempotent by design.
+            self._clear_dispatch_claim(task, "reviewer")
+            return
+        if claim is None:
+            self.log("DISPATCH_COMMIT_REFUSED", task_id=plan.task_id,
+                     pr_id=plan.pr, role="reviewer", agent_id=plan.worker,
+                     activity_class="ORCHESTRATION", outcome="CLAIM_SUPERSEDED")
+            return
+        if claim.get("observed_head") != plan.observed_head:
+            self.log("DISPATCH_COMMIT_REFUSED", task_id=plan.task_id,
+                     pr_id=plan.pr, role="reviewer", agent_id=plan.worker,
+                     activity_class="ORCHESTRATION", outcome="HEAD_REBOUND",
+                     metadata_redacted={"head": plan.observed_head,
+                                        "observed": claim.get("observed_head")})
+            return
+        if task.get("pr") != plan.pr or task.get("branch") != plan.branch:
+            # The state-side half of the association re-check the preflight
+            # makes against GitHub: a task re-attached to a different pull
+            # request or branch between plan and commit must not have this
+            # review's cycle, head and worker written onto it.
+            self._clear_dispatch_claim(task, "reviewer")
+            self.log("DISPATCH_COMMIT_REFUSED", task_id=plan.task_id,
+                     pr_id=plan.pr, role="reviewer", agent_id=plan.worker,
+                     activity_class="ORCHESTRATION",
+                     outcome="PR_ASSOCIATION_MISMATCH",
+                     metadata_redacted={"branch": task.get("branch"),
+                                        "pr": task.get("pr")})
+            return
+        record = (doc.get("prs") or {}).get(str(plan.pr))
+        if record is None:
+            # The pull request record went away between plan and commit. The
+            # claim is released so nothing holds the slot, and no record is
+            # invented to write a review cycle into.
+            self._clear_dispatch_claim(task, "reviewer")
+            self.log("DISPATCH_COMMIT_REFUSED", task_id=plan.task_id,
+                     pr_id=plan.pr, role="reviewer", agent_id=plan.worker,
+                     activity_class="ORCHESTRATION", outcome="PR_RECORD_GONE")
             return
 
+        role_cfg = self.cfg.roles["reviewer"]
+        started_at = clock.iso(self.now())
+        record["reviewed_head"] = plan.observed_head
+        record["reviewed_diff_hash"] = plan.context.get("diff_hash")
         record["review_cycles"] += 1
         record["approval_current"] = False
         record["review_verdict"] = None
-        task["worker"] = worker
-        doc["workers"][worker] = state_mod.new_worker_record(
-            "reviewer", task["id"], branch, clock.iso(self.now()), pr=pr_number,
-            worktree=str(path),
+        task["worker"] = plan.worker
+        worker_record = state_mod.new_worker_record(
+            "reviewer", plan.task_id, plan.branch, started_at, pr=plan.pr,
+            worktree=result.worktree,
             lease_expires_at=self._lease_expires("reviewer"))
-        task.setdefault("retained_worktrees", {}).pop(str(path), None)
-        self.transition(doc, task["id"], "REVIEW", f"dispatched review cycle "
-                                                   f"{record['review_cycles']}")
-        self.log("REVIEW_DISPATCHED", task_id=task["id"], pr_id=pr_number, role="reviewer",
-                 provider=role_cfg.provider, model=role_cfg.model, agent_id=worker,
-                 activity_class="REVIEW", outcome="DISPATCHED")
+        # The SHA this specific worker is reviewing, bound to the worker rather
+        # than to the mutable per-PR field a later cycle overwrites. It is what
+        # REVIEW_RESULT attributes the verdict to.
+        worker_record["head"] = plan.observed_head
+        doc["workers"][plan.worker] = worker_record
+        if result.worktree:
+            task.setdefault("retained_worktrees", {}).pop(result.worktree, None)
+        self._clear_dispatch_claim(task, "reviewer")
+        self.transition(doc, plan.task_id, "REVIEW", f"dispatched review cycle "
+                                                     f"{record['review_cycles']}")
+        # `head_sha` is passed as a BARE KWARG, not inside metadata_redacted.
+        # `ledger.FIELDS` has no `head_sha`, and `Ledger.append` merges every
+        # unrecognised kwarg into `metadata_redacted` - so this lands at
+        # `metadata_redacted.head_sha` with no change to ledger.py and no
+        # top-level spelling. The C-04 composition layer reads both places and
+        # treats a disagreement between them as fatal, so it is emitted once
+        # and only once. `agent_id` names the worker, which is what reviewer
+        # identity verification checks the SHA-bound result against.
+        self.log("REVIEW_DISPATCHED", task_id=plan.task_id, pr_id=plan.pr,
+                 role="reviewer", provider=role_cfg.provider, model=role_cfg.model,
+                 agent_id=plan.worker, branch=plan.branch,
+                 activity_class="REVIEW", outcome="DISPATCHED",
+                 head_sha=plan.observed_head,
+                 metadata_redacted={"review_cycle": record["review_cycles"]})
+
+    def _fail_reviewer_dispatch(self, doc: dict, plan: DispatchPlan,
+                                result: DispatchResult) -> None:
+        """C-18 stage 5, failure side. STATE ONLY.
+
+        The claim is released first, so `route_awaiting_dispatch` is free to
+        re-route the task on the next tick, and then the shared failure
+        accounting runs exactly as it did before C-18.
+        """
+        task, claim = self._current_dispatch_claim(doc, plan)
+        if task is None or claim is None:
+            self.log("DISPATCH_FAILURE_REFUSED", task_id=plan.task_id,
+                     pr_id=plan.pr, role="reviewer", agent_id=plan.worker,
+                     activity_class="ORCHESTRATION",
+                     outcome="TASK_GONE" if task is None else "CLAIM_SUPERSEDED")
+            return
+        self._clear_dispatch_claim(task, "reviewer")
+        self.on_dispatch_failure(doc, task, plan.pr, "reviewer", result.reason)
 
     def dispatch_fixer(self, doc: dict, task: dict, pr_number: int,
                        findings: list[dict]) -> None:
@@ -1588,8 +1961,25 @@ class Supervisor:
         left in a state the supervisor retries on the next tick - and once the
         failures reach the existing repair-cycle limit it escalates to a human
         rather than retrying forever.
+
+        SHARED BY THE REVIEWER AND THE FIXER, and reached two ways. Before
+        C-18 the only caller was a dispatch that had failed inside T1, where
+        the pull request record it just read was certain to be there. A
+        harness role now also reaches it from the commit transaction that runs
+        AFTER T1 has committed, and in that window the record can legitimately
+        be gone - an externally merged pull request completes its task and the
+        record goes with it. A missing record is therefore refused and logged,
+        never invented and never allowed to abort the transaction with a
+        KeyError that would also discard the claim release beside it. With the
+        record present, every line below is exactly what it was.
         """
-        record = doc["prs"][str(pr_number)]
+        record = (doc.get("prs") or {}).get(str(pr_number))
+        if record is None:
+            self.log("DISPATCH_FAILURE_REFUSED", task_id=task["id"],
+                     pr_id=pr_number, role=role, activity_class="ORCHESTRATION",
+                     outcome="PR_RECORD_GONE",
+                     metadata_redacted={"reason": reason})
+            return
         record["dispatch_failures"] = record.get("dispatch_failures", 0) + 1
         failures = record["dispatch_failures"]
         self.log("DISPATCH_FAILED", task_id=task["id"], pr_id=pr_number, role=role,
@@ -2645,7 +3035,14 @@ class Supervisor:
         record["approval_current"] = False
         record["review_verdict"] = None
         self.transition(doc, task["id"], "REVIEW", "fix complete; returning to reviewer")
-        self.dispatch_reviewer(doc, task, pr_number)
+        # C-18 stage 5: this runs inside T1, from reap_workers' callback, and
+        # the head a review must be cut from is observed BEFORE the lock. No
+        # observation exists for this pull request - at observation time the
+        # fixer was still live - so the dispatch defers by design. The task is
+        # left in REVIEW with its verdict cleared and no worker, which is
+        # exactly what route_awaiting_dispatch picks up on the next tick,
+        # against a head observed after the fix landed rather than before it.
+        self.dispatch_reviewer(doc, task, pr_number, None)
 
     def on_reviewer_finished(self, doc: dict, worker: str, meta: dict, status: dict) -> None:
         task = doc["tasks"].get(meta["task_id"])
@@ -2685,9 +3082,21 @@ class Supervisor:
                     else None)
 
         record["last_review_at"] = clock.iso(self.now())
+        # C-18 stage 5: the verdict is bound to the exact commit it judged.
+        # `meta["head"]` is written on THIS worker's record at dispatch, so it
+        # cannot be overwritten by a later cycle the way `reviewed_head` can;
+        # the per-PR field is the fallback for a worker record minted before
+        # this binding existed. When neither is known the key is still emitted,
+        # as null - an unbound review must be visibly unbound to anything
+        # composing a merge gate, never silently absent.
+        #
+        # `head_sha` is a bare kwarg for the same reason as REVIEW_DISPATCHED:
+        # `Ledger.append` merges it into `metadata_redacted`, one spelling
+        # only. `agent_id` names the worker the SHA-bound result belongs to.
         self.log("REVIEW_RESULT", task_id=task["id"], pr_id=pr_number, role="reviewer",
                  provider=self.cfg.roles["reviewer"].provider, agent_id=worker,
                  activity_class="REVIEW", outcome=review.verdict,
+                 head_sha=meta.get("head") or record.get("reviewed_head"),
                  metadata_redacted=review.as_dict())
 
         if (review.verdict == routing.REVIEW_UNPARSEABLE or not consistent
@@ -2839,7 +3248,8 @@ class Supervisor:
         return observations
 
     def route_prs(self, doc: dict, cs: clock.ClockState, prs: list[dict],
-                  pr_observations: dict) -> list[tuple[str, int]]:
+                  pr_observations: dict,
+                  review_observations: dict | None = None) -> list[tuple[str, int]]:
         """Route every PR-bearing task, and return the merge-ready ones.
 
         C-14.1: routing decides, it does not merge. Candidates are returned as
@@ -2853,6 +3263,10 @@ class Supervisor:
         caller that forgets it fails loudly instead of silently losing
         external-merge detection. A pull request with no entry is deferred,
         and there is no fallback fetch to fall back to.
+
+        C-18 stage 5: `review_observations` is `observe_review_heads`' result
+        for this tick, keyed the same way, and is passed straight through to
+        `dispatch_reviewer`. It is plumbing only - nothing here reads it.
         """
         candidates: list[tuple[str, int]] = []
         open_prs = {pr["number"]: pr for pr in prs}
@@ -2920,14 +3334,16 @@ class Supervisor:
                 candidates.append((task["id"], pr_number))
                 continue
 
-            self.route_awaiting_dispatch(doc, task, pr_number, record)
+            self.route_awaiting_dispatch(doc, task, pr_number, record,
+                                         review_observations)
 
         return candidates
 
     ROUTING_STATES = ("PR_OPEN", "REVIEW", "FIX_REQUIRED")
 
     def route_awaiting_dispatch(self, doc: dict, task: dict, pr_number: int,
-                                record: dict) -> None:
+                                record: dict,
+                                review_observations: dict | None = None) -> None:
         """A PR-bearing task in a routing state with no live worker is waiting.
 
         This is the general recovery rule. A dispatch that cannot obtain its
@@ -2972,7 +3388,8 @@ class Supervisor:
                      metadata_redacted={
                          "from_state": task["state"], "verdict": verdict,
                          "dispatch_failures": record.get("dispatch_failures", 0)})
-        self.dispatch_reviewer(doc, task, pr_number)
+        self.dispatch_reviewer(doc, task, pr_number,
+                               (review_observations or {}).get(pr_number))
 
     def has_worker(self, doc: dict, pr_number: int, roles: tuple[str, ...]) -> bool:
         """Whether this PR already has a worker, or a claim on one, in these roles.
@@ -3563,11 +3980,16 @@ class Supervisor:
         security_observations: dict = {}
         pr_observations: dict = {}
         dispatch_observations: dict = {}
+        review_observations: dict = {}
         if self.store.exists():
             snapshot = self.store.read()
             # C-18 stage 1: the `gh pr view` route_prs used to make while
             # holding the lock. Taken here, passed in below.
             pr_observations = self.observe_closed_prs(snapshot, open_prs)
+            # C-18 stage 5: the head and material diff hash dispatch_reviewer
+            # used to fetch inside T1. Only for pull requests a reviewer could
+            # actually be dispatched against this tick.
+            review_observations = self.observe_review_heads(snapshot, open_prs)
             # Heads are resolved ONLY for pull requests whose task actually
             # needs evidence. gh.pr_diff_sha calls gh.pr_view, so asking for
             # every open PR every tick would add a GitHub round trip per PR
@@ -3640,7 +4062,8 @@ class Supervisor:
             # publishing files from it would put external work back under the
             # lock. Only finished records cross this boundary.
             planned_security = self.route_evidence(doc, security_observations)
-            merge_candidates = self.route_prs(doc, cs, open_prs, pr_observations)
+            merge_candidates = self.route_prs(doc, cs, open_prs, pr_observations,
+                                              review_observations)
             self.detect_stale(doc)
             self.detect_lease_expiry(doc)
 
