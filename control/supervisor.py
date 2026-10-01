@@ -21,6 +21,8 @@ from types import MappingProxyType
 from typing import Mapping
 
 from . import (
+    accessibility_contract,
+    accessibility_evidence,
     budget,
     clock,
     config,
@@ -3157,6 +3159,224 @@ class Supervisor:
         # Until the accessibility legs are dispatched the gate cannot fire,
         # so behaviour is unchanged today; what changed is that the exit
         # exists and is governed by evidence rather than by a comment.
+        self.advance_if_evidence_complete(doc, task, pr_number, head)
+
+    # ============================================================
+    # C-05.3b: the AUTOMATED accessibility half, on G2/G9's lifecycle.
+    #
+    # plan   -> T1, state only: pick a port WITHOUT binding, write the
+    #           claim. The claim is the durable reservation, and it is
+    #           what makes the port unavailable to a Builder.
+    # execute-> outside every transaction: install, build, serve, scan,
+    #           tear down. accessibility_evidence.run_attempt owns that
+    #           sequence; nothing here performs it.
+    # commit -> its own transaction, re-verifying the claim and the head
+    #           before anything the attempt said is believed.
+    # ============================================================
+
+    def _accessibility_budget(self) -> accessibility_evidence.AttemptBudget:
+        return accessibility_evidence.AttemptBudget.from_timeouts(
+            self.cfg.extra["timeouts"])
+
+    def _accessibility_auto_slots_free(self, doc: dict, pr_number: int) -> bool:
+        """G7's bound, counting claims rather than processes.
+
+        A claim that has not spawned yet still occupies the slot: counting
+        live servers instead would let two attempts start between a plan
+        and its execute.
+        """
+        used = 0
+        for number, record in (doc.get("prs") or {}).items():
+            if str(number) == str(pr_number):
+                continue
+            claim = record.get("accessibility_auto") \
+                if isinstance(record, dict) else None
+            if isinstance(claim, dict) and claim.get("port_released") is not True:
+                used += 1
+        return used < self.cfg.max_accessibility_auto
+
+    def _accessibility_auto_dispatch_block(self, doc: dict) -> str:
+        """Why a NEW automated attempt may not start, or "" if it may.
+
+        DELIBERATELY NOT the security dispatch block, which also gates on
+        `providers.may(doc, "review")` and on the security provider being
+        usable. The automated half consults NO provider: it installs,
+        builds, serves and drives a local browser. Gating it on a provider
+        it never calls would hold accessibility evidence hostage to an
+        unrelated outage, and would be claiming a control that does not
+        apply rather than one that does.
+
+        The two that DO apply are the two about this process:
+
+        * frozen_at - a freeze set by cli.py's human freeze survives into
+          ticks where the clock has not expired, so tick's expiry return
+          does not cover it;
+        * stopping - a SIGTERM has arrived. Starting a build and a server
+          that the shutdown will not tear down is how a port leaks past
+          the run.
+        """
+        if doc.get("frozen_at"):
+            return "RUN_FROZEN"
+        if self.stopping:
+            return "SUPERVISOR_STOPPING"
+        return ""
+
+    @staticmethod
+    def _next_accessibility_attempt_id(claim) -> str | None:
+        """attempt-NNNN for the next attempt, or None if the space is spent.
+
+        Derived from the existing claim rather than from a new counter
+        field, so a record written before C-05.3b needs no migration.
+        """
+        if not isinstance(claim, dict):
+            return routing.ACCESSIBILITY_ATTEMPT_FMT.format(1)
+        current = claim.get("attempt_id")
+        if not isinstance(current, str) or \
+                not routing._ACCESSIBILITY_ATTEMPT_RE.match(current):
+            return routing.ACCESSIBILITY_ATTEMPT_FMT.format(1)
+        ordinal = int(current.split("-")[1]) + 1
+        if ordinal > routing.ACCESSIBILITY_ORDINAL_MAX:
+            # Four digits wide, so 9999 is the last attempt that can be
+            # NAMED. Minting a five-digit id would produce a claim its own
+            # validator refuses - worse than refusing to mint one.
+            return None
+        return routing.ACCESSIBILITY_ATTEMPT_FMT.format(ordinal)
+
+    def plan_accessibility_auto(self, doc: dict, task: dict, pr_number: int,
+                                head: str):
+        """T1. Claim a port and an attempt, or return None. STATE ONLY.
+
+        Performs no bind, no network operation and no filesystem read -
+        `select_port_candidates` is the no-bind half C-18 stage 3 split
+        out precisely so this can run under the lock.
+        """
+        record = doc["prs"].get(str(pr_number))
+        if not isinstance(record, dict):
+            return None
+        claim = record.get("accessibility_auto")
+        if isinstance(claim, dict):
+            # An unreleased claim for THIS head is still in flight; one for
+            # another head is stale and may be replaced, but only once its
+            # port is back - otherwise a head move would leak a server.
+            if claim.get("port_released") is not True:
+                return None
+            if claim.get("sha") == head and claim.get("claim_state") == "COMPLETE" \
+                    and claim.get("verdict") is not None:
+                return None  # already answered for this head
+        if not self._accessibility_auto_slots_free(doc, pr_number):
+            return None
+        blocked = self._accessibility_auto_dispatch_block(doc)
+        if blocked:
+            self.log("ACCESSIBILITY_EVIDENCE_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome=blocked, metadata_redacted={"head": head})
+            return None
+
+        attempt_id = self._next_accessibility_attempt_id(claim)
+        if attempt_id is None:
+            self.log("ACCESSIBILITY_EVIDENCE_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome="ORDINAL_EXHAUSTED",
+                     metadata_redacted={"head": head})
+            return None
+        candidates, why = workers.select_port_candidates(doc)
+        if not candidates:
+            self.log("ACCESSIBILITY_EVIDENCE_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome="NO_PORT", metadata_redacted={"head": head})
+            return None
+
+        fresh = {
+            "sha": head,
+            "attempt_id": attempt_id,
+            "claim_state": "PLANNED",
+            "claimed_at": clock.iso(self.now()),
+            "port": candidates[0],
+            "port_released": False,
+            "verdict": None,
+            "reason": "",
+        }
+        ok, diagnostic = routing.accessibility_auto_claim_is_valid(fresh)
+        if not ok:
+            # A claim its own validator refuses is worse than no claim:
+            # the attempt would look made and never be actionable.
+            self.log("ACCESSIBILITY_EVIDENCE_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome=diagnostic, metadata_redacted={"head": head})
+            return None
+        record["accessibility_auto"] = fresh
+        self.log("ACCESSIBILITY_EVIDENCE_CLAIMED", task_id=task["id"],
+                 pr_id=pr_number, activity_class="ORCHESTRATION",
+                 outcome="PLANNED",
+                 metadata_redacted={"head": head, "attempt_id": attempt_id,
+                                    "port": fresh["port"]})
+        return accessibility_evidence.AccessibilityPlan(
+            task_id=task["id"], pr=pr_number, sha=head,
+            attempt_id=attempt_id, port=fresh["port"])
+
+    def ingest_accessibility_auto(self, doc: dict, task: dict, pr_number: int,
+                                  head: str, plan, outcome) -> None:
+        """Commit one attempt's answer, re-verifying what it acted on.
+
+        G9: claim ownership AND the exact head are revalidated before any
+        of this is believed. A result for another attempt, another head or
+        a claim that has moved on is DISCARDED - it is evidence about a
+        world that no longer exists.
+        """
+        record = doc["prs"].get(str(pr_number))
+        if not isinstance(record, dict):
+            return
+        claim = record.get("accessibility_auto")
+        if not isinstance(claim, dict):
+            return
+        if claim.get("sha") != head or \
+                claim.get("attempt_id") != plan.attempt_id or \
+                claim.get("port") != plan.port:
+            self.log("ACCESSIBILITY_RESULT_DISCARDED", task_id=task["id"],
+                     pr_id=pr_number, activity_class="REVIEW",
+                     outcome="CLAIM_MOVED",
+                     metadata_redacted={"head": head,
+                                        "attempt_id": plan.attempt_id})
+            return
+        if claim.get("claim_state") == "COMPLETE" and \
+                claim.get("port_released") is True:
+            return  # idempotent: a repeated tick cannot duplicate findings
+
+        claim["claim_state"] = "COMPLETE"
+        claim["port_released"] = bool(outcome.port_released)
+        if outcome.status != accessibility_evidence.COMPLETED:
+            # An apparatus failure is NOT a product verdict. A run that did
+            # not happen is not evidence that the page is inaccessible, so
+            # this never routes to FIX_REQUIRED (gate_evidence's rule 2).
+            claim["verdict"] = None
+            claim["reason"] = outcome.reason
+            self.log("ACCESSIBILITY_RESULT", task_id=task["id"],
+                     pr_id=pr_number, role="accessibility",
+                     activity_class="REVIEW", outcome=outcome.reason,
+                     metadata_redacted={"head": head, "phase": outcome.phase,
+                                        "attempt_id": plan.attempt_id,
+                                        "port_released": claim["port_released"]})
+            return
+
+        claim["verdict"] = outcome.verdict
+        claim["reason"] = ""
+        findings = accessibility_evidence.findings_for(outcome)
+        blocking = [f for f in findings
+                    if routing.accessibility_findings_block_merge([f])]
+        record["accessibility_findings"] = findings
+        self.log("ACCESSIBILITY_RESULT", task_id=task["id"], pr_id=pr_number,
+                 role="accessibility", activity_class="REVIEW",
+                 outcome=outcome.verdict,
+                 metadata_redacted={"head": head,
+                                    "attempt_id": plan.attempt_id,
+                                    "findings": len(findings),
+                                    "blocking": len(blocking),
+                                    "port_released": claim["port_released"]})
+        if outcome.verdict == accessibility_contract.ACCESSIBILITY_AUTO_FAIL:
+            record["pending_findings"] = blocking
+            self.transition(doc, task["id"], "FIX_REQUIRED",
+                            f"accessibility findings on {head[:12]}")
+            return
         self.advance_if_evidence_complete(doc, task, pr_number, head)
 
     def advance_if_evidence_complete(self, doc: dict, task: dict,

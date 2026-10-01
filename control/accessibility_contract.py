@@ -117,11 +117,26 @@ RESULT_EMPTY = "RESULT_EMPTY"
 SHA_MISMATCH = "SHA_MISMATCH"
 
 # The product server did not answer within the governed readiness budget.
-# Its producer does not exist yet: nothing in this repository starts a
-# product server, and what command would is an open governance question
-# (G3). The token is defined here so that when that half lands it has one
-# literal rather than inventing a second.
 PRODUCT_SERVER_UNREADY = "PRODUCT_SERVER_UNREADY"
+
+# ----------------------------------------- G3's blocking product states
+#
+# Approved 2026-10-01: "Missing product files, failed builds and
+# unavailable servers remain blocking; no NOT_APPLICABLE route." Each
+# needs its own finite diagnostic, because "the app would not build" and
+# "the app has no package.json" send a human to different places.
+#
+# These are ATTEMPT reasons, not accessibility findings. An attempt that
+# could not produce evidence is not a judgement that the product is
+# inaccessible - it is the absence of a judgement, which blocks.
+PRODUCT_ENTRYPOINT_MISSING = "PRODUCT_ENTRYPOINT_MISSING"
+PRODUCT_LOCKFILE_MISSING = "PRODUCT_LOCKFILE_MISSING"
+PRODUCT_INSTALL_FAILED = "PRODUCT_INSTALL_FAILED"
+PRODUCT_BUILD_FAILED = "PRODUCT_BUILD_FAILED"
+# The scan finished but the owned server could not be confirmed gone.
+# G2: the port stays claimed, so this is evidence of a cleanup that must
+# be retried, never a licence to reuse the port.
+PRODUCT_SERVER_NOT_RELEASED = "PRODUCT_SERVER_NOT_RELEASED"
 
 # --------------------------------------------- apparatus reasons, shared
 #
@@ -133,7 +148,8 @@ PROVIDER_FAILURE = security_contract.PROVIDER_FAILURE
 SPAWN_OR_RUN_INCOMPLETE = security_contract.SPAWN_OR_RUN_INCOMPLETE
 
 # The complete finite set of reasons an accessibility ATTEMPT - either
-# half - is not completed evidence. Exactly seventeen.
+# half - is not completed evidence. Twenty-two: the original seventeen
+# plus G3's five blocking product states, approved 2026-10-01.
 #
 # These describe an ATTEMPT's outcome. They are not claim-validation
 # diagnostics: why a claim RECORD is malformed is a different question
@@ -152,6 +168,11 @@ ACCESSIBILITY_FAILURE_REASONS = frozenset({
     RESULT_EMPTY,
     SHA_MISMATCH,
     PRODUCT_SERVER_UNREADY,
+    PRODUCT_ENTRYPOINT_MISSING,
+    PRODUCT_LOCKFILE_MISSING,
+    PRODUCT_INSTALL_FAILED,
+    PRODUCT_BUILD_FAILED,
+    PRODUCT_SERVER_NOT_RELEASED,
     TIMED_OUT,
     EXIT_NONZERO,
     OUTPUT_MISSING,
@@ -173,6 +194,11 @@ ACCESSIBILITY_AUTO_FAILURE_REASONS = frozenset({
     SHA_MISMATCH,
     CHECKS_INCOMPLETE,
     PRODUCT_SERVER_UNREADY,
+    PRODUCT_ENTRYPOINT_MISSING,
+    PRODUCT_LOCKFILE_MISSING,
+    PRODUCT_INSTALL_FAILED,
+    PRODUCT_BUILD_FAILED,
+    PRODUCT_SERVER_NOT_RELEASED,
     TIMED_OUT,
     EXIT_NONZERO,
     SPAWN_OR_RUN_INCOMPLETE,

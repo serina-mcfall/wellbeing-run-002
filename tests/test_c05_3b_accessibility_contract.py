@@ -41,7 +41,15 @@ VERDICT_TOKENS = ("ACCESSIBILITY_PASS", "ACCESSIBILITY_FAIL",
 # Defined in accessibility_contract itself.
 OWN_REASON_TOKENS = ("CLASSIFICATION_INVALID", "CHECKS_INCOMPLETE",
                      "RESULT_MISSING", "RESULT_UNREADABLE", "RESULT_EMPTY",
-                     "SHA_MISMATCH", "PRODUCT_SERVER_UNREADY")
+                     "SHA_MISMATCH", "PRODUCT_SERVER_UNREADY",
+                     # G3's blocking product states, approved 2026-10-01.
+                     # "Missing product files, failed builds and unavailable
+                     # servers remain blocking" - each needs its own finite
+                     # diagnostic, because "would not build" and "has no
+                     # package.json" send a human to different places.
+                     "PRODUCT_ENTRYPOINT_MISSING", "PRODUCT_LOCKFILE_MISSING",
+                     "PRODUCT_INSTALL_FAILED", "PRODUCT_BUILD_FAILED",
+                     "PRODUCT_SERVER_NOT_RELEASED")
 
 # Aliased from security_contract - the same string means the same thing.
 ALIASED_REASON_TOKENS = ("OUTPUT_UNPARSEABLE", "VERDICT_UNRECOGNISED",
@@ -71,8 +79,11 @@ class VocabularyCase(unittest.TestCase):
             with self.subTest(token=name):
                 self.assertEqual(getattr(ac, name), name)
 
-    def test_the_seventeen_failure_reasons_are_exactly_these(self):
-        self.assertEqual(len(ac.ACCESSIBILITY_FAILURE_REASONS), 17)
+    def test_the_twenty_two_failure_reasons_are_exactly_these(self):
+        # Was seventeen. G3's five blocking product states were approved
+        # 2026-10-01 and added here; the count is asserted so a reason
+        # cannot arrive without this list being updated deliberately.
+        self.assertEqual(len(ac.ACCESSIBILITY_FAILURE_REASONS), 22)
         self.assertEqual(
             ac.ACCESSIBILITY_FAILURE_REASONS,
             frozenset(getattr(ac, name) for name in ALL_REASON_TOKENS))
