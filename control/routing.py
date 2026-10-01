@@ -395,11 +395,35 @@ def touches_ui(repo: str, number: int) -> bool:
     )
 
 
+# A finite condition vocabulary for the merge gate, so MERGE_BLOCKED carries a
+# machine-readable fact and not only prose. Two refusals that read similarly in
+# a sentence - a closed pull request and a draft one - are different conditions
+# needing different human actions, and a reader of the ledger must be able to
+# tell them apart without parsing English.
+MERGE_OK = "MERGE_OK"
+MERGE_GUARDRAIL_RED = "GUARDRAIL_RED"
+MERGE_NO_REVIEW_PASS = "NO_REVIEW_PASS"
+MERGE_APPROVAL_STALE = "APPROVAL_STALE"
+MERGE_PR_NOT_OPEN = "PR_NOT_OPEN"
+MERGE_PR_IS_DRAFT = "PR_IS_DRAFT"
+MERGE_HEAD_UNVERIFIABLE = "HEAD_SHA_UNVERIFIABLE"
+MERGE_HEAD_CHANGED = "HEAD_SHA_CHANGED"
+MERGE_DIFF_UNVERIFIABLE = "DIFF_UNVERIFIABLE"
+MERGE_DIFF_CHANGED = "DIFF_CHANGED"
+MERGE_CI_NOT_SATISFIED = "CI_NOT_SATISFIED"
+MERGE_CONFLICTING = "BRANCH_CONFLICTING"
+MERGE_BEHIND = "BRANCH_BEHIND"
+MERGE_STATE_BLOCKED = "MERGE_STATE_BLOCKED"
+
+
 @dataclass(frozen=True)
 class MergeDecision:
     allowed: bool
     reason: str
     invalidate_approval: bool = False
+    # One of the MERGE_* codes above. Prose is for humans; this is what the
+    # ledger and any report should key on.
+    condition: str = ""
 
 
 def evaluate_merge(pr: dict, record: dict, required_checks: tuple[str, ...],
@@ -408,39 +432,84 @@ def evaluate_merge(pr: dict, record: dict, required_checks: tuple[str, ...],
     number = pr.get("number")
 
     if red_guardrail_active:
-        return MergeDecision(False, "RED guardrail active")
+        return MergeDecision(False, "RED guardrail active", condition=MERGE_GUARDRAIL_RED)
 
     if record.get("review_verdict") != REVIEW_PASS:
-        return MergeDecision(False, "no current REVIEW_PASS from Codex")
+        return MergeDecision(False, "no current REVIEW_PASS from Codex",
+                             condition=MERGE_NO_REVIEW_PASS)
 
     if not record.get("approval_current", False):
-        return MergeDecision(False, "approval is not current")
+        return MergeDecision(False, "approval is not current",
+                             condition=MERGE_APPROVAL_STALE)
 
-    if pr.get("state") != "OPEN" or pr.get("isDraft"):
-        return MergeDecision(False, f"PR #{number} is not an open, ready pull request")
+    # Closed and draft are two different facts needing two different human
+    # actions. They used to share one sentence, so the ledger could not tell a
+    # pull request somebody closed from one nobody has taken out of draft - a
+    # draft could therefore stall a task silently. Taking a pull request out of
+    # draft is deliberately NOT done here: nothing in
+    # protocol/RUN-002-PROTOCOL-v2.0.md governs draft status, so automating it
+    # would amend a frozen specification by implication. See handover section 34.
+    if pr.get("state") != "OPEN":
+        return MergeDecision(False, f"PR #{number} is not open",
+                             condition=MERGE_PR_NOT_OPEN)
+    if pr.get("isDraft"):
+        return MergeDecision(
+            False,
+            f"PR #{number} is a draft and has not been marked ready for review",
+            condition=MERGE_PR_IS_DRAFT)
+
+    # Protocol v2 "Evidence provenance": "new SHA => regenerate required
+    # automated evidence". The head SHA is the thing the rule names, and
+    # reviewed_head is already recorded at dispatch
+    # (supervisor.dispatch_reviewer) - it was simply never compared here. The
+    # diff-hash check below is NOT a substitute: a force-push can produce a
+    # byte-identical diff from a different commit, which leaves the hash equal
+    # while every piece of SHA-bound evidence - CI runs, accessibility and
+    # security evidence, the review itself - belongs to a commit that is no
+    # longer the head. Both checks stay; they catch different things.
+    #
+    # Absence is a denial, not an exemption. A record or observation that
+    # carries no head cannot establish that the reviewed commit is the current
+    # one, and "nothing to compare" must never read as "nothing changed".
+    reviewed_head = record.get("reviewed_head")
+    observed_head = pr.get("headRefOid")
+    if not reviewed_head or not observed_head:
+        return MergeDecision(False, "reviewed head SHA could not be verified",
+                             invalidate_approval=True,
+                             condition=MERGE_HEAD_UNVERIFIABLE)
+    if reviewed_head != observed_head:
+        return MergeDecision(False, "head SHA changed since review",
+                             invalidate_approval=True,
+                             condition=MERGE_HEAD_CHANGED)
 
     reviewed_hash = record.get("reviewed_diff_hash")
     if not reviewed_hash or not current_diff_hash:
         return MergeDecision(False, "material diff could not be verified",
-                             invalidate_approval=True)
+                             invalidate_approval=True,
+                             condition=MERGE_DIFF_UNVERIFIABLE)
     if reviewed_hash != current_diff_hash:
         return MergeDecision(False, "material diff changed since review",
-                             invalidate_approval=True)
+                             invalidate_approval=True,
+                             condition=MERGE_DIFF_CHANGED)
 
     checks_ok, checks_detail = gh.checks_state(pr, required_checks)
     if not checks_ok:
-        return MergeDecision(False, f"required CI not satisfied ({checks_detail})")
+        return MergeDecision(False, f"required CI not satisfied ({checks_detail})",
+                             condition=MERGE_CI_NOT_SATISFIED)
 
     merge_state = (pr.get("mergeStateStatus") or "").upper()
     mergeable = (pr.get("mergeable") or "").upper()
     if mergeable == "CONFLICTING":
-        return MergeDecision(False, "branch conflicts with main", invalidate_approval=True)
+        return MergeDecision(False, "branch conflicts with main",
+                             invalidate_approval=True, condition=MERGE_CONFLICTING)
     if merge_state == "BEHIND":
-        return MergeDecision(False, "branch is behind main and needs reconciliation")
+        return MergeDecision(False, "branch is behind main and needs reconciliation",
+                             condition=MERGE_BEHIND)
     if merge_state in ("DIRTY", "BLOCKED"):
-        return MergeDecision(False, f"merge state {merge_state}")
+        return MergeDecision(False, f"merge state {merge_state}",
+                             condition=MERGE_STATE_BLOCKED)
 
-    return MergeDecision(True, "all merge gates satisfied")
+    return MergeDecision(True, "all merge gates satisfied", condition=MERGE_OK)
 
 
 def blank_pr_record(number: int, task_id: str, branch: str) -> dict:
@@ -450,6 +519,12 @@ def blank_pr_record(number: int, task_id: str, branch: str) -> dict:
         "branch": branch,
         "review_verdict": None,
         "approval_current": False,
+        # The head the reviewer was actually dispatched against. Written by
+        # supervisor.dispatch_reviewer and compared at merge time by
+        # evaluate_merge. Declared here as explicit absence, like the other
+        # optional fields, so a record that never reached review carries "no
+        # reviewed head" rather than no key at all.
+        "reviewed_head": None,
         "reviewed_diff_hash": None,
         "review_cycles": 0,
         "repair_cycles": 0,

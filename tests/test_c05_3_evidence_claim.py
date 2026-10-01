@@ -119,12 +119,13 @@ class PrRecordCase(unittest.TestCase):
         self.assertIn("security_evidence", record)
         self.assertIsNone(record["security_evidence"])
 
-    def test_the_existing_twelve_fields_are_untouched(self):
+    def test_the_existing_baseline_fields_are_untouched(self):
         record = routing.blank_pr_record(12, "TASK-001", "feat/x")
         self.assertEqual(
             {k: v for k, v in record.items() if k != "security_evidence"},
             {"number": 12, "task_id": "TASK-001", "branch": "feat/x",
              "review_verdict": None, "approval_current": False,
+             "reviewed_head": None,
              "reviewed_diff_hash": None, "review_cycles": 0,
              "repair_cycles": 0, "open_finding_ids": [],
              "last_review_at": None, "reconciled": False, "merged": False})

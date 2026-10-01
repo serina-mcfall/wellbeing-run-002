@@ -3118,9 +3118,13 @@ class Supervisor:
                          metadata_redacted={"reason": decision.reason})
                 self.transition(doc, task["id"], "PR_OPEN",
                                 f"approval invalidated: {decision.reason}")
+            # The finite condition code rides alongside the prose so a reader
+            # can tell a draft pull request from a closed one without parsing
+            # English. A draft is a reportable condition, not a silent stall.
             self.log("MERGE_BLOCKED", task_id=task["id"], pr_id=number, outcome="BLOCKED",
                      activity_class="ORCHESTRATION",
-                     metadata_redacted={"reason": decision.reason})
+                     metadata_redacted={"reason": decision.reason,
+                                        "condition": decision.condition})
             return
 
         result = gh.merge(repo, number)
