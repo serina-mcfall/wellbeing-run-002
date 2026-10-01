@@ -231,7 +231,24 @@ function shaBearingPaths(pkg) {
     }
     if (Array.isArray(section.checks)) {
       section.checks.forEach((check, index) => {
-        push(block + '.checks[' + index + '].sha', check && check.sha, true);
+        // A security surface marked `relevant: false` carries no result,
+        // no artifact_reference and no sha — the schema's own conditional
+        // says so: securityCheck requires only check_id and relevant, and
+        // requires result/artifact_reference/sha ONLY under
+        // `if relevant === true`. An accessibility check has no such
+        // conditional; sha is required on all ten unconditionally.
+        //
+        // Requiring a sha on an irrelevant surface denied every realistic
+        // package — a real task marks most of the twelve security surfaces
+        // irrelevant — so this gate could never return ELIGIBLE. That is
+        // fail-closed, and therefore safe, but a gate that can never open
+        // is not a gate; it is an outage waiting for T+00.
+        //
+        // A sha that IS present is still checked against the trusted head
+        // below, relevant or not: nothing is exempted, only un-required.
+        const required =
+          block !== 'security' || !check || check.relevant === true;
+        push(block + '.checks[' + index + '].sha', check && check.sha, required);
       });
     }
   }

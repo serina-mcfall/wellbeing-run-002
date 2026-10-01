@@ -46,6 +46,31 @@ function identityFor(ref) {
   return { kind: 'branch', ref: ref };
 }
 
+// The merge-eligibility decider the scenarios consult.
+//
+// `ctx.decide` lets a caller supply one. That is the swap handover
+// section 35.4 anticipated and section 35.8 item 1 called the largest
+// gap: with no override the scenarios run against the local STUB
+// (merge-eligibility.js) and prove only the SCENARIO, and with
+// production-gate.js's decider injected the very same scenarios are
+// decided by the real C-04 composition layer and prove the SYSTEM.
+//
+// One scenario definition, two deciders. Keeping a single definition is
+// the point - two copies would drift, and then "the production gate
+// passes the scenario" would stop meaning the same scenario.
+function deciderFor(ctx, repo, gh, identity) {
+  if (typeof ctx.decide === 'function') {
+    return (evidence, prNumber) => ctx.decide(evidence, prNumber, identity);
+  }
+  return (evidence, prNumber) =>
+    decideMergeEligibility({
+      repoRoot: repo.root,
+      identity: identity,
+      evidence: evidence,
+      pullRequest: gh.getPullRequest(prNumber),
+    });
+}
+
 // Uses the REAL task-record adapter against this repository's REAL
 // config/tasks.json. Nothing about the dependency graph is invented.
 function unblockDependents(mergedTaskIds, candidateTaskIds, repoRoot) {
@@ -81,15 +106,7 @@ function runMultiCycleScenario(ctx) {
   const taskId = ctx.taskId || 'TASK-001';
   const steps = [];
   const identity = identityFor(TASK_BRANCH);
-
-  function decide(evidence, prNumber) {
-    return decideMergeEligibility({
-      repoRoot: repo.root,
-      identity: identity,
-      evidence: evidence,
-      pullRequest: gh.getPullRequest(prNumber),
-    });
-  }
+  const decide = deciderFor(ctx, repo, gh, identity);
 
   // 1. Builder produces a real commit on a real task branch.
   repo.createBranch(TASK_BRANCH);
@@ -193,15 +210,7 @@ function runAutonomousLifecycle(ctx) {
   const branch = ctx.branch || TASK_BRANCH;
   const identity = identityFor(branch);
   const steps = [];
-
-  function decide(evidence, prNumber) {
-    return decideMergeEligibility({
-      repoRoot: repo.root,
-      identity: identity,
-      evidence: evidence,
-      pullRequest: gh.getPullRequest(prNumber),
-    });
-  }
+  const decide = deciderFor(ctx, repo, gh, identity);
 
   // create PR
   repo.createBranch(branch);
