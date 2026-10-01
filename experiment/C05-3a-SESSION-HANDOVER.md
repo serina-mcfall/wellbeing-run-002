@@ -7027,3 +7027,114 @@ of the findings inside them.
 - It does not claim `live-gate.js` is in the runtime path. It is not.
 - No gate was run, no threshold changed, no live action taken. T+00
   remains **NOT_STARTED**.
+
+## 39. G1 and G7 applied; claim validators and the severity floor integrated (2026-10-01)
+
+Recorded at audit row **C-05c**.
+
+### 39.1 G1 and G7, applied at their real readers
+
+| Decision | Value | Reader |
+|---|---|---|
+| **G1** | `timeouts.accessibility = 1800` | `Supervisor._lease_expires(role)` indexes `timeouts[role]`; the key had to be role-shaped or the `KeyError` would have stayed exactly where it was |
+| **G7** | `max_accessibility_auto = 1`, `max_accessibility_review = 1` | typed fields on `ExperimentConfig`, parsed **without a default** so a missing governed bound fails at load |
+
+G1 is stated as separate from the browser deadlines and a test asserts the
+separation: `accessibility` (1800) must not equal
+`accessibility_soft_seconds` (120) or `accessibility_hard_seconds` (300).
+An agent lease and a browser budget answer different questions.
+
+`config/experiment.json` is **not** one of the five frozen content hashes.
+Captured before and after: all four are byte-identical.
+
+### 39.2 Claim-validator integration — D4 fully closed
+
+`accessibility_auto_claim_is_valid` (§31.5's seven keys) and
+`accessibility_review_claim_is_valid` (§31.7's nine) are built and
+**registered** in `REVIEW_GATE_CLAIM_VALIDATORS`.
+`UNVALIDATED_REVIEW_GATE_LEGS` is now empty, and the registration tripwire
+still holds the invariant for any leg added later.
+
+Both follow `security_claim_is_valid`'s discipline, including §36.5 D1's
+lesson applied **up front**: every membership test is guarded, and a test
+drives every hostile value through every field of both claims asserting
+that a diagnostic is *returned*, never raised.
+
+Properties worth naming:
+
+- The two verdict families stay disjoint — an `ACCESSIBILITY_PASS` can
+  never satisfy the automated leg, and an `ACCESSIBILITY_AUTO_PASS` can
+  never satisfy the qualitative one.
+- `ACCESSIBILITY_UNPARSEABLE` is not an accepted claim verdict, for the
+  same reason `SECURITY_UNPARSEABLE` is not: unreadable output is an
+  attempt that produced no verdict, and recording it *as* a verdict would
+  turn "we could not read the result" into a judgement about the product.
+- The qualitative worker name is SHA-bound (`-a11y-<sha>-NNNN`) and a
+  pre-SHA or prefix form is refused — the ordinal restarts at 1 for a new
+  head, so an unbound name repeats across a head change.
+- A qualitative-only failure reason is refused on the automated leg, so a
+  machine run can never be recorded as having failed a judgement it never
+  made.
+
+### 39.3 Severity-floor integration — the call that did not exist
+
+`control/severity.py::apply_severity_policy` had **no caller in
+`control/`**. `routing.adjudicate_accessibility_finding` is now that
+caller, supplying the canonical C-02 registry through
+`control/accessibility_registry.py`.
+`routing.accessibility_findings_block_merge` is the default-deny set
+form: a malformed findings array blocks, an INVALID finding blocks, P0/P1
+block, P2/P3 do not independently block, and an empty list does not —
+because whether a scan *happened* is the verdict's job, which
+`review_gate_fires` already enforces.
+
+**No severity policy changed.** `control/severity.py` is a frozen-hash
+input and is untouched; this supplies the argument it always took.
+
+**G6's consequence, pinned.** `CHECK_REQUIREMENT` is still empty, so every
+automated FAIL yields an uncited FAILURE, which the policy rates `INVALID`
+with `merge_blocked: True`. A test walks all nine automated checks and
+asserts each one blocks. A second test is the **G6 tripwire**: any mapping
+that *is* added must name an identifier the frozen registry actually
+contains — G6 may reuse existing identifiers, it may not mint new ones.
+
+### 39.4 The Supervisor orchestration, not the gate in isolation
+
+`tests/test_c04a_supervisor_merge_evidence.py` reuses
+`test_merge_boundary.MergeBoundaryCase` — a real `Supervisor`, a real
+`Store`, a genuine state file, a real `tick()` — and asks whether a pull
+request with missing or stale evidence actually fails to reach `gh.merge`.
+The evidence is the **call records**, not the decision object: a gate that
+refuses while the orchestration merges anyway would be a passing unit test
+and a merged commit.
+
+Covered: no evidence at all; each leg missing independently; evidence
+bound to a superseded commit; an incomplete claim; a claim its own
+validator refuses; that `MERGE_BLOCKED` durably carries
+`EVIDENCE_INCOMPLETE`; and that no merge means no completion, no
+`merge_sha_observed` and no `MERGED` state.
+
+### 39.5 Verification
+
+- **1,920 → 1,975 Python tests**, **218 apparatus**, both exit 0.
+- Mutations, each proved red then restored and verified by `diff`:
+  the evidence gate removed from `evaluate_merge` → **9 red** at the
+  Supervisor level; the accessibility validators unregistered → **3 red**;
+  the registry no longer supplied to the severity policy → **19 red**.
+- Frozen content hashes captured before and after the config change:
+  byte-identical.
+
+### 39.6 What is still NOT enforced
+
+The severity floor now has a caller, but **that caller has no call site in
+a live path yet**: accessibility findings only exist once C-05.3b's
+*ingest* mints them, and the ingest is the wiring that G3 and G2 gate. So
+the adjudicator is ready and proved; it is not yet reached by a running
+tick.
+
+Stated plainly so it cannot be read as full enforcement: the runtime now
+requires every evidence **class** to be a completed pass at the observed
+head, and can correctly rate an accessibility **finding** — but nothing
+produces those findings yet.
+
+T+00 remains **NOT_STARTED**.

@@ -82,6 +82,12 @@ class ExperimentConfig:
     max_fixers: int
     max_reviewers: int
     max_security: int
+    # G7, human decision 2026-10-01. Both 1, matching every other
+    # non-builder role. The automated half additionally drives a real
+    # Chromium and a product build, which is the heaviest resource the run
+    # uses, and C-08c inotify headroom is already failing on this host.
+    max_accessibility_auto: int
+    max_accessibility_review: int
     max_observers: int
     max_repair_cycles: int
     tmux_session: str
@@ -151,6 +157,12 @@ def load() -> ExperimentConfig:
         max_fixers=int(raw["concurrency"]["max_fixers"]),
         max_reviewers=int(raw["concurrency"]["max_reviewers"]),
         max_security=int(raw["concurrency"]["max_security"]),
+        # Required, not defaulted. A missing governed concurrency bound must
+        # fail loudly at load rather than silently become some number this
+        # module chose - the same rule every sibling above follows.
+        max_accessibility_auto=int(raw["concurrency"]["max_accessibility_auto"]),
+        max_accessibility_review=int(
+            raw["concurrency"]["max_accessibility_review"]),
         max_observers=int(raw["concurrency"]["max_observers"]),
         max_repair_cycles=int(raw["concurrency"]["max_repair_cycles"]),
         tmux_session=raw["tmux_session"],

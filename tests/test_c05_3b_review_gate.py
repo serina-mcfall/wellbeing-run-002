@@ -367,13 +367,18 @@ class ClaimValidatorRegistrationCase(unittest.TestCase):
                          "a leg with no named claim builder cannot be "
                          "watched by the tripwire above")
 
-    def test_the_security_leg_is_validated_today_and_the_other_two_are_not(self):
+    def test_every_leg_is_validated_and_none_is_merely_structural(self):
         # Pins the CURRENT, honest position so that a change to it is a
         # deliberate edit to this assertion rather than a silent drift.
-        self.assertEqual(set(routing.REVIEW_GATE_CLAIM_VALIDATORS),
-                         {"security_evidence"})
-        self.assertEqual(set(routing.UNVALIDATED_REVIEW_GATE_LEGS),
-                         {"accessibility_auto", "accessibility_review"})
+        #
+        # It USED to read "the security leg is validated today and the
+        # other two are not", which was accurate while the accessibility
+        # claims did not exist. Both validators are now built and
+        # registered, closing handover section 36.5 D4, so the weaker
+        # position would now be a lie about the gate's strength.
+        legs = {key for key, _ in routing.REVIEW_GATE_LEGS}
+        self.assertEqual(set(routing.REVIEW_GATE_CLAIM_VALIDATORS), legs)
+        self.assertEqual(set(routing.UNVALIDATED_REVIEW_GATE_LEGS), set())
 
     def test_every_registered_validator_is_actually_called_by_the_gate(self):
         # A registry the gate does not read would be documentation, not a

@@ -16,7 +16,8 @@ import re
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from . import accessibility_contract, clock, gh, security_contract
+from . import (accessibility_contract, accessibility_registry, clock, gh,
+               security_contract, severity)
 
 SEVERITIES = ("P0", "P1", "P2", "P3")
 BLOCKING_SEVERITIES = frozenset({"P0", "P1"})
@@ -1298,6 +1299,54 @@ def accessibility_auto_finding(check_id: str) -> dict:
     }
 
 
+def adjudicate_accessibility_finding(finding) -> dict:
+    """One accessibility finding, rated by the GOVERNED severity policy.
+
+    THE INTEGRATION POINT. `control/severity.py::apply_severity_policy`
+    implements protocol/SEVERITY-POLICY.md - the deterministic P1
+    accessibility floor, the evidence-shape rule, and "INVALID evidence
+    always blocks merge". Until now it had NO CALLER in control/: the
+    floor and the registry check ran only in
+    apparatus/severity/severity-floor.js, which the runtime never invokes,
+    so the control plane read whatever severity it was handed.
+
+    This supplies the registry argument that function has always taken,
+    from the canonical C-02 registry, and changes no policy. severity.py
+    is a frozen-hash input (manifest.SEVERITY_POLICY_FILES) and is not
+    touched.
+
+    Returns severity.py's own result dict unchanged:
+    {valid, severity, merge_blocked, floor_applied, reason}.
+    """
+    return severity.apply_severity_policy(
+        finding, known_requirement_ids=accessibility_registry.requirement_ids())
+
+
+def accessibility_findings_block_merge(findings) -> bool:
+    """Whether this set of accessibility findings must hold the merge.
+
+    DEFAULT DENY, and the defaults matter more than the logic:
+
+    * anything that is not a list of findings blocks - a malformed
+      findings array is unreadable evidence, not an empty one;
+    * a finding the policy rates INVALID blocks, which is how an
+      uncited or miscited FAILURE is caught (SEVERITY-POLICY.md rule 3);
+    * P0/P1 block; P2/P3 do not independently block (C-05b).
+
+    An EMPTY list does not block, and that is correct: no findings is the
+    shape of a clean scan. It is the VERDICT, not this function, that
+    says whether a scan happened at all - and `review_gate_fires` already
+    refuses a leg that is absent, incomplete or failed.
+    """
+    if not isinstance(findings, list):
+        return True
+    for finding in findings:
+        rated = adjudicate_accessibility_finding(finding)
+        if not rated["valid"] or rated["merge_blocked"]:
+            return True
+    return False
+
+
 def normalize_accessibility_auto(checks, head_sha: str) -> tuple[str | None, str]:
     """One automated run's check list, as (verdict, reason).
 
@@ -1385,12 +1434,168 @@ REVIEW_GATE_LEGS = (
 )
 
 
+# ---------------------------------------------------------------------
+# The two accessibility claim validators.
+#
+# Shapes: section 31.5's seven keys for the automated half, section 31.7's
+# nine for the qualitative half. Both follow security_claim_is_valid's
+# discipline exactly, including its two hard-won rules:
+#
+#   * a diagnostic is RETURNED, never raised - every membership test is
+#     guarded against an unhashable value, because durable JSON can carry
+#     a dict or a list in any field (handover section 36.5 D1, which was
+#     a real crash in the security validator, not a hypothetical);
+#   * the diagnostics describe a malformed claim RECORD and are therefore
+#     deliberately NOT drawn from the accessibility failure-reason sets,
+#     which say why an ATTEMPT is not a completed review. A bookkeeping
+#     bug must not enter the record as a finding about the product.
+# ---------------------------------------------------------------------
+
+ACCESSIBILITY_CLAIM_STATES = frozenset({"PLANNED", "SPAWNED", "COMPLETE"})
+
+ACCESSIBILITY_AUTO_CLAIM_KEYS = frozenset({
+    "sha", "attempt_id", "claim_state", "claimed_at", "port",
+    "verdict", "reason",
+})
+ACCESSIBILITY_REVIEW_CLAIM_KEYS = frozenset({
+    "sha", "ordinal", "attempt_id", "worker", "claim_state",
+    "claimed_at", "lease_expires_at", "verdict", "reason",
+})
+
+ACCESSIBILITY_ATTEMPT_FMT = "attempt-{:04d}"
+ACCESSIBILITY_REVIEW_ATTEMPT_FMT = "a11y-attempt-{:04d}"
+# The automated claim carries no ordinal of its own - gate_evidence
+# allocates the attempt directory - so its attempt_id is checked by SHAPE
+# rather than recomputed from a field, unlike the qualitative one.
+_ACCESSIBILITY_ATTEMPT_RE = re.compile(r"^attempt-[0-9]{4}$")
+ACCESSIBILITY_ORDINAL_MAX = SECURITY_ORDINAL_MAX
+
+# The ephemeral range the product server is allocated from. A port outside
+# it cannot be one C-09 owns, so a claim naming one is addressing something
+# this run does not control.
+ACCESSIBILITY_PORT_MIN = 1024
+ACCESSIBILITY_PORT_MAX = 65535
+
+
+def _member(value, allowed) -> bool:
+    """`value in allowed`, without raising on an unhashable value.
+
+    Every member of every set these are tested against is a string, so a
+    non-string could never have been a member - this changes which branch
+    produces the refusal, never whether one is produced.
+    """
+    return isinstance(value, str) and value in allowed
+
+
+def _claim_outcome_is_valid(claim, verdicts, reasons) -> tuple[bool, str]:
+    """The verdict/reason half both accessibility claims share.
+
+    PLANNED and SPAWNED have adjudicated nothing, so neither field may say
+    anything. COMPLETE carries exactly one of a verdict or a finite
+    reason: both is a contradiction, neither is a completion that says
+    nothing.
+    """
+    verdict, reason = claim["verdict"], claim["reason"]
+    if not isinstance(reason, str):
+        return False, "CLAIM_REASON_INVALID"
+    if claim["claim_state"] in ("PLANNED", "SPAWNED"):
+        if verdict is not None:
+            return False, "CLAIM_VERDICT_BEFORE_COMPLETE"
+        return (True, "") if reason == "" else (False,
+                                                "CLAIM_REASON_BEFORE_COMPLETE")
+    if verdict is not None and reason != "":
+        return False, "CLAIM_VERDICT_AND_REASON"
+    if verdict is None and reason == "":
+        return False, "CLAIM_COMPLETE_WITHOUT_OUTCOME"
+    if verdict is not None:
+        return ((True, "") if _member(verdict, verdicts)
+                else (False, "CLAIM_VERDICT_UNRECOGNISED"))
+    return ((True, "") if _member(reason, reasons)
+            else (False, "CLAIM_REASON_UNRECOGNISED"))
+
+
+def accessibility_auto_claim_is_valid(claim) -> tuple[bool, str]:
+    """(True, "") or (False, one finite diagnostic) for the AUTOMATED leg.
+
+    `ACCESSIBILITY_UNPARSEABLE` is not among the accepted verdicts, for
+    the same reason `SECURITY_UNPARSEABLE` is not: unparseable output is
+    an attempt that produced no verdict, and recording it AS a verdict
+    would turn "we could not read the result" into a judgement about the
+    product.
+    """
+    if not isinstance(claim, dict):
+        return False, "CLAIM_NOT_AN_OBJECT"
+    if set(claim) != ACCESSIBILITY_AUTO_CLAIM_KEYS:
+        return False, "CLAIM_KEYS_INVALID"
+    if not isinstance(claim["sha"], str) or not _CLAIM_SHA_RE.match(claim["sha"]):
+        return False, "CLAIM_SHA_INVALID"
+    if not _member(claim["claim_state"], ACCESSIBILITY_CLAIM_STATES):
+        return False, "CLAIM_STATE_INVALID"
+    if not isinstance(claim["attempt_id"], str) or \
+            not _ACCESSIBILITY_ATTEMPT_RE.match(claim["attempt_id"]):
+        return False, "CLAIM_ATTEMPT_ID_INVALID"
+    # The port the scanned server was bound to. bool is excluded
+    # explicitly: it is an int subclass, and True would otherwise read as
+    # port 1.
+    port = claim["port"]
+    if not isinstance(port, int) or isinstance(port, bool) or \
+            not ACCESSIBILITY_PORT_MIN <= port <= ACCESSIBILITY_PORT_MAX:
+        return False, "CLAIM_PORT_INVALID"
+    if _canonical_moment(claim["claimed_at"]) is None:
+        return False, "CLAIM_TIMESTAMP_INVALID"
+    return _claim_outcome_is_valid(
+        claim, accessibility_contract.ACCESSIBILITY_AUTO_VERDICTS,
+        accessibility_contract.ACCESSIBILITY_AUTO_FAILURE_REASONS)
+
+
+def accessibility_review_claim_is_valid(claim) -> tuple[bool, str]:
+    """(True, "") or (False, one finite diagnostic) for the QUALITATIVE leg.
+
+    The worker name carries the SHA for exactly the reason the security
+    worker name does: the ordinal restarts at 1 for a new head, so a name
+    built from task and ordinal alone REPEATS across a head change and the
+    second attempt reads the first attempt's artefacts.
+    """
+    if not isinstance(claim, dict):
+        return False, "CLAIM_NOT_AN_OBJECT"
+    if set(claim) != ACCESSIBILITY_REVIEW_CLAIM_KEYS:
+        return False, "CLAIM_KEYS_INVALID"
+    if not isinstance(claim["sha"], str) or not _CLAIM_SHA_RE.match(claim["sha"]):
+        return False, "CLAIM_SHA_INVALID"
+    if not _member(claim["claim_state"], ACCESSIBILITY_CLAIM_STATES):
+        return False, "CLAIM_STATE_INVALID"
+    ordinal = claim["ordinal"]
+    if not (isinstance(ordinal, int) and not isinstance(ordinal, bool)
+            and 1 <= ordinal <= ACCESSIBILITY_ORDINAL_MAX):
+        return False, "CLAIM_ORDINAL_INVALID"
+    if claim["attempt_id"] != ACCESSIBILITY_REVIEW_ATTEMPT_FMT.format(ordinal):
+        return False, "CLAIM_ATTEMPT_ID_MISMATCH"
+    worker = claim["worker"]
+    if not isinstance(worker, str) or not SECURITY_WORKER_RE.match(worker):
+        return False, "CLAIM_WORKER_INVALID"
+    if not worker.endswith(f"-a11y-{claim['sha']}-{ordinal:04d}"):
+        return False, "CLAIM_WORKER_PROVENANCE_MISMATCH"
+
+    claimed = _canonical_moment(claim["claimed_at"])
+    expires = _canonical_moment(claim["lease_expires_at"])
+    if claimed is None or expires is None:
+        return False, "CLAIM_TIMESTAMP_INVALID"
+    if expires <= claimed:
+        return False, "CLAIM_LEASE_NOT_AFTER_CLAIM"
+
+    return _claim_outcome_is_valid(
+        claim, accessibility_contract.ACCESSIBILITY_VERDICTS,
+        accessibility_contract.ACCESSIBILITY_FAILURE_REASONS)
+
+
 # Leg key -> the claim validator that leg's claim must additionally
 # satisfy. A leg absent from this mapping is checked STRUCTURALLY ONLY,
 # which is strictly weaker, and the difference is invisible at the call
-# site - so the absence is declared below rather than left to be noticed.
+# site - so any absence is declared below rather than left to be noticed.
 REVIEW_GATE_CLAIM_VALIDATORS = {
     "security_evidence": security_claim_is_valid,
+    "accessibility_auto": accessibility_auto_claim_is_valid,
+    "accessibility_review": accessibility_review_claim_is_valid,
 }
 
 # Leg key -> the function that MINTS that leg's claim. Only the first
@@ -1404,14 +1609,13 @@ REVIEW_GATE_CLAIM_BUILDERS = {
     "accessibility_review": "accessibility_review_claim",
 }
 
-# The two legs whose claims do not exist yet, and which therefore have no
-# validator to register. Declared explicitly so that "no validator" is a
-# stated position with a test behind it rather than an omission nobody
-# can see. C05-3a-SESSION-HANDOVER.md section 36.5, D4.
-UNVALIDATED_REVIEW_GATE_LEGS = frozenset({
-    "accessibility_auto",
-    "accessibility_review",
-})
+# Legs with no claim validator. EMPTY as of 2026-10-01: both accessibility
+# validators above are now registered, closing handover section 36.5 D4.
+# The set is kept rather than deleted because it is half of the invariant
+# the registration tripwire checks - every leg must be either validated or
+# declared unvalidated, and a future leg added with neither must fail
+# rather than be silently weaker.
+UNVALIDATED_REVIEW_GATE_LEGS: frozenset[str] = frozenset()
 
 
 def _leg_passes(claim, head_sha: str, expected_verdict: str) -> bool:
