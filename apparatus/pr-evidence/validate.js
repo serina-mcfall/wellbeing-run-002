@@ -21,16 +21,36 @@
 // anything. policyValid: true is necessary but nowhere near sufficient
 // for the live merge gate, and does not resolve C-04.
 //
-// The accessibility requirement registry (protocol/SEVERITY-POLICY.md /
-// severity-floor.js's knownRequirementIds) is not wired in here either —
-// it is not one of the four adapters above, but it is equally unbuilt.
-// Every FAILURE-classified accessibility finding fails closed as INVALID
-// regardless of its citation, by severity-floor.js's own design.
+// The accessibility requirement registry (severity-floor.js's
+// knownRequirementIds) IS now wired in: this module owns it, as
+// severity-floor.js always said the PR evidence validator would, and
+// supplies apparatus/accessibility/requirement-registry.js — the
+// identifier list derived from product/ACCESSIBILITY.md's stated
+// requirements, per protocol/SEVERITY-POLICY.md rule 1. A FAILURE-
+// classified accessibility finding citing a registry identifier can
+// therefore now be VALID and receive its post-floor severity; one citing
+// anything else still fails closed as INVALID. That is recognition of a
+// citation, not confirmation of it: see requirement-registry.js's scope
+// limit. It is not one of the four adapters above, and it does not make
+// this checker a live merge gate.
+//
+// Why the registry is enforced HERE and not as a schema enum: this
+// module's severity handling is deliberately layered the same way the
+// schema's own accessibilityFinding description states ("POST-floor
+// severity ... is computed by the validator, so the ... exclusion for
+// these findings is a validator rule, not a schema rule"). An
+// unrecognised citation must surface as INVALID_ACCESSIBILITY_EVIDENCE,
+// whose documented resolution path is escalation to an independent
+// reviewer (SEVERITY-POLICY.md rules 3-4); a schema enum would instead
+// report SCHEMA_INVALID, which says "this package is malformed" and
+// offers no such path. protocol/PR-EVIDENCE-V2.schema.json is also a
+// frozen imported source this work must not edit.
 
 const Ajv2020 = require('ajv/dist/2020');
 const fs = require('fs');
 const path = require('path');
 const { applySeverityPolicy } = require('../severity/severity-floor.js');
+const { REQUIREMENT_IDS } = require('../accessibility/requirement-registry.js');
 
 const SCHEMA_PATH = path.join(__dirname, '..', '..', 'protocol', 'PR-EVIDENCE-V2.schema.json');
 const schema = JSON.parse(fs.readFileSync(SCHEMA_PATH, 'utf8'));
@@ -123,7 +143,7 @@ function checkOfflinePolicy(pkg) {
     }
   }
   for (const f of accessibilityFindings) {
-    const floorResult = applySeverityPolicy(f, undefined);
+    const floorResult = applySeverityPolicy(f, REQUIREMENT_IDS);
     if (!floorResult.valid) {
       errors.push('INVALID_ACCESSIBILITY_EVIDENCE: ' + (f && f.id) + ' — ' + floorResult.reason);
       blockingFindingFound = true;
@@ -139,3 +159,38 @@ function checkOfflinePolicy(pkg) {
 }
 
 module.exports = { checkOfflinePolicy: checkOfflinePolicy };
+
+// CLI entry point so CI can actually run this checker over submitted
+// evidence packages (Protocol v2 PR contract: "CI validates the schema").
+// Fails closed: no paths, an unreadable file, or unparseable JSON are all
+// non-zero exits, never a silent pass. A zero exit still means only what
+// the header says — offline policy, not live merge eligibility.
+if (require.main === module) {
+  const paths = process.argv.slice(2);
+  if (paths.length === 0) {
+    process.stderr.write('usage: node apparatus/pr-evidence/validate.js <evidence-package.json> [...]\n');
+    process.exit(2);
+  }
+  let failed = 0;
+  for (const p of paths) {
+    let pkg;
+    try {
+      pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+    } catch (err) {
+      process.stderr.write(p + ': UNREADABLE — ' + err.message + '\n');
+      failed += 1;
+      continue;
+    }
+    const result = checkOfflinePolicy(pkg);
+    if (result.policyValid) {
+      process.stdout.write(p + ': OFFLINE_POLICY_OK (not a live merge gate)\n');
+    } else {
+      failed += 1;
+      process.stderr.write(p + ': OFFLINE_POLICY_FAILED\n');
+      for (const e of result.errors) {
+        process.stderr.write('  - ' + e + '\n');
+      }
+    }
+  }
+  process.exit(failed === 0 ? 0 : 1);
+}

@@ -33,6 +33,57 @@ jobs:
       - name: Guardrail — no committed secrets
         run: python scripts/check_no_secrets.py
 
+      # The apparatus is the control plane (protocol enforcement), not the
+      # product app. It exists in every commit on this repository, so these
+      # steps are UNCONDITIONAL — unlike the product-app steps below, which
+      # are gated on a root package.json that does not exist pre-T+00.
+      # Until this block existed nothing in CI ran a single Node test, and
+      # nothing executed apparatus/pr-evidence/validate.js, despite Protocol
+      # v2's PR contract stating "CI validates the schema".
+      - name: Set up Node (apparatus)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: apparatus/package-lock.json
+
+      - name: Install apparatus dependencies
+        working-directory: apparatus
+        run: npm ci
+
+      # apparatus/accessibility/run.test.js drives a real Chromium through
+      # Playwright and a real axe-core scan. Without the browser those tests
+      # error out, so this is part of running the suite honestly rather than
+      # quietly skipping its most expensive evidence.
+      - name: Install Playwright Chromium
+        working-directory: apparatus
+        run: npx playwright install --with-deps chromium
+
+      - name: Apparatus tests
+        working-directory: apparatus
+        run: npm test
+
+      # Runs the offline PR-evidence policy checker (schema + accessibility
+      # severity floor + requirement registry) over any submitted evidence
+      # package. A zero exit means offline policy only; it is NOT proof of
+      # live merge eligibility (see validate.js's header).
+      #
+      # KNOWN LIMITATION: no evidence package exists in this repository
+      # before T+00, so with an empty evidence/ directory this step reports
+      # that it validated nothing and passes. It is a real gate only once
+      # packages are committed there. The validator itself fails closed —
+      # missing paths, unreadable files and unparseable JSON all exit
+      # non-zero.
+      - name: Validate PR evidence packages
+        run: |
+          mapfile -t packages < <(find evidence -type f -name '*.json' 2>/dev/null | sort)
+          if [ ${#packages[@]} -eq 0 ]; then
+            echo "NO PR EVIDENCE PACKAGES FOUND under evidence/ — validated nothing."
+            echo "This is expected before T+00; it is not a pass of the merge gate."
+            exit 0
+          fi
+          node apparatus/pr-evidence/validate.js "${packages[@]}"
+
       - name: Detect product app
         id: app
         run: |
