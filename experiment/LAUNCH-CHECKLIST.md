@@ -9,45 +9,66 @@ document, **they win**. This checklist orders and enumerates; it decides nothing
 T+00 remains **NOT_STARTED** (`experiment/TIMELINE.md`). Nothing in this
 document authorises launch, and no partial completion of it does either.
 
-**Session state as of 2026-10-02: `C05-3a-SESSION-HANDOVER.md` §44**, which
-supersedes §43 and §42. §41 and §16 are stale. Branch
-`wip/c05-1-persistence`, HEAD **`915aa3a`** plus this update's own
-documentation commit. The earlier approved decisions are all still applied
-(G1, G2, G3's phase limits, G4, G6, G7, G9, C-18a), and none was reopened.
-Four of the five pending decisions have now been delegated and APPLIED -
-C-02a's frozen-prompt amendment, C-18 stage 7's bounds, the notification
-amendment, and **C-02b, the stale automation disclosure in the frozen
-accessibility prompt** - each with the operator's authorisation recorded
-verbatim under `experiment/evidence/`. **One decision remains the
-operator's: C-20a(C), the GitHub App and worker UID.** It now has ONE
-CONCRETE ARRANGEMENT to approve or reject (proposal §9) plus reviewable
-templates under `experiment/github-app/`.
+**Session state as of 2026-10-02: `C05-3a-SESSION-HANDOVER.md` §45**, which
+supersedes §44, §43 and §42. §41 and §16 are stale. Branch
+`wip/c05-1-persistence`, HEAD **`6c53540`** plus documentation commits.
+Verification: **2,364 Python tests, 230 apparatus tests**, both exit 0.
 
-Verification at that HEAD: **2,315 Python tests, 222 apparatus tests**, both
-exit 0, secret scan clean over 262 tracked files, `git diff --check` clean.
+All earlier approvals remain applied and none was reopened (G1, G2, G3's
+phase limits, G4, G6, G7, G9, C-18a, C-20a A/D/E). Four delegated decisions
+are APPLIED - C-02a, C-18 stage 7, the notification amendment, and C-02b.
+
+> ## THE BLOCKER THAT OUTRANKS EVERYTHING ELSE ON THIS PAGE: C-22
+>
+> **Workers run as the UID that owns `.runtime/`.** `control/worker_entry.py`
+> spawns them with no `setuid`, no `setgid` and no container, and
+> `.runtime/state.json` is `0600` owned by that same user. So every field
+> the merge gate trusts is in a file the agents being judged can write.
+>
+> **Reproduced, not argued:** from a blank record for a pull request with
+> no code review, no security evidence and neither accessibility leg,
+> writing six fields turns the merge gate from `(False, NO_REVIEW_PASS)`
+> into `(True, MERGE_OK)`.
+>
+> C-04c added a second source - the durable ledger must independently
+> attest all four legs at the head GitHub reports now - so a forgery needs
+> two files instead of one and leaves a permanent trace. **That is tamper
+> evidence, not prevention. The ledger has no hash chain and the same UID
+> can append to it.** Nothing in this repository can close C-22; only the
+> OS-level separation in `experiment/C-20a-APPROVAL-PACKAGE.md` §6 can.
+>
+> **It must not be recorded as closed, mitigated or accepted before that
+> lands.** Every "PASS" below is a statement about a control plane whose
+> inputs are, today, forgeable by the workers it governs.
+
+**The two human actions, in order:**
+
+1. **Provision the eight secrets** - `~/.config/run-002/secrets.env`, mode
+   600. Purely local, unblocks three gates, precondition for every
+   remaining gate. Names, purposes and steps:
+   `experiment/evidence/LAUNCH-READINESS-2026-10-02.txt` §3-4.
+2. **Decide C-20a(C)** - one complete decision document at
+   `experiment/C-20a-APPROVAL-PACKAGE.md`: identities, exact permissions,
+   protection before/after, provenance, SHA binding, the pinned trusted
+   revision, isolation, verification, rollback, twelve numbered actions,
+   and a separate list of what is already done locally. **It takes `main`
+   from "a human approved this" to "the gate approved this"** - that is
+   the hinge. Do not approve §41.7's permission set.
 
 **What changed this session, in one line each.**
 
 | | |
 |---|---|
-| **C-02b** | the frozen prompt no longer calls its own dispatch unimplemented. One hunk; one of six `prompt_hashes` moved. |
-| **C-05.3c** | the automated accessibility pipeline has now ACTUALLY RUN - real npm, real socket, real Chromium, real axe, real teardown - against a committed fixture product. Pass case and known-failure case both demonstrated. |
-| **G6 delivery defect** | found by running it: `ProductServices.scan` dropped run.js's `details` map, so G6's approved composite sub-condition mapping had never fired in production. Every composite failure collapsed to one uncited INVALID finding - blocking, so nothing merged wrongly, which is why no test caught it. 7 findings before the fix, 14 after, all 14 blocking. |
-| **C-04b** | the two merge gates compared condition by condition. Three fail-open holes found in the gate that actually decides merges: an absent `mergeStateStatus` merged, GitHub's "still computing" `UNKNOWN` merged, and an absent `isDraft` merged. All three proved by reverting the fix and watching `allowed` come back True. |
-| **Test isolation** | the test suite was writing the live `.runtime/state.json` - 16 writes per run. Fixed; residue reported but NOT reset. |
-| **C-20a(C)** | the proposal is now one concrete arrangement with three principals, a non-stale pin, and a checker that re-asserts every permission against the call site it was derived from. |
-
-**The single next concrete action is still to provision the eight secrets**
-(`~/.config/run-002/secrets.env`, mode 600 — exact instructions in
-`experiment/evidence/LAUNCH-READINESS-2026-10-02.txt` §4, and in §43.5d).
-It is purely local, unblocks three gates immediately, and is a precondition
-for every remaining gate. The only other externally-blocked item is
-C-20a(C), whose §41.7 permission set must **not** be approved as written.
+| **C-04c** | the merge path now requires the append-only ledger to attest all four evidence legs at the head GitHub reports, checked BEFORE the gate so an unattested merge never reaches it |
+| **C-22** | opened: the threat model C-04b relied on was measured and found false |
+| **C-20b / F7** | the independent-review publisher exists, with 23 tests and simulated responses only, and is DISABLED - no default transport, nothing imports it, enabled only by an exact environment variable |
+| **F5** | resolved in `live-gate.js`, with the fail-open alternative demonstrated rather than asserted |
+| **C-21 residue** | preserved and documented, not cleaned: `experiment/evidence/RUNTIME-RESIDUE-2026-10-02.txt` |
 
 **Test-count note.** This document previously carried 2,171/218 here and
 1,852/197 in the `control_plane_self_tests` row below, as if both were
 current. They were a current figure and a session-start baseline. Both now
-read 2,315/222, measured at the HEAD named above.
+read 2,364/230, measured at the HEAD named above.
 
 ---
 
@@ -155,7 +176,7 @@ bottom row.
 | `clean_baseline` | **PASS — gate EXECUTED 2026-10-01** | The recorded cause — "C-05.3a and C-18 stages 1–3 uncommitted" — was **stale**: that work is committed (`6880229`). The three remaining untracked paths were Python bytecode and `.claude/` session machinery, now in `.gitignore` (`f1f0878`). `git status --porcelain` is empty. The gate checks exactly that. **It has now been executed twice**: `ok=True` at "HEAD 01c0413601b2" (2026-10-01) and again at `b66944a` (2026-10-02), individually, not through an aggregate run. The earlier row correctly refused to call an unexecuted gate a PASS; it has been run, so it is one - but it is a PASS at a moment, not a durable record, and it must hold again when `ctl preflight` runs |
 | `manifest_readiness` | **PASS** | `readiness_check()` ok. The four frozen-input hashes are unchanged by the `skills/README.md` import, verified before and after |
 | `task_graph_valid` | **PASS** | 9 tasks, no errors |
-| `control_plane_self_tests` | **PASS** | **2,315** Python tests plus **222** apparatus tests OK, verified 2026-10-02 at `915aa3a` (was 2,273/218 at `a0d57f6`). **A defect in this gate's own suite was found and fixed on 2026-10-02:** running it WROTE `.runtime/state.json` - 16 writes per run, through `watchdog.main()` in `test_watchdog_liveness` which stubbed the ledger, notifier and pid path but not the state store. A preflight gate that mutates the document T+00 starts from is not a read-only check. Fixed, guarded, and the guard proved red by mutation; the residue it left is reported in `experiment/evidence/LAUNCH-READINESS-2026-10-02.txt` §6 and was deliberately NOT reset. This row previously read 1852/197, which was the session-start baseline quoted as if it were the gate's current evidence; corrected. Growth: (1367 → 1404 after C-18 stage 1 → 1452 after stage 2 → 1477 after the stage 2 corrections → 1511 after stage 3 → 1569 after the C-19 `worker_health` repair → 1595 after the C-19 crash/restart correction → 1664 after the C-18 stage-4 harness → 1852 after C-18 stages 5-6, C-04 composition and C-05.3b foundations (1367 → 1404 after C-18 stage 1 → 1452 after stage 2 → 1477 after the stage 2 corrections → 1511 after stage 3 → 1569 after the C-19 `worker_health` repair → 1595 after the C-19 crash/restart correction → 1664 after the C-18 stage-4 harness → 1852 after C-18 stages 5-6, C-04 composition and C-05.3b foundations) |
+| `control_plane_self_tests` | **PASS** | **2,364** Python tests plus **230** apparatus tests OK, verified 2026-10-02 at `6c53540` (was 2,273/218 at `a0d57f6`). **A defect in this gate's own suite was found and fixed on 2026-10-02:** running it WROTE `.runtime/state.json` - 16 writes per run, through `watchdog.main()` in `test_watchdog_liveness` which stubbed the ledger, notifier and pid path but not the state store. A preflight gate that mutates the document T+00 starts from is not a read-only check. Fixed, guarded, and the guard proved red by mutation; the residue it left is reported in `experiment/evidence/LAUNCH-READINESS-2026-10-02.txt` §6 and was deliberately NOT reset. This row previously read 1852/197, which was the session-start baseline quoted as if it were the gate's current evidence; corrected. Growth: (1367 → 1404 after C-18 stage 1 → 1452 after stage 2 → 1477 after the stage 2 corrections → 1511 after stage 3 → 1569 after the C-19 `worker_health` repair → 1595 after the C-19 crash/restart correction → 1664 after the C-18 stage-4 harness → 1852 after C-18 stages 5-6, C-04 composition and C-05.3b foundations (1367 → 1404 after C-18 stage 1 → 1452 after stage 2 → 1477 after the stage 2 corrections → 1511 after stage 3 → 1569 after the C-19 `worker_health` repair → 1595 after the C-19 crash/restart correction → 1664 after the C-18 stage-4 harness → 1852 after C-18 stages 5-6, C-04 composition and C-05.3b foundations) |
 | `budget_configured_by_human` | **PASS** | $25 in `BUDGET.md` matches `config.budget.total_usd` |
 | `jev_minimal_decision` | **PASS** — live, 2026-10-01 | C-19's `worker_health` path exercised against the real provider for the first time: one request to `/api/alpha/decisions`, requested `typesafe/jev-1.13`, **returned `typesafe/jev-1.13-20260917`**, choice `HEALTHY` with `source == "jev"`, confidence 0.98 (advisory), provider-reported cost **$0.000022764** for 542 input tokens, 487.5 ms. The $0.002688 reservation settled as actual spend; exposure back to $0.000000. The reported cost confirms the §24.5 pricing basis exactly (542 × $0.000000042). Evidence: handover §27. **This is one gate, not launch readiness** — the full preflight has not been run and the other 23 gates remain NOT YET EVALUATED |
 | `required_secrets` | **FAIL — gate EXECUTED 2026-10-01, this is now a measured failure rather than a prediction** | `~/.config/run-002/secrets.env` **does not exist**, and 7 of the 8 required names are absent from the environment: `DISCORD_WEBHOOK_URL`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`, `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`. Only `OPENROUTER_API_KEY` is present — which is why the Jev gate could run at all. Checked by NAME only; no value was read. **Human action: provision all eight into `~/.config/run-002/secrets.env` at mode 600.** This gate blocks `langfuse_otel_trace`, `supabase_health` and `discord_delivery` outright, and supplies credentials the paid gates need. **Re-verified 2026-10-01 by executing `gate_secrets()`: `ok=False`, "not set: DISCORD_WEBHOOK_URL, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL, SUPABASE_*".** Existence of the secrets file was tested with `test -f` and the eight names by presence only; no value was read, printed or logged at any point. **RE-EXECUTED 2026-10-02: unchanged, `ok=False`, the same seven names absent. The parent directory `~/.config/run-002/` does not exist either.** Full names, purposes and provisioning steps: `experiment/evidence/LAUNCH-READINESS-2026-10-02.txt` §3-4 |

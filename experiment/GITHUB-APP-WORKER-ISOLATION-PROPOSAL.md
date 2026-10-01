@@ -603,8 +603,8 @@ created on GitHub, and so the F5 deadlock is resolved before it can bite.
 
 | # | Step | Who | Authorisation | Rollback |
 |---|---|---|---|---|
-| 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `183959e06dcafd4915ab989efb1721946174bc85`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
-| **0b** | ~~**Push `wip/c05-1-persistence`** so the pinned revision exists on `origin`.~~ **DONE 2026-10-02** — pushed at `17dc358`; `183959e` is reachable from `origin/wip/c05-1-persistence` and the pin is now independently fetchable. | done | repo write | n/a — pushing an existing local commit |
+| 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `6c535409cf1768bcfbd694f3707cb8a674f49bfe`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
+| **0b** | ~~**Push `wip/c05-1-persistence`** so the pinned revision exists on `origin`.~~ **DONE 2026-10-02** — pushed at `17dc358`; `6c53540` is reachable from `origin/wip/c05-1-persistence` and the pin is now independently fetchable. | done | repo write | n/a — pushing an existing local commit |
 | 1 | Create OS users `run002-sup`, `run002-wrk` and group `run002`. Set ownership and modes per §3.3 and §9.4. | human | root | `userdel run002-sup run002-wrk; groupdel run002`; restore ownership to `serina` |
 | 2 | Create the throwaway probe repository. | human | GitHub account | delete the repository |
 | 3 | Run V1, V1b, V4, V4b, V5, V5b, V6 — the **filesystem** half of §5. No GitHub objects needed. | human | sudo | n/a (read-only assertions) |
@@ -963,7 +963,7 @@ Four things make this enforceable rather than aspirational:
 ### 9.5 THE TRUSTED APPARATUS REVISION
 
 > **TRUSTED APPARATUS REVISION:
-> `183959e06dcafd4915ab989efb1721946174bc85`**
+> `6c535409cf1768bcfbd694f3707cb8a674f49bfe`**
 > on `wip/c05-1-persistence`. Full 40 hex, never a branch name.
 
 **This supersedes §41.7's `4ae1488`, which is 16 commits stale.** It also
@@ -977,16 +977,16 @@ then re-checked independently by the integration owner at the final pin:
 
 ```
 $ git rev-parse HEAD
-183959e06dcafd4915ab989efb1721946174bc85
+6c535409cf1768bcfbd694f3707cb8a674f49bfe
 $ git rev-parse main origin/main
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
 $ git merge-base main HEAD
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
 $ git rev-list --count HEAD..main     ->  0      # main is a strict ancestor
-$ git rev-list --count main..HEAD     -> 56      # 56 commits of apparatus
+$ git rev-list --count main..HEAD     -> 61      # 61 commits of apparatus
 $ git diff --shortstat main..HEAD
-  142 files changed, 48510 insertions(+), 443 deletions(-)
+  154 files changed, 51645 insertions(+), 444 deletions(-)
 $ git ls-tree -r --name-only main -- apparatus control | wc -l  -> 50
 $ git ls-tree -r --name-only HEAD -- apparatus control | wc -l  -> 88
 ```
@@ -1012,13 +1012,13 @@ revision would produce a tree with no `live-gate.js`, no CI adapter and no
 requirement registry in it. The gate would not fail closed — it would fail
 to exist. §41.7 said `main` is `4eeaa7c` and contains neither
 `live-gate.js` nor `control/accessibility_registry.py`; that is **confirmed
-here and is still true 56 commits later**, and it is the reason `main` is
+here and is still true 61 commits later**, and it is the reason `main` is
 disqualified rather than merely behind.
 
-#### Why `183959e` and not an older branch commit
+#### Why `6c53540` and not an older branch commit
 
-`4ae1488` (§41.7) is 16 behind; `1387275` (this document's original base) is
-15 behind. Both predate work the gate depends on. `183959e` is the tip of
+`4ae1488` (§41.7) is 21 behind; `1387275` (this document's original base) is
+15 behind. Both predate work the gate depends on. `6c53540` is the tip of
 the branch that holds the apparatus.
 
 #### The pin and the moving branch
@@ -1026,7 +1026,7 @@ the branch that holds the apparatus.
 **This document's first pin went stale inside the session that wrote it.**
 It named `b66944a`; two further commits landed — `f2129c5` (C-04b, which
 changes `control/routing.py`, code the gate's decisions depend on) and
-`183959e` (a test-isolation fix). The pin is now `183959e`.
+`6c53540` (a test-isolation fix). The pin is now `6c53540`.
 
 That is not an embarrassment, it is the thing the check exists to catch,
 and it exposed a real defect in the FIRST version of the check, which
@@ -1068,14 +1068,14 @@ between touch `apparatus/` and `control/`.** So:
   `control/accessibility_services.py` and an **older** `control/routing.py`
   than the ones the current tests pass against — the latter being the one
   C-04b stopped merging on absent facts. Not acceptable.
-- Pinning `183959e` is correct, but while the branch sat unpushed it was
+- Pinning `6c53540` is correct, but while the branch sat unpushed it was
   **not fetchable by anyone else.** A trusted revision nobody can fetch
   cannot be independently verified, which defeats half the point of
   pinning.
 
 > **PRECONDITION, runbook step 0b — SATISFIED 2026-10-02.**
 > `wip/c05-1-persistence` was pushed to `origin` at `17dc358`, which
-> contains the pinned commit, so `183959e` is now fetchable and the pin is
+> contains the pinned commit, so `6c53540` is now fetchable and the pin is
 > independently verifiable. Pushing the working branch is ordinary work and
 > was authorised. What is **not** authorised by this document is creating
 > the export, the Apps, the OS users, or anything else in §6.

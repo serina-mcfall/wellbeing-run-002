@@ -8115,3 +8115,154 @@ stub.
   concurrent agent is modifying the working tree" as evidence against the
   isolation proof. The concurrent agent was this session. Verified before
   it was inherited.
+
+## 45. SESSION HANDOVER — the session that found the forgery (2026-10-02)
+
+**Read this first. It supersedes §44, §43 and §42.** §41 is superseded;
+§16 is stale. §44 remains accurate about what it describes, with ONE
+correction that matters, in 45.2.
+
+### 45.1 Verified state
+
+| | |
+|---|---|
+| Branch | `wip/c05-1-persistence` |
+| HEAD | `6c53540` plus this section's own documentation commit (`experiment/` only) |
+| Baseline at session start | `2b300a6` — 2,315 Python / 222 apparatus |
+| Verification | **2,364 Python tests OK · 230 apparatus tests OK** |
+| T+00 | **NOT_STARTED** — `started_at: None`, nine tasks QUEUED, no PRs, no workers |
+| Run 001 | Untouched |
+
+### 45.2 THE CORRECTION TO §44, AND IT IS NOT A SMALL ONE
+
+§44 and C-04b recorded, as a deliberate decision with reasoning, that
+`live-gate.js`'s `REVIEW_PROVENANCE_*` checks need not be ported because
+
+> *"live-gate.js judges an untrusted SUBMITTED PACKAGE while
+> evaluate_merge judges the control plane's OWN records written under its
+> own lock — a different question, not a redundant one."*
+
+**That sentence described a boundary that does not exist.** It is true
+about who writes those records when nothing is attacking them, and false
+as a security property.
+
+Measured: `.runtime/state.json` is `0600` owned by `serina`;
+`control/worker_entry.py` spawns workers with no `setuid`, no `setgid` and
+no container. Workers run as `serina`. **Every field the merge gate trusts
+is in a file they can write.**
+
+Reproduced: from a blank record for a pull request with **no code review,
+no security evidence and neither accessibility leg**, writing six fields
+into `state.json` turns the gate's answer from `(False, NO_REVIEW_PASS)`
+into `(True, MERGE_OK)`.
+
+**This is the most serious thing found in this repository to date**, and
+it had been reasoned past rather than measured. The lesson is narrow and
+worth keeping: *a threat-model sentence is a claim about the world, and
+it is checkable. Check it.*
+
+### 45.3 What was done about it, and the line not to cross
+
+**C-04c.** `routing.ledger_attests_merge` requires the append-only ledger
+to attest all four evidence legs at the head **GitHub reports now** —
+never at `record["reviewed_head"]`, which is the forgeable value. Enforced
+in `attempt_merge` **before** `evaluate_merge`, so an unattested merge
+never reaches the gate at all.
+
+**C-22, OPEN.** The ledger has no hash chain, no signature and no
+integrity check, and the same UID can append to it. So C-04c raises a
+forgery from *one file* to *two files* and guarantees it leaves a
+permanent trace in the evidence record.
+
+> **IT IS TAMPER EVIDENCE. IT IS NOT PREVENTION. Do not record C-22 as
+> closed, mitigated or accepted on the strength of C-04c.** The honest
+> statement is: today, any worker can forge a complete merge
+> authorisation, and the only thing between that and a merged pull request
+> is four extra lines of writing.
+
+Only the OS-level separation in `experiment/C-20a-APPROVAL-PACKAGE.md` §6
+closes it. A test asserts the ledger still has no integrity protection, so
+if that ever changes the assessment is re-opened rather than assumed.
+
+### 45.4 The publisher — built, and switched off
+
+F7 said the permission at the centre of the whole App proposal existed to
+serve code nobody had written. `control/publisher.py` is that code.
+
+Disabled in the way that matters — **it makes no call**. `enabled()` is
+False unless `RUN_002_PUBLISH_INDEPENDENT_REVIEW` is exactly `"1"`. No
+config-file switch, deliberately: a committed flag is one edit from being
+on, and `config/` is inside the trusted-revision pin. `poster` is required
+and undefaulted. A test asserts nothing in `control/` or `bin/` imports
+it, and that test was proved able to fail.
+
+**F5's resolution landed with it.** `live-gate.js` now reports
+`blockedOnlyByPendingIndependentReview`, computed from the reason list
+being precisely one `PR_BLOCKED_BY_BRANCH_PROTECTION` plus the CI
+adapter's own `ok` — **never** from `mergeStateStatus`, which GitHub also
+reports for a failing `ci`. It is a reported field, never an input to
+`verified`. The proposal demanded the fail-open alternative be
+demonstrated: the `F5 MUTATION` test computes both formulations over one
+observation of a failing-CI pull request and shows the rejected one would
+publish a pass.
+
+### 45.5 The approval package
+
+`experiment/C-20a-APPROVAL-PACKAGE.md` is the decision document —
+complete on its own page, with the 1,400-line proposal behind it for
+derivations. Identities, exact permissions, protection before/after,
+provenance, SHA binding, trusted revision, isolation, verification,
+rollback; twelve numbered actions needing approval, and a separate list of
+what is already done locally and needs nothing.
+
+**The hinge is stated in it plainly:** this takes `main` from *"a human
+approved this"* to *"the gate approved this"*. If that is unacceptable the
+arrangement should be rejected, not trimmed.
+
+The pin is now `6c53540` and was re-stated twice this session as gate code
+moved — which is the `F1`/`F2` check working, not a problem.
+
+### 45.6 The runtime residue — preserved, documented, untouched
+
+Recorded in full at `experiment/evidence/RUNTIME-RESIDUE-2026-10-02.txt`.
+One field of one `orphan_annunciations` entry (`attempt = 586`, status
+OBSERVED, for a resource that no longer exists), left by the C-21 leak
+before it was fixed. The rest of the document is pristine: `started_at`
+None, nine tasks QUEUED, no PRs, no workers, every counter zero, one
+ledger line.
+
+**Not cleaned**, on instruction and because resetting durable run state is
+outside this authority. Low consequence, bounded, and the decision is
+open. **A full re-initialisation is the wrong remedy** — it would discard
+nine correct task records and a human-set budget to fix one field.
+
+### 45.7 What remains, and who owns it
+
+| # | Item | Owner |
+|---|---|---|
+| 1 | **Provision the eight secrets** | **HUMAN** — still the shortest step and still the one everything waits on |
+| 2 | **C-20a(C) / C-22** — approve, reject or amend the arrangement | **OPERATOR** — and C-22 is now the blocker that matters most |
+| 3 | The `orphan_annunciations` residue | OPERATOR, not urgent |
+| 4 | inotify headroom on a quiet host | HUMAN, before preflight |
+| 5 | Run the real preflight | ENGINEERING, after 1 |
+| 6 | C-04a against real GitHub | ENGINEERING, after 2 |
+
+### 45.8 For whoever picks this up cold
+
+- **A threat-model sentence is a claim about the world.** The one in
+  C-04b was load-bearing, plausible, written carefully — and false. It
+  took one `ls -l` and one eight-line reproduction to find out.
+- **Fail-safe defects are the ones that survive.** All four defects found
+  across the last two sessions were invisible because the system failed
+  safe: a blocking-but-uncited finding still blocks, a lax gate still
+  denies on present fields, a test that writes real state still passes, a
+  forgeable record still requires GitHub to agree. Nothing goes red.
+- **Mutate every guard.** Three written across these two sessions were
+  vacuous until mutation exposed them: a worktree-leak check that pruned
+  before asserting, a pin check that could never be satisfied, and a
+  not-wired check that matched the English word "publisher" in three
+  unrelated comments.
+- **When a new check breaks 26 tests, look before editing any of them.**
+  Those fixtures were seeding a state production cannot reach — evidence
+  that passed with nothing in the durable record saying so. The fix was
+  one shared fixture gaining its other half, not 26 edits.

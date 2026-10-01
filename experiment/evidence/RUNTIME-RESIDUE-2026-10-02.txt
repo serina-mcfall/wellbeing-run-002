@@ -1,0 +1,146 @@
+RUNTIME RESIDUE — PRESERVED, DOCUMENTED, NOT CLEANED
+=====================================================
+Date:      2026-10-02
+Authority: Explicit operator instruction, this session:
+
+    "Preserve and document the test-created runtime residue for now;
+     continue independent work without waiting for a cleanup decision."
+
+NOTHING IN .runtime/ WAS MODIFIED, RESET, RE-INITIALISED OR DELETED to
+produce this record. Everything below was read.
+
+
+1. WHY THERE IS RESIDUE AT ALL
+-------------------------------
+C-21, recorded 2026-10-02: `tests/test_watchdog_liveness.py::run_one_pass`
+called `watchdog.main()` with the ledger, notifier, pid path, clock and
+process calls all stubbed - but NOT the state store. `main()` calls
+`reconcile_worker_state` and `annunciate_orphans`, each of which does
+`store or state_mod.Store(tz=...)` and therefore defaulted to
+`config.STATE_PATH`: the real document T+00 starts from.
+
+Traced through `Store._write`: 16 writes per full suite run. The suite was
+run many times across several sessions.
+
+The leak is FIXED and guarded (the guard asserts which path the store
+opened, and was proved red by removing the patch). The residue those runs
+left is what this file records.
+
+
+2. THE RESIDUE, EXACTLY
+------------------------
+.runtime/state.json
+  sha256  bece6080ff95edff2a80b0a55d3db60f11c272a1ede494385aca7e99c368a855
+  bytes   9283
+  mode    0600, owner serina
+
+ONE entry under `orphan_annunciations`:
+
+  key                BROWSER_EVIDENCE_UNREADABLE:
+                     /home/serina/wellbeing-agent-experiment/agent-run-002/
+                     .runtime/evidence
+  check_id           BROWSER_EVIDENCE_UNREADABLE
+  resource_id        .../.runtime/evidence          <-- does not exist
+  occurrence_id      ORP-446df79eef4894ad
+  first_observed_at  2026-10-01T14:28:51+13:00
+  status             OBSERVED
+  attempt            586
+
+`attempt` is the counter the test runs incremented. `first_observed_at`
+dates the entry to the day the C-21 leak began producing it.
+
+
+3. WHAT IS *NOT* RESIDUE — CHECKED KEY BY KEY
+----------------------------------------------
+  started_at        None                 <-- T+00 NOT_STARTED
+  tasks             all nine QUEUED
+  prs               0
+  workers           0
+  counters          every counter zero
+  notifications     0
+  debt              0
+  migration_lock    FREE, no owner, no waiters
+  providers         four, all AVAILABLE
+  interventions     1 entry
+
+.runtime/ledger.jsonl
+  1 line, event type CONTROL_PLANE_INITIALISED. Nothing the test runs
+  wrote reached the ledger, because those runs stubbed `ledger_mod`.
+
+So the leak touched EXACTLY ONE FIELD of one entry. The rest of the
+document is the pristine pre-launch state.
+
+
+4. THE RISK, HONESTLY ASSESSED
+-------------------------------
+LOW, and bounded, for three reasons that were each checked rather than
+assumed:
+
+  a. STATUS IS `OBSERVED`, NOT `ATTEMPTING`. `annunciate_orphans` only
+     converges entries whose status is ATTEMPTING. An OBSERVED entry
+     suppresses no pending send and blocks no escalation.
+
+  b. THE RESOURCE DOES NOT EXIST. `.runtime/evidence` is absent, so
+     `reconcile.detect_orphans` will not re-detect this fingerprint at
+     T+00 unless that directory reappears AND the same unreadable-browser
+     condition occurs against it.
+
+  c. IF IT DID RECUR, the only consequence is that the retry counter for
+     that one fingerprint starts at 587 rather than 1. The counter orders
+     and identifies attempts; it is not a threshold that suppresses them.
+
+WHAT WOULD MAKE IT MATTER: if anything later reads `attempt` as a count of
+real escalations, or reports it to a human as one, the number is false.
+Nothing does today. That is the reason to record the provenance rather
+than to leave a strange number for someone to find and believe.
+
+
+5. WHY IT WAS NOT CLEANED
+--------------------------
+Two independent reasons, and either alone is sufficient:
+
+  1. The standing instruction for this work is explicit: "Do not repeat
+     initialization, reset durable run state, or repeat completed live
+     probes." Clearing a key in `.runtime/state.json` is resetting durable
+     run state.
+  2. The operator's instruction for this session says to preserve and
+     document it "for now", and to continue without waiting for a cleanup
+     decision.
+
+So it stands, with its provenance recorded, and the decision is open.
+
+
+6. THE OPERATOR'S OPTIONS, WHEN IT IS CONVENIENT
+-------------------------------------------------
+  LEAVE IT. Costs nothing measurable. The number is wrong but inert, and
+  this file explains it to whoever finds it.
+
+  CLEAR THE ONE KEY before T+00. Removes a false number from the launch
+  document. It is a single key - `orphan_annunciations` - and nothing else
+  in the document needs touching. NOT a re-initialisation: re-initialising
+  would also reset the providers, the budget and the task graph, which are
+  correct and must not be disturbed.
+
+  NEITHER OPTION IS URGENT and neither blocks anything. The real preflight
+  does not read this field, and `ctl start` refuses today for an unrelated
+  and much larger reason: no `preflight.json` exists.
+
+**NOT RECOMMENDED: `ctl init` or any path that rewrites the whole
+document.** The residue is one field; a full re-initialisation would
+discard nine correct task records and a human-set budget to fix it.
+
+
+7. HOW TO CONFIRM THIS RECORD IS STILL ACCURATE
+------------------------------------------------
+Read-only, no writes:
+
+  python3 -c "import json;d=json.load(open('.runtime/state.json'));\
+print(d['started_at'], len(d['prs']), len(d['workers']),\
+d['orphan_annunciations'])"
+
+If `started_at` is no longer None, T+00 has begun and this file is
+historical. If the `attempt` number has moved, something is still writing
+durable state from a test run and C-21 has regressed - the guard in
+`tests/test_watchdog_liveness.py::TestTheLoopWritesNoRealRunState` should
+have caught it, so check that it is still present and still failing when
+the patch is removed.
