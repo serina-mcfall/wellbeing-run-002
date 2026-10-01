@@ -641,4 +641,6 @@ before 8–10 deadlocks every product PR permanently.
 | Move `origin` from SSH to HTTPS? | **Yes, for the worker's worktrees only** — leave your own checkout on SSH | Today the strongest write credential in the system is a personal SSH key sitting entirely outside the scheme. That is a larger hole than the one the App closes. **AND, as of 2026-10-02, it is no longer optional:** after action 5 re-owns the checkout, a worker cannot read `serina`'s SSH key or `gh` config, so declining this requires some other answer to how a worker pushes a branch. Promoted to action 6c |
 
 The first remains yours to settle. The second is now a required action with
-a recommended answer, not a free choice.
+a recommended answer, not a free choice. **The two transport policy choices
+in the box above are also yours** — both already have a default
+implemented, and both are one-line changes if you want the other.
