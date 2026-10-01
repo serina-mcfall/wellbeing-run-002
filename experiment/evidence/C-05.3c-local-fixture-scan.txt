@@ -1,0 +1,240 @@
+C-05.3c — THE AUTOMATED ACCESSIBILITY PIPELINE, ACTUALLY RUN
+=============================================================
+Date:      2026-10-02
+Authority: Explicit operator instruction, this session, quoted verbatim in
+           section 1.
+HEAD at measurement: 15a5bbf44822c22c8941df1dc166246e97faf7af
+Branch:    wip/c05-1-persistence
+
+This closes handover 43.5(a). It does NOT close C-02's "never faced a real
+product" — see section 7 for exactly what this is not.
+
+
+1. THE OPERATOR'S AUTHORISATION, VERBATIM
+-----------------------------------------
+    "2. Exercise the actual accessibility services locally.
+
+    Use a disposable local fixture app and isolated test state to exercise
+    the real services factory: installation/build, server readiness,
+    browser scanning, result ingestion and cleanup.
+
+    Demonstrate a passing case and a known accessibility failure. Preserve
+    exact-head provenance, bounded execution, failure diagnostics and port
+    ownership. Use no production credentials.
+
+    Local fixture servers, controlled test subprocesses, ordinary
+    dependency downloads needed for these tests, and simulated
+    GitHub/provider responses are authorized. Paid provider calls, live
+    product workers and real product actions are not.
+
+    If an actual environment or access limitation prevents the test,
+    identify it precisely and continue independent work. 'No product
+    exists' is not itself a blocker to creating a fixture."
+
+No credential was read. No provider was called. No GitHub call was made.
+No dependency was downloaded — both fixtures have zero dependencies, so
+`npm ci` ran entirely offline.
+
+
+2. WHAT WAS BUILT
+-----------------
+apparatus/accessibility/fixture-product/{clean,violations}/
+
+Each: package.json (build + start scripts, no dependencies),
+package-lock.json, build.js, server.js, index.html. The index.html files
+are BYTE COPIES of apparatus/accessibility/fixtures/{clean,violations}.html
+— the pages run.test.js already proves the individual checks against — and
+fixture-product-pages.test.js asserts that in both directions so they
+cannot drift.
+
+WHY NOT AT THE REPOSITORY ROOT. PRODUCT_ENTRYPOINT and PRODUCT_LOCKFILE
+resolve relative to the attempt's checkout ROOT. A root package.json would
+be found by a real attempt and built and scanned as if it were TASK-001's
+Next.js app. There is deliberately no root package.json in this repository
+(apparatus/package.json keeps the root free for the product), and a node
+test now asserts that stays true.
+
+The tests therefore root ProductServices at
+`<worktree>/apparatus/accessibility/fixture-product/<variant>`, so the
+fixture is still read out of a detached worktree at an exact commit: the
+provenance path under test is the production one.
+
+
+3. WHAT ACTUALLY RAN — NOT INJECTED
+------------------------------------
+Previously every external edge in all 36 fixture tests was injected. These
+are the production defaults:
+
+  runner     subprocess.run with a real timeout  — npm ci, npm run build
+  spawner    subprocess.Popen, start_new_session — npm run start
+  http_ok    urllib.request against 127.0.0.1    — readiness polling
+  listener   /proc/net/tcp + tcp6 parsing        — port release observation
+  checkout   git worktree add --detach           — isolated build at the sha
+  scan       node apparatus/accessibility/run.js — real Chromium, real axe
+
+Browser sidecars written by the real runs recorded state=CLOSED with a
+real pid and start_ticks (3871257/45857983 and 3871411/45858247), which is
+the evidence a real browser process was launched and cleanly closed.
+
+
+4. THE TWO DEMONSTRATIONS
+-------------------------
+Budget in force (G3, from config/experiment.json, unmodified):
+install_build=600 readiness=120 scan=300 teardown=60 total=1080, sum=1080.
+Governed candidate port range 3200-3299; port 3200 claimed and released.
+
+PASS CASE — clean fixture, 2.6s wall clock
+  status COMPLETED, phase SCAN, verdict ACCESSIBILITY_AUTO_PASS
+  nine checks, all PASS, every one carrying sha=15a5bbf44822…
+  artefacts: <sha>-fullpage.png, <sha>-viewport-375.png, browser.json,
+             result.json
+  confirm_release: port_released=True; observed LISTEN set in range = {}
+
+FAIL CASE — violations fixture, 2.6s wall clock
+  status COMPLETED, phase SCAN, verdict ACCESSIBILITY_AUTO_FAIL
+  seven of nine checks FAIL; RESPONSIVE_375PX and SCREENSHOTS_ARTIFACTS
+  pass, which is correct — the fixture's defects are overflow, target
+  size, keyboard, focus, labels, motion and axe, not viewport rendering.
+  14 findings, every one merge_blocked=True.
+  confirm_release: port_released=True; observed LISTEN set in range = {}
+
+  findings (after the fix in section 5):
+    NO_OVERFLOW_CLIPPING_OVERLAP         ACC-DOD-RESPONSIVE_LAYOUT      P1
+    TOUCH_TARGETS                        ACC-DOD-TOUCH_TARGETS          P1
+    KEYBOARD_OPERATION                   ACC-DOD-KEYBOARD_OPERATION     P1
+    FOCUS_ORDER_VISIBLE_NO_TRAPS  x3     ACC-DOD-KEYBOARD_OPERATION     P1
+    LABELS_AND_TEXT_ERRORS               ACC-DOD-MEANINGFUL_LABELS      P1
+    LABELS_AND_TEXT_ERRORS               ACC-DOD-SCREEN_READER_FORMS_ERRORS P1
+    AXE_SCAN (label)                     ACC-DOD-MEANINGFUL_LABELS      P1
+    AXE_SCAN (page-has-heading-one)      ACC-DOD-HEADING_STRUCTURE      P1
+    REDUCED_MOTION…                      uncited  INVALID  blocking
+    AXE_SCAN (image-alt)                 uncited  INVALID  blocking
+    AXE_SCAN (landmark-one-main)         uncited  INVALID  blocking
+    AXE_SCAN (region)                    uncited  INVALID  blocking
+
+  The four uncited ones are G6's "unmapped failures remain blocking",
+  working as approved. image-alt, landmark-one-main and region are
+  DELIBERATELY absent from AXE_RULE_REQUIREMENT because the frozen
+  product/ACCESSIBILITY.md states no requirement they map to; filing them
+  against one would be inventing a requirement.
+
+
+5. THE DEFECT THIS FOUND — AND IT COULD ONLY BE FOUND BY RUNNING IT
+--------------------------------------------------------------------
+On the FIRST real failure run, all four composite checks produced UNCITED
+findings:
+
+    UNMAPPED  FOCUS_ORDER_VISIBLE_NO_TRAPS          condition=None
+    UNMAPPED  LABELS_AND_TEXT_ERRORS                condition=None
+    UNMAPPED  REDUCED_MOTION_NO_FLASHING_AUTOPLAY   condition=None
+    UNMAPPED  AXE_SCAN                              condition=None
+
+…while the signals those checks had genuinely reported were:
+
+    FOCUS_ORDER_VISIBLE_NO_TRAPS  FORWARD_TRAPPED, BACKWARD_TRAPPED,
+                                  NOT_ALL_REACHABLE
+    LABELS_AND_TEXT_ERRORS        NO_ACCESSIBLE_NAME,
+                                  INVALID_WITHOUT_TEXT_ERROR
+    AXE_SCAN                      label, page-has-heading-one (+3 unmapped)
+
+CAUSE. `apparatus/accessibility/run.js` writes
+`{checks: [...], details: {CHECK_ID: {...}}}` — results and diagnostics in
+SEPARATE top-level fields. `ProductServices.scan` returned
+`payload["checks"]` alone. `accessibility_evidence.findings_for` reads
+`check.get("detail")`, which therefore never existed, so
+`routing.accessibility_check_signals` was handed None on every real run and
+returned no signals every time.
+
+EFFECT. Not a hole — a DOWNGRADE. G6's approved composite sub-condition
+structure could never fire in production. Every composite failure collapsed
+to one uncited finding, which severity.py rates INVALID with
+merge_blocked=True. Nothing merged that should not have, which is exactly
+why no test caught it: every assertion about blocking stayed true. What was
+lost was the citation — the reviewer was told "no requirement cited" about
+failures whose requirement the registry already names.
+
+FIX. `control/accessibility_services.py::_with_details`, called from
+`scan`. It joins the two halves by check_id at the one seam where run.js's
+output becomes the control plane's. Rejected alternatives: changing run.js
+to nest detail inside each check (changes a schema-shaped output and every
+fixture that consumes it), and threading a second map through run_attempt
+and AttemptOutcome (a new parameter on two frozen dataclasses for one
+consumer).
+
+NO POLICY WAS CHANGED. Not one mapping table, severity rule, requirement
+identifier or verdict rule was touched. The fix delivers detail to code
+that already existed and was already approved. Both before and after, every
+finding from a failing check has merge_blocked=True; the fix converts
+uncited-INVALID-blocking findings into cited-P1-blocking ones and leaves
+the deliberately unmapped ones exactly as they were. Measured: 7 findings
+before, 14 after, all 14 blocking.
+
+Regression cover: tests/test_c05_3c_scan_detail_join.py, 11 tests,
+including one that still asserts an unmapped axe rule stays uncited and
+blocking, and one that asserts an absent detail stays ABSENT rather than
+becoming an empty dict — "nothing we could read" and "no sub-condition we
+recognise" must not collapse into each other.
+
+
+6. A SECOND DEFECT, IN THE TEST HARNESS ITSELF
+-----------------------------------------------
+The first real run of tests/test_c05_3c_local_fixture_scan.py LEAKED EIGHT
+stale git worktree registrations. Its cleanup called
+`ProductServices.dispose()`, which removes `self.checkout` — but this test
+roots ProductServices at a SUBDIRECTORY of the worktree, so dispose deleted
+the fixture directory and left the worktree registered. Once the
+TemporaryDirectories went away the registrations became unprunable garbage
+in a list this repository shares with eleven live subagent worktrees.
+
+Found by printing `git worktree list`, not by any assertion. Pruned (the
+eleven agent worktrees were untouched and verified present before and
+after: 12 entries before, 12 after). The cleanup now removes the worktree
+ROOT, and NoWorktreeLeakCase asserts the count is unchanged.
+
+THE FIRST VERSION OF THAT GUARD WAS VACUOUS. It pruned inside the test body
+BEFORE asserting, so it passed with the helper stubbed to `return`. Caught
+by mutating the helper and watching the guard stay green — which is the
+entire reason for mutating it. Restructured so the tidy-up is an
+addCleanup, after the measurement. Re-mutated: FAILED, "13 != 12 : an
+attempt checkout leaked a worktree registration". Restored, sha256
+bfce543fa8cce4a401f5bbbdf0b20c5a9d4f2a0940dce44b57472d42447da450.
+
+
+7. WHAT THIS IS NOT
+-------------------
+  - NOT a product. The thing built and scanned is a static fixture
+    server. prompts/accessibility.md's "has not yet been exercised against
+    a real product app or PR" remains TRUE and must not be removed.
+  - NOT a PR. No pull request, no GitHub call, no gh invocation.
+  - NOT the Supervisor. run_attempt and confirm_release were driven
+    directly; the tick path that reaches them is covered by the existing
+    test_c05_3b_* suites with injected services, not here.
+  - NOT a provider call. The qualitative half (COGNITIVE_SENSORY_REVIEW)
+    is not among the nine checks and was not exercised.
+  - NOT a Next.js build. The fixtures have no dependencies and no
+    framework; a real `npm ci` against TASK-001's lockfile will be a
+    different order of magnitude and may well need the full 600s share.
+
+
+8. VERIFICATION
+---------------
+  tests/test_c05_3c_local_fixture_scan.py   10 tests  OK  (11.4s)
+      — requires RUN_002_LOCAL_FIXTURE_SCAN=1; skipped otherwise, because
+        each scan launches Chromium. That is a deliberate trade: an
+        unattended suite does not notice this breaking.
+  tests/test_c05_3c_scan_detail_join.py     11 tests  OK
+  apparatus/accessibility/fixture-product-pages.test.js  4 tests  OK
+  Full Python suite    2,295 tests  OK (10 skipped — the whole of
+                       test_c05_3c_local_fixture_scan.py, which is the
+                       opt-in file above)
+  Full apparatus suite   222 tests  OK
+
+MUTATIONS PROVED RED AND RESTORED:
+  1. _remove_worktree -> no-op          NoWorktreeLeakCase FAILED (13 != 12)
+  2. violations test served clean page  FAILED, "the violations fixture
+                                        scanned as accessible"
+  Both restored from file copies and verified by sha256. File copies, not
+  `git checkout --`: handover 42.9 records that destroying uncommitted work.
+
+  git worktree list: 12 entries before this session's runs, 12 after, the
+  same eleven agent worktrees present throughout.

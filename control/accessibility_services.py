@@ -135,6 +135,49 @@ def _listening() -> set[int] | None:
     return proc.listening_ports(lo, hi)
 
 
+def _with_details(checks: list, details) -> list:
+    """Join run.js's two halves back together, by check_id.
+
+    FOUND BY RUNNING IT, NOT BY READING IT. run.js writes
+    `{checks: [...], details: {CHECK_ID: {...}}}` - the results and their
+    diagnostics in SEPARATE top-level fields. `findings_for` reads
+    `check.get("detail")`, which no check has ever carried, so
+    `accessibility_check_signals` was handed None on every real run and
+    returned no signals every time.
+
+    The consequence was not a hole, it was a DOWNGRADE. G6's approved
+    composite sub-condition structure - a keyboard trap citing
+    ACC-DOD-KEYBOARD_OPERATION, an unnamed control citing
+    ACC-DOD-MEANINGFUL_LABELS, two of them at once from one check - could
+    never fire. Every composite failure collapsed to one uncited finding,
+    which severity.py rates INVALID with merge_blocked True. Still
+    blocking, so nothing merged that should not have; but the reviewer was
+    told "no requirement cited" about a failure whose requirement the
+    repository already knows.
+
+    The join is done HERE, at the one seam where run.js's output becomes
+    the control plane's, rather than by changing run.js's schema-shaped
+    output or by threading a second map through run_attempt and the
+    AttemptOutcome.
+
+    Mutation is deliberate and local: these dicts were parsed from this
+    attempt's own result.json microseconds ago and are owned by nothing
+    else. A check whose detail is missing is left exactly as it was -
+    absent detail must stay absent, because an invented empty one would
+    read as "this check reported no sub-condition" rather than "this check
+    reported nothing we could read".
+    """
+    if not isinstance(details, dict):
+        return checks
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        detail = details.get(check.get("check_id"))
+        if detail is not None:
+            check["detail"] = detail
+    return checks
+
+
 @dataclass
 class _Handle:
     """What start_server hands back. Carries the process group, because
@@ -236,7 +279,9 @@ class ProductServices:
         checks = payload.get("checks")
         # A non-list is not "no checks" - it is an unusable result, and
         # reading it as empty is how a broken scan becomes a clean pass.
-        return checks if isinstance(checks, list) else None
+        if not isinstance(checks, list):
+            return None
+        return _with_details(checks, payload.get("details"))
 
     # --------------------------------------------------------- teardown
 

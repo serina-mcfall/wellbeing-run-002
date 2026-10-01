@@ -108,6 +108,24 @@ class RealServicesCase(unittest.TestCase):
 
     # ------------------------------------------------------------ helpers
 
+    @staticmethod
+    def _remove_worktree(tree) -> None:
+        """Deregister the detached worktree, and sweep up if that failed.
+
+        Cleanups run LIFO, so this runs while the TemporaryDirectory still
+        exists and `worktree remove` can succeed normally. The prune is a
+        net for the case where it did not: `worktree remove` refuses once
+        the directory is already gone, and the registration would then
+        survive in `.git/worktrees` forever.
+
+        The prune is safe to call unconditionally — it removes only
+        registrations whose directory no longer exists, and every other
+        worktree in this repository is present on disk.
+        """
+        gh.git(["worktree", "remove", "--force", str(tree)],
+               str(config.REPO_ROOT))
+        gh.git(["worktree", "prune"], str(config.REPO_ROOT))
+
     def _attempt(self, variant: str, port: int | None = None):
         """Allocate an isolated attempt and REAL services for one variant.
 
@@ -127,7 +145,15 @@ class RealServicesCase(unittest.TestCase):
         self.assertTrue((product / "package.json").is_file(),
                         f"{variant} fixture is not committed at {self.sha}")
         services = accessibility_services.ProductServices(product, ctx)
-        self.addCleanup(services.dispose)
+        # NOT services.dispose(). In production `factory` roots
+        # ProductServices at the worktree ROOT, so dispose removes the
+        # worktree. Here it is rooted at a SUBDIRECTORY so the fixture can
+        # live inside the repository, and dispose would delete that subdir
+        # while leaving the worktree REGISTERED — which is exactly what the
+        # first real run did, leaking eight stale registrations into
+        # `git worktree list` once the temporary directories went away.
+        # The deviation is this test's, so the cleanup is too.
+        self.addCleanup(self._remove_worktree, tree)
         plan = accessibility_evidence.AccessibilityPlan(
             task_id="TASK-FIXTURE", pr=0, sha=self.sha,
             attempt_id=attempt_dir.name, port=port)
@@ -221,6 +247,26 @@ class RealServicesCase(unittest.TestCase):
         self.assertTrue(
             any(v["valid"] and v["severity"] == "P1" for v in rated),
             "no failing check mapped to a real requirement at all")
+
+        # G6's composite structure, on REAL scan output. Before the detail
+        # join landed, every composite check collapsed to one uncited
+        # INVALID finding here — blocking, so nothing caught it, but the
+        # reviewer was told "no requirement cited" about failures whose
+        # requirement the registry already names.
+        cited = {f["unmet_requirement"] for f in findings
+                 if f["unmet_requirement"] is not None}
+        self.assertIn(
+            "ACC-DOD-KEYBOARD_OPERATION", cited,
+            "the fixture's real keyboard trap cited no keyboard requirement")
+        self.assertIn(
+            "ACC-DOD-MEANINGFUL_LABELS", cited,
+            "the fixture's real unlabelled control cited no label requirement")
+        composite = [f for f in findings
+                     if f["check_id"] == "FOCUS_ORDER_VISIBLE_NO_TRAPS"]
+        self.assertTrue(
+            any(f.get("condition") for f in composite),
+            "a composite check produced no sub-condition signal, so its "
+            "detail did not reach the mapping tables")
 
         # Same teardown guarantee on the failure path — the path where a
         # leaked server is most likely.
@@ -356,6 +402,47 @@ class RealServicesCase(unittest.TestCase):
                          "a root package.json would be scanned as the product")
         self.assertTrue((root / "AGENTS.md").is_file(),
                         "sanity: this should be the worktree root")
+
+
+@unittest.skipUnless(ENABLED, SKIP_WHY)
+class NoWorktreeLeakCase(unittest.TestCase):
+    """The attempts must leave `git worktree list` exactly as they found it.
+
+    The first real run of this file did not. It disposed the fixture
+    SUBDIRECTORY, which deleted that directory and left the worktree
+    registered; eight stale entries accumulated before anyone looked. The
+    repository shares its worktree list with eleven live subagent
+    worktrees, so leaking into it is not cosmetic.
+    """
+
+    def _registered(self) -> int:
+        out = gh.git(["worktree", "list"], str(config.REPO_ROOT)).stdout
+        return len([line for line in out.splitlines() if line.strip()])
+
+    def test_an_attempt_checkout_leaves_no_registration_behind(self):
+        before = self._registered()
+        sha = head_sha()
+        root = tempfile.TemporaryDirectory(prefix="run002-leak-")
+        self.addCleanup(root.cleanup)
+        # The tidy-up is a CLEANUP, not a step. Pruning before the
+        # assertion is what made the first version of this guard vacuous:
+        # it passed with _remove_worktree stubbed out to a no-op, because
+        # the test body was doing the cleaning the helper was supposed to
+        # do. Cleanups run after the method, so the assertion below now
+        # measures the helper and this still leaves the repository tidy if
+        # the helper has stopped working.
+        self.addCleanup(gh.git, ["worktree", "prune"], str(config.REPO_ROOT))
+
+        attempt = gate_evidence.allocate_attempt(
+            "TASK-FIXTURE", sha, root=Path(root.name))
+        tree = accessibility_services.isolated_checkout(sha, attempt)
+        self.assertIsNotNone(tree)
+        self.assertEqual(self._registered(), before + 1,
+                         "the checkout did not register as a worktree")
+
+        RealServicesCase._remove_worktree(tree)
+        self.assertEqual(self._registered(), before,
+                         "an attempt checkout leaked a worktree registration")
 
 
 @unittest.skipUnless(ENABLED, SKIP_WHY)
