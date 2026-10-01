@@ -1728,6 +1728,121 @@ def _claim_outcome_is_valid(claim, verdicts, reasons) -> tuple[bool, str]:
             else (False, "CLAIM_REASON_UNRECOGNISED"))
 
 
+def accessibility_review_worker_name(task_id: str, sha: str,
+                                     ordinal: int) -> str:
+    """The one derivation, used when minting a claim and when checking one.
+
+    SHA-bound for the reason the security worker name is: the ordinal
+    restarts at 1 for a new head, so a name built from task and ordinal
+    alone REPEATS across a head change and the second attempt reads the
+    first attempt's artefacts.
+    """
+    return f"{task_id.lower()}-a11y-{sha}-{ordinal:04d}"
+
+
+@dataclass(frozen=True)
+class AccessibilityReview:
+    """One parsed qualitative accessibility review. Faithful, not judged."""
+
+    verdict: str
+    findings: list = field(default_factory=list)
+    summary: str = ""
+    raw_excerpt: str = ""
+    structure: str = ""
+
+
+def parse_accessibility(text: str) -> AccessibilityReview:
+    """Extract the accessibility reviewer's machine-readable block.
+
+    Faithful, not adjudicating - the same contract parse_security keeps.
+    Findings are returned EXACTLY as the reviewer sent them: a malformed
+    one is recorded rather than dropped, because dropping it is precisely
+    how an invalid review becomes a passing one.
+
+    `unmet_requirement` IS NOT NORMALISED, and that is deliberate.
+    prompts/accessibility.md - a FROZEN file - shows
+    "unmet_requirement": "visible-focus-indicator" in its example, which is
+    the pre-C-02 kebab-case form the landed registry does not contain. A
+    reviewer following that example cites an identifier
+    severity.apply_severity_policy cannot recognise, and the finding is
+    rated INVALID and blocks. Translating kebab-case into ACC-DOD-* here
+    would be inventing a mapping nobody governed, and would defeat the
+    registry check entirely - so the citation is passed through untouched
+    and the contradiction is recorded in the audit rather than papered
+    over in the parser.
+    """
+    excerpt = (text or "")[-1500:]
+    for raw in reversed(_BLOCK.findall(text or "")):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(data, dict) or "verdict" not in data:
+            continue
+
+        raw_findings = data.get("findings")
+        findings: list[dict] = []
+        structure = ""
+        if not isinstance(raw_findings, list):
+            # An absent or non-list container is a structural defect, not
+            # "no findings". Reading it as empty would let output that
+            # never reported its findings adjudicate as though it had none.
+            structure = accessibility_contract.FINDING_FIELDS_INVALID
+        else:
+            for index, item in enumerate(raw_findings, start=1):
+                if not isinstance(item, dict):
+                    structure = accessibility_contract.FINDING_FIELDS_INVALID
+                    continue
+                item.setdefault("id", f"A{index}")
+                # Case only, and only on keys the reviewer actually sent -
+                # an absent field must survive to the consistency check.
+                for key in ("jev_severity", "classification"):
+                    if key in item:
+                        item[key] = _normalised(item[key])
+                findings.append(item)
+
+        return AccessibilityReview(
+            _normalised(data["verdict"]), findings,
+            str(data.get("summary", "")), excerpt, structure)
+    return AccessibilityReview(accessibility_contract.ACCESSIBILITY_UNPARSEABLE,
+                               raw_excerpt=excerpt)
+
+
+def accessibility_is_consistent(review) -> tuple[bool, str]:
+    """Whether a parsed qualitative review is a coherent contract.
+
+    (True, "") or (False, one finite reason), checked in a fixed order so
+    one defect always produces the same diagnostic.
+
+    THE SEVERITY POLICY IS APPLIED HERE, against the canonical registry.
+    That is what makes an uncited, miscited or contradictory finding
+    CLASSIFICATION_INVALID rather than a lesser finding - the reviewer
+    does not get to rate its own evidence, and a FAILURE that cites
+    nothing the frozen product spec states is not a smaller problem than
+    one that does, it is an unusable one.
+    """
+    if review.verdict == accessibility_contract.ACCESSIBILITY_UNPARSEABLE:
+        return False, accessibility_contract.OUTPUT_UNPARSEABLE
+    if review.verdict not in accessibility_contract.ACCESSIBILITY_VERDICTS:
+        return False, accessibility_contract.VERDICT_UNRECOGNISED
+    if review.structure:
+        return False, review.structure
+
+    blocking = 0
+    for finding in review.findings:
+        rated = adjudicate_accessibility_finding(finding)
+        if not rated["valid"]:
+            return False, accessibility_contract.CLASSIFICATION_INVALID
+        if rated["merge_blocked"]:
+            blocking += 1
+
+    if review.verdict == accessibility_contract.ACCESSIBILITY_PASS and blocking:
+        return False, accessibility_contract.PASS_WITH_BLOCKING_FINDINGS
+    if review.verdict == accessibility_contract.ACCESSIBILITY_FAIL and not blocking:
+        return False, accessibility_contract.FAIL_WITHOUT_BLOCKING_FINDINGS
+    return True, ""
+
+
 def accessibility_auto_claim_is_valid(claim) -> tuple[bool, str]:
     """(True, "") or (False, one finite diagnostic) for the AUTOMATED leg.
 

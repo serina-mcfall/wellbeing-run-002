@@ -297,6 +297,18 @@ class Supervisor:
         # readable as a completed 24-hour run. None until a signal
         # arrives; see _stop_reason for what each outcome means.
         self._stop_signal: int | None = None
+        # C-05.3b. The factory that supplies one attempt's external
+        # services - install, build, serve, scan, tear down. It is None
+        # here and that is the honest state: no product exists to build
+        # before the first product PR, so nothing can run an attempt yet.
+        # The planning path refuses to claim while it is None rather than
+        # minting claims that could never be executed, which would leak a
+        # port per tick. Injecting a factory is what turns the automated
+        # half on, and it is also how every test drives it.
+        self.accessibility_services_factory = None
+        # Accumulated inside T1 by plan_accessibility_auto, executed after
+        # it commits. Reset per tick, like _dispatch_plans.
+        self._accessibility_plans: list = []
         # C-18: this tick's planned dispatches, accumulated inside T1 by
         # _plan_dispatch and executed after it commits. Reset at the top of
         # every tick - the durable claim, not this list, survives a crash.
@@ -2638,6 +2650,18 @@ class Supervisor:
             # ingest - which for a passing security review never comes.
             if self.advance_if_evidence_complete(doc, task, pr_number, head):
                 continue
+            # C-05.3b. Planned in the SAME transaction as the security
+            # claim, and accumulated rather than returned, because the
+            # security plan below returns through a different path. Only
+            # when a services factory exists - see __init__.
+            # getattr, because the safe default is "do not plan". A
+            # Supervisor built without __init__ - which several suites do
+            # deliberately - must not start claiming ports it has no way
+            # to execute against.
+            if getattr(self, "accessibility_services_factory", None) is not None:
+                a11y = self.plan_accessibility_auto(doc, task, pr_number, head)
+                if a11y is not None:
+                    self._accessibility_plans.append((task["id"], a11y))
             identifiers = self.plan_security(
                 doc, task, pr_number, head, observation,
                 slots_free=self._security_slots_free(doc, pr_number))
@@ -3376,6 +3400,184 @@ class Supervisor:
             record["pending_findings"] = blocking
             self.transition(doc, task["id"], "FIX_REQUIRED",
                             f"accessibility findings on {head[:12]}")
+            return
+        self.advance_if_evidence_complete(doc, task, pr_number, head)
+
+    def execute_accessibility(self, plans: list) -> list:
+        """Phase C. Run each planned attempt with NO transaction held.
+
+        G9: the install, build, serve, scan and teardown all happen here,
+        after T1 has committed. Returns (task_id, plan, outcome) triples
+        for the commit phase; it writes no state itself, so a crash in
+        here leaves the durable claim exactly as T1 left it and the next
+        tick can see an attempt that never produced an answer.
+        """
+        results = []
+        budget = self._accessibility_budget()
+        for task_id, plan in plans:
+            started = time.monotonic()
+            services = self.accessibility_services_factory(plan)
+            outcome = accessibility_evidence.run_attempt(
+                plan, budget, services,
+                lambda: time.monotonic() - started)
+            results.append((task_id, plan, outcome, services))
+        return results
+
+    def commit_accessibility(self, results: list) -> None:
+        """Phase E. One transaction, re-verifying every claim it touches."""
+        if not results:
+            return
+        with self.store.transaction() as doc:
+            for task_id, plan, outcome, services in results:
+                task = doc["tasks"].get(task_id)
+                record = doc["prs"].get(str(plan.pr))
+                if task is None or not isinstance(record, dict):
+                    continue
+                claim = record.get("accessibility_auto")
+                if isinstance(claim, dict) and \
+                        claim.get("attempt_id") == plan.attempt_id:
+                    # G2: the port returns to the pool only once the
+                    # listener has been observed gone.
+                    outcome = accessibility_evidence.confirm_release(
+                        outcome, claim, services)
+                self.ingest_accessibility_auto(doc, task, plan.pr, plan.sha,
+                                               plan, outcome)
+
+    # ============================================================
+    # C-05.3b: the QUALITATIVE accessibility half.
+    #
+    # An agent, unlike the automated half - so it DOES consume a provider
+    # (config roles: accessibility -> codex) and is gated on provider
+    # state, and it gets a lease from G1's timeouts.accessibility.
+    # ============================================================
+
+    def _accessibility_review_slots_free(self, doc: dict, pr_number: int) -> bool:
+        used = 0
+        for number, record in (doc.get("prs") or {}).items():
+            if str(number) == str(pr_number):
+                continue
+            claim = record.get("accessibility_review") \
+                if isinstance(record, dict) else None
+            if isinstance(claim, dict) and claim.get("claim_state") != "COMPLETE":
+                used += 1
+        return used < self.cfg.max_accessibility_review
+
+    def plan_accessibility_review(self, doc: dict, task: dict, pr_number: int,
+                                  head: str):
+        """T1. Claim one qualitative review attempt, or return None."""
+        record = doc["prs"].get(str(pr_number))
+        if not isinstance(record, dict):
+            return None
+        claim = record.get("accessibility_review")
+        if isinstance(claim, dict):
+            if claim.get("sha") == head and claim.get("claim_state") != "COMPLETE":
+                return None  # in flight for this head
+            if claim.get("sha") == head and claim.get("verdict") is not None:
+                return None  # already answered for this head
+        if not self._accessibility_review_slots_free(doc, pr_number):
+            return None
+        # This half IS an agent, so the provider controls apply to it in
+        # full - unlike the automated half, which consults none.
+        blocked = self._security_dispatch_block(doc)
+        if blocked:
+            self.log("ACCESSIBILITY_REVIEW_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome=blocked, metadata_redacted={"head": head})
+            return None
+
+        ordinal = 1
+        if isinstance(claim, dict) and claim.get("sha") == head:
+            previous = claim.get("ordinal")
+            ordinal = (previous + 1) if isinstance(previous, int) else 1
+        if ordinal > routing.ACCESSIBILITY_ORDINAL_MAX:
+            self.log("ACCESSIBILITY_REVIEW_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome="ORDINAL_EXHAUSTED",
+                     metadata_redacted={"head": head})
+            return None
+
+        fresh = {
+            "sha": head,
+            "ordinal": ordinal,
+            "attempt_id": routing.ACCESSIBILITY_REVIEW_ATTEMPT_FMT.format(ordinal),
+            "worker": routing.accessibility_review_worker_name(
+                task["id"], head, ordinal),
+            "claim_state": "PLANNED",
+            "claimed_at": clock.iso(self.now()),
+            # G1: timeouts.accessibility = 1800, the agent lease, kept
+            # separate from the automated browser deadlines on purpose.
+            "lease_expires_at": self._lease_expires("accessibility"),
+            "verdict": None,
+            "reason": "",
+        }
+        ok, diagnostic = routing.accessibility_review_claim_is_valid(fresh)
+        if not ok:
+            self.log("ACCESSIBILITY_REVIEW_HELD", task_id=task["id"],
+                     pr_id=pr_number, activity_class="ORCHESTRATION",
+                     outcome=diagnostic, metadata_redacted={"head": head})
+            return None
+        record["accessibility_review"] = fresh
+        self.log("ACCESSIBILITY_REVIEW_CLAIMED", task_id=task["id"],
+                 pr_id=pr_number, role="accessibility",
+                 activity_class="ORCHESTRATION", outcome="PLANNED",
+                 metadata_redacted={"head": head,
+                                    "attempt_id": fresh["attempt_id"],
+                                    "worker": fresh["worker"]})
+        return accessibility_evidence.AccessibilityPlan(
+            task_id=task["id"], pr=pr_number, sha=head,
+            attempt_id=fresh["attempt_id"], port=0)
+
+    def ingest_accessibility_review(self, doc: dict, task: dict, pr_number: int,
+                                    head: str, plan, text: str) -> None:
+        """Commit one qualitative review, re-verifying what it reviewed."""
+        record = doc["prs"].get(str(pr_number))
+        if not isinstance(record, dict):
+            return
+        claim = record.get("accessibility_review")
+        if not isinstance(claim, dict):
+            return
+        if claim.get("sha") != head or \
+                claim.get("attempt_id") != plan.attempt_id:
+            self.log("ACCESSIBILITY_REVIEW_DISCARDED", task_id=task["id"],
+                     pr_id=pr_number, activity_class="REVIEW",
+                     outcome="CLAIM_MOVED",
+                     metadata_redacted={"head": head,
+                                        "attempt_id": plan.attempt_id})
+            return
+        if claim.get("claim_state") == "COMPLETE":
+            return
+
+        review = routing.parse_accessibility(text)
+        consistent, why = routing.accessibility_is_consistent(review)
+        claim["claim_state"] = "COMPLETE"
+        if not consistent:
+            # An incoherent review is NOT a FAIL. It is the absence of a
+            # usable judgement, so it never routes to FIX_REQUIRED and
+            # never records findings the reviewer did not establish.
+            claim["verdict"] = None
+            claim["reason"] = why
+            self.log("ACCESSIBILITY_REVIEW_RESULT", task_id=task["id"],
+                     pr_id=pr_number, role="accessibility",
+                     activity_class="REVIEW", outcome=why,
+                     metadata_redacted={"head": head,
+                                        "attempt_id": plan.attempt_id})
+            return
+
+        claim["verdict"] = review.verdict
+        claim["reason"] = ""
+        blocking = [f for f in review.findings
+                    if routing.adjudicate_accessibility_finding(f)["merge_blocked"]]
+        self.log("ACCESSIBILITY_REVIEW_RESULT", task_id=task["id"],
+                 pr_id=pr_number, role="accessibility",
+                 activity_class="REVIEW", outcome=review.verdict,
+                 metadata_redacted={"head": head,
+                                    "attempt_id": plan.attempt_id,
+                                    "findings": len(review.findings),
+                                    "blocking": len(blocking)})
+        if review.verdict == accessibility_contract.ACCESSIBILITY_FAIL:
+            record["pending_findings"] = blocking
+            self.transition(doc, task["id"], "FIX_REQUIRED",
+                            f"accessibility review findings on {head[:12]}")
             return
         self.advance_if_evidence_complete(doc, task, pr_number, head)
 
@@ -4524,6 +4726,7 @@ class Supervisor:
         # C-18: one list per tick. Reset here rather than only in __init__ so
         # a plan can never leak from one cycle into the next.
         self._dispatch_plans = []
+        self._accessibility_plans = []
 
         # C-05.3a Phase A + Phase E-publish, and C-18 stage 1's pull-request
         # observation, all OUTSIDE the lock. The snapshot is
@@ -4651,6 +4854,14 @@ class Supervisor:
         # spawn latency ahead of merges - see the report.
         if planned_security:
             self.confirm_security_spawn(self.execute_security(planned_security))
+
+        # C-05.3b Phase C + E. Outside every transaction, like the security
+        # spawn above and for the same reason: an install, a build, a
+        # server and a browser run are minutes of work, and holding the
+        # state lock across them would stall every other task.
+        if self._accessibility_plans:
+            self.commit_accessibility(
+                self.execute_accessibility(self._accessibility_plans))
 
         # T1 has committed. Each merge now gets its own transaction, before the
         # slow provider work so a merge never waits on a provider call.

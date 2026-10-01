@@ -333,5 +333,85 @@ class ConnectedLifecycleCase(unittest.TestCase):
         self.assertIsNone(self.sv.plan_accessibility_auto(doc, other, 8, HEAD))
 
 
+class TheTickPathCase(ConnectedLifecycleCase):
+    """route_evidence -> execute_accessibility -> commit_accessibility.
+
+    The difference between "the helpers have callers" and "the connected
+    path works". Everything above calls plan/ingest directly; this drives
+    the sequence a real tick drives.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.sv._accessibility_plans = []
+        self.sv._own_security_worktree = mock.Mock()
+        self.sv.plan_security = mock.Mock(return_value=None)
+        self.services = Services()
+        self.sv.accessibility_services_factory = lambda plan: self.services
+
+    def tick_evidence(self, doc, head=HEAD):
+        self.sv._accessibility_plans = []
+        self.sv.route_evidence(doc, {7: (head, {}, None, {})})
+        if self.sv._accessibility_plans:
+            self.sv.commit_accessibility(
+                self.sv.execute_accessibility(self.sv._accessibility_plans))
+
+    def test_a_tick_plans_executes_and_commits_the_attempt(self):
+        doc, task, record = self.doc_with()
+        self.sv.store._write(doc)
+        self.sv.store = mock.Mock(wraps=self.sv.store)
+        # commit_accessibility opens its own transaction; give it the doc
+        # it just planned against.
+        self.sv.store.transaction = lambda: _Transaction(doc)
+
+        self.tick_evidence(doc)
+
+        self.assertEqual(record["accessibility_auto"]["verdict"],
+                         ac.ACCESSIBILITY_AUTO_PASS)
+        self.assertTrue(record["accessibility_auto"]["port_released"])
+        self.assertEqual(task["state"], "REVIEW")
+        self.assertEqual(self.services.stopped, 1)
+
+    def test_a_tick_plans_nothing_without_a_services_factory(self):
+        # The honest default: no product exists to build before the first
+        # product PR, so claiming a port every tick would leak one.
+        doc, task, record = self.doc_with()
+        self.sv.accessibility_services_factory = None
+        self.sv.route_evidence(doc, {7: (HEAD, {}, None, {})})
+        self.assertEqual(self.sv._accessibility_plans, [])
+        self.assertNotIn("accessibility_auto", record)
+
+    def test_a_tick_does_not_re_plan_an_attempt_already_in_flight(self):
+        doc, task, _ = self.doc_with()
+        self.sv._accessibility_plans = []
+        self.sv.route_evidence(doc, {7: (HEAD, {}, None, {})})
+        first = list(self.sv._accessibility_plans)
+        self.sv._accessibility_plans = []
+        self.sv.route_evidence(doc, {7: (HEAD, {}, None, {})})
+        self.assertEqual(len(first), 1)
+        self.assertEqual(self.sv._accessibility_plans, [])
+
+    def test_plans_do_not_leak_between_ticks(self):
+        doc, _task, _ = self.doc_with()
+        self.sv._accessibility_plans = [("stale", "plan")]
+        self.sv._accessibility_plans = []
+        self.sv.route_evidence(doc, {7: (HEAD, {}, None, {})})
+        self.assertTrue(all(t == "TASK-001"
+                            for t, _ in self.sv._accessibility_plans))
+
+
+class _Transaction:
+    """A context manager yielding one already-held document."""
+
+    def __init__(self, doc):
+        self.doc = doc
+
+    def __enter__(self):
+        return self.doc
+
+    def __exit__(self, *exc):
+        return False
+
+
 if __name__ == "__main__":
     unittest.main()
