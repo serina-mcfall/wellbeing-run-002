@@ -506,6 +506,11 @@ REVIEW_RESULT_EVENT = "REVIEW_RESULT"
 MERGE_ATTESTATION_EVENTS: tuple[str, ...] = tuple(
     event for event, _ in MERGE_ATTESTATIONS) + (REVIEW_DISPATCH_EVENT,)
 
+# Stands in for an `outcome` that is not a string. A sentinel object rather
+# than a string, so it can never collide with a real outcome value some
+# future event type introduces.
+_UNREADABLE_OUTCOME = object()
+
 MERGE_ATTESTATION_MISSING = "LEDGER_ATTESTATION_MISSING"
 MERGE_ATTESTATION_UNREADABLE = "LEDGER_UNREADABLE"
 MERGE_ATTESTATION_CONTRADICTED = "LEDGER_ATTESTATION_CONTRADICTED"
@@ -544,11 +549,20 @@ def _agent_id(event) -> str | None:
     that could compare equal to another absent one. Two events that both
     name nobody must not be read as two events that name the same worker -
     that is precisely how an identity check becomes a tautology.
+
+    "Blank" means blank, not merely empty: `"   "` is stripped before the
+    test. The docstring said blank and the code tested only truthiness, so
+    a dispatch and a result both carrying `agent_id: "   "` vouched for
+    each other - the exact tautology the paragraph above forbids, reached
+    by a value a careless writer produces as easily as a careful attacker.
     """
     if not isinstance(event, dict):
         return None
     value = event.get("agent_id")
-    return value if isinstance(value, str) and value else None
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
 
 
 def _review_worker_attests(events, head_sha: str) -> tuple[bool, str]:
@@ -692,7 +706,22 @@ def ledger_attests_merge(inspection, head_sha: str) -> tuple[bool, str]:
                    and _attested_head(e) == head_sha]
         if not at_head:
             return False, MERGE_ATTESTATION_MISSING
-        outcomes = {e.get("outcome") for e in at_head}
+        # `outcome` is COERCED, not trusted, and this is not defensive
+        # decoration. Building the set below hashes the value, so a single
+        # ledger line carrying `"outcome": {}` raised `TypeError: unhashable
+        # type` straight out of this predicate - which the docstring above
+        # promises never happens, and which `supervisor.attempt_merge` does
+        # not catch, so it aborted the whole tick and kept aborting it. The
+        # ledger is append-only and writable by the UID that runs the
+        # workers (that is C-22's whole point), so one appended line was a
+        # permanent denial of service against the control plane.
+        #
+        # A non-string outcome is treated as a NON-PASSING one rather than
+        # skipped: an event that cannot state its outcome has not attested
+        # anything, and letting it vanish would make a leg pass on the
+        # strength of the events that happened to be well-formed.
+        outcomes = {o if isinstance(o, str) else _UNREADABLE_OUTCOME
+                    for o in (e.get("outcome") for e in at_head)}
         if passing not in outcomes:
             return False, MERGE_ATTESTATION_MISSING
         if outcomes - {passing}:

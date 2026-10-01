@@ -41,8 +41,16 @@ HEARTBEAT_SECONDS = 10
 # or `codex` child genuinely needs cannot be verified locally. Switching it on
 # blind risks a launch-day failure in the dispatch path; leaving the derivation
 # unwritten risks approving an OS split that still leaks the credential. So the
-# derivation is written and tested, and flipping it on is one line at the call
-# site, to be taken with the rest of action 6 and verified during the rehearsal.
+# derivation is written and tested, to be switched on with the rest of action 6
+# and verified during the rehearsal.
+#
+# AND SWITCHING IT ON IS NOT, BY ITSELF, THE FIX. `GH_TOKEN` is ON the
+# allow-list, because a worker needs its OWN 1-hour installation token. If the
+# Supervisor still holds ITS `GH_TOKEN` in `os.environ` when this filter is
+# wired, every worker inherits the identity that merges - the precise leak the
+# paragraph above describes, surviving the countermeasure. Action 6 is the
+# filter PLUS the process/UID split that gives the worker a different token;
+# the one-line call-site change on its own buys nothing.
 #
 # The names come from experiment/github-app/env-var-names.md §3. Everything in
 # that document's §2 - every RUN002_*_APP_* id, installation and key PATH - is
@@ -74,7 +82,11 @@ def worker_child_env(parent: dict, job: dict, *, secrets: tuple = ()) -> dict:
     for name in secrets:
         if name in parent:
             env[name] = parent[name]
-    env["RUN_001_ROLE"] = job["role"]
+    # Every one of these is `str()`-coerced. `RUN_001_ROLE` was not, and a
+    # non-string role would have been rejected by `Popen` at spawn time -
+    # a crash at the one moment a worker is being started, for a value the
+    # job file supplies.
+    env["RUN_001_ROLE"] = str(job["role"])
     env["RUN_001_TASK"] = str(job.get("task_id") or "")
     if job.get("port") is not None:
         env["PORT"] = str(job["port"])

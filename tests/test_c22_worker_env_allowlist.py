@@ -129,6 +129,16 @@ class NotYetWiredCase(unittest.TestCase):
                       "taken: update this test and the approval package "
                       "together - do not delete this assertion to make a "
                       "green run.")
+        # The complement, and without it this pin is a spelling check.
+        # `env = dict(os.environ)` followed by `env = worker_child_env(env,
+        # job)` wires action 6 completely while leaving the literal above
+        # untouched - so the first assertion alone would stay green through
+        # exactly the change it exists to notice.
+        self.assertNotIn("worker_child_env", body,
+                         "main() now calls worker_child_env - action 6 is "
+                         "wired. That is a governed change: update this "
+                         "test, the module comment and the approval "
+                         "package together.")
 
 
 if __name__ == "__main__":

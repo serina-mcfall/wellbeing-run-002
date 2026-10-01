@@ -261,7 +261,7 @@ Not a stylistic preference — four concrete reasons, each traceable:
    regardless of what the code in between does.
 2. **It is reachable today.** `control/gh.py:33` runs `gh` with **no
    explicit token** and no `env=` argument, so it inherits ambient host
-   auth; `control/worker_entry.py:113` does `env = dict(os.environ)` with
+   auth; `control/worker_entry.py:180` does `env = dict(os.environ)` with
    no scrub before `subprocess.Popen(..., env=env)` at line 130. A worker
    therefore runs with **the same GitHub identity as the Supervisor** —
    verified ambient identity `serina-mcfall`. §37.10 recorded this; it is
@@ -618,7 +618,7 @@ created on GitHub, and so the F5 deadlock is resolved before it can bite.
 | 9 | Apply the §4.2 payload to the **throwaway's** default branch; run V10 and **reproduce the F5 deadlock deliberately**. | human | throwaway admin | `PUT` the prior payload back, or `DELETE …/protection` |
 | 10 | Build the F5 resolution — §4.3b option (ii) recommended — with tests, including a mutation proving the new condition is detected. | agent | a separate, explicit change authorisation; **not granted by this document** | revert the commit |
 | 11 | Build the status publisher: the code that turns an ELIGIBLE verdict into `POST /statuses/{sha}`, sourced **only** from the SHA-bound `REVIEW_RESULT` ledger event plus the gate verdict, never from the submitted package (§37.10). **No such code exists today (F7).** | agent | separate change authorisation | revert the commit |
-| 12 | Change `control/gh.py:33` to pass an explicit per-role token instead of inheriting ambient auth, and `control/worker_entry.py:113` to construct the child environment from an allow-list rather than `dict(os.environ)`. | agent | separate change authorisation | revert the commit |
+| 12 | Change `control/gh.py:33` to pass an explicit per-role token instead of inheriting ambient auth, and `control/worker_entry.py:180` to construct the child environment from an allow-list rather than `dict(os.environ)`. | agent | separate change authorisation | revert the commit |
 | 13 | Re-run the whole §5 suite against the throwaway with the real code paths. | human + agent | sudo + throwaway | n/a |
 | 14 | Install the three Apps on `serina-mcfall/wellbeing-run-002`. | human | GitHub account | uninstall each installation |
 | 15 | Capture the current protection payload verbatim to a file as the rollback artefact, then apply `experiment/github-app/branch-protection-AFTER.json` (`jq .body`) to `main`, with `__GATE_APP_ID__` replaced by the gate App's numeric ID. **Only after steps 10 and 11 — see §9.6's ordering invariant.** | human | repo admin | `PUT` the captured bytes back; `experiment/github-app/branch-protection-BEFORE.json` is the fallback if capture failed |
@@ -948,7 +948,7 @@ Four things make this enforceable rather than aspirational:
    `serina`, which is exactly the hole, and changing the UID is exactly
    the fix.
 2. **The worker's environment is built from an allow-list.**
-   `control/worker_entry.py:113` is `env = dict(os.environ)` with no scrub
+   `control/worker_entry.py:180` is `env = dict(os.environ)` with no scrub
    before `Popen(..., env=env)` at `:124`. Runbook step 12 replaces it.
    Names for the allow-list are in
    `experiment/github-app/env-var-names.md` §3. **Until step 12 lands, a

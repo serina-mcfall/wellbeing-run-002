@@ -100,10 +100,22 @@ class DisabledByDefaultCase(unittest.TestCase):
         """
         import re
         root = Path(__file__).resolve().parent.parent
+        # WIDENED 2026-10-02. This pattern missed
+        # `from control.publisher import publish` - the most idiomatic
+        # wiring there is - along with import_module, run_path and
+        # exec-by-path. Kept identical to the one in
+        # tests/test_c20a_publication_path.py, which asserts its own
+        # coverage spelling by spelling; if these two ever diverge, that
+        # file is the one that proves which is right.
         wired = re.compile(r"\bimport\s+publisher\b"
-                           r"|\bfrom\s+\.?\s*publisher\s+import\b"
-                           r"|\bimport\b[^\n]*\bpublisher\b"
-                           r"|\bpublisher\.[A-Za-z_]")
+                           r"|\bimport\s+[\w.]*\.publisher\b"
+                           r"|\bfrom\s+[\w.]*\bpublisher\s+import\b"
+                           r"|\bfrom\s+\.+\s*[\w.]*\bpublisher\s+import\b"
+                           r"|\bpublisher\.(?!py\b)[A-Za-z_]"
+                           r"|import_module\([^\n]*publisher"
+                           r"|spec_from_file_location[^\n]*publisher"
+                           r"|run_path\([^\n]*publisher"
+                           r"|exec\s*\([^\n]*publisher")
         callers = []
         for path in list((root / "control").rglob("*.py")) + \
                 list((root / "bin").rglob("*")):
@@ -262,6 +274,72 @@ class WhatPublishesNothingCase(unittest.TestCase):
         decision.pop("trustedHeadSha")
         result = publisher.publish(decision, HEAD, poster=Recorder(),
                                    environ=ON)
+        self.assertTrue(result.posted)
+        self.assertEqual(result.state, publisher.FAILURE)
+
+
+class ASuccessMustNameTheHeadItJudgedCase(unittest.TestCase):
+    """The asymmetry between a failure and a success, and why it exists.
+
+    `test_a_decision_with_no_trusted_head_is_still_judged` above is
+    deliberate: a DENIED decision that could not resolve a head still
+    earns a truthful `failure`, so the pull request is not left with no
+    report. A SUCCESS carrying no resolved head is a different animal
+    entirely - it blesses a commit the gate never judged.
+
+    MEASURED 2026-10-02 before the guard existed: one decision object with
+    `trustedHeadSha: None` and the pending flag set posted `success`
+    against TWO DIFFERENT heads. live-gate.js cannot currently emit that
+    pair, but that is an unstated invariant of a program in another
+    language, and this module already declines to take the flag itself on
+    trust.
+    """
+
+    def _pending(self, trusted):
+        return {"decision": "DENIED", "trustedHeadSha": trusted,
+                "blockedOnlyByPendingIndependentReview": True, "reasons": []}
+
+    def test_a_success_with_no_resolved_head_publishes_nothing(self):
+        poster = Recorder()
+        result = publisher.publish(self._pending(None), HEAD,
+                                   poster=poster, environ=ON)
+        self.assertFalse(result.posted)
+        self.assertEqual(result.reason, publisher.UNUSABLE_HEAD)
+        self.assertEqual(poster.calls, [],
+                         "a success was posted for a head the gate never "
+                         "resolved")
+
+    def test_the_same_null_head_decision_cannot_bless_two_commits(self):
+        """The reproduction, kept as the regression."""
+        poster = Recorder()
+        decision = self._pending(None)
+        for head in (HEAD, OTHER):
+            publisher.publish(decision, head, poster=poster, environ=ON)
+        self.assertEqual(poster.calls, [])
+
+    def test_a_non_sha_trusted_head_also_refuses(self):
+        for bad in ("", "not-a-sha", "A" * 40, 40 * 1, ["a" * 40]):
+            poster = Recorder()
+            result = publisher.publish(self._pending(bad), HEAD,
+                                       poster=poster, environ=ON)
+            self.assertFalse(result.posted, f"{bad!r} earned a success")
+            self.assertEqual(poster.calls, [])
+
+    def test_a_resolved_matching_head_still_succeeds(self):
+        """The control. A guard that refuses everything proves nothing."""
+        poster = Recorder()
+        result = publisher.publish(self._pending(HEAD), HEAD,
+                                   poster=poster, environ=ON)
+        self.assertTrue(result.posted)
+        self.assertEqual(result.state, publisher.SUCCESS)
+
+    def test_a_failure_for_an_unresolved_head_is_still_published(self):
+        """The deliberate behaviour this guard must NOT have broken."""
+        decision = {"decision": "DENIED", "trustedHeadSha": None,
+                    "blockedOnlyByPendingIndependentReview": False,
+                    "reasons": [{"code": "HEAD_SHA_UNVERIFIED"}]}
+        poster = Recorder()
+        result = publisher.publish(decision, HEAD, poster=poster, environ=ON)
         self.assertTrue(result.posted)
         self.assertEqual(result.state, publisher.FAILURE)
 

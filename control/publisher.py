@@ -174,6 +174,26 @@ def publish(decision, head_sha: str, *, poster, environ=None) -> Publication:
     if state is None:
         return _refused(why or UNUSABLE_DECISION, head_sha)
 
+    # A SUCCESS must name the head the gate actually judged.
+    #
+    # The guard above compares `trusted` to `head_sha` only when `trusted`
+    # is not None, because a DENIED decision that could not resolve a head
+    # still earns a truthful `failure` - that is deliberate and tested.
+    # But the same absence on the SUCCESS path means something entirely
+    # different: it blesses a commit the gate never resolved.
+    #
+    # MEASURED 2026-10-02, not imagined: one decision object carrying
+    # `trustedHeadSha: null` and `blockedOnlyByPendingIndependentReview:
+    # true` posted `success` against TWO DIFFERENT heads from the same
+    # object. Today's live-gate.js cannot emit that pair - a null head
+    # adds HEAD_SHA_UNVERIFIED, so the reason list is longer than one and
+    # the flag is false - but that is an unstated invariant of a program in
+    # another language, and this module already refuses to take the flag
+    # itself on trust two lines below. It should not take this on trust
+    # either.
+    if state == SUCCESS and not _is_sha(trusted):
+        return _refused(UNUSABLE_HEAD, head_sha)
+
     try:
         ok = poster(CONTEXT, state, head_sha)
     except Exception:          # noqa: BLE001 - a transport fault is finite

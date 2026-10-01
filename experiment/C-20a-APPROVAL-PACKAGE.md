@@ -29,13 +29,23 @@ nothing that bears on the judgement. Branch protection on `main` gains a
 required context only the gate can satisfy, and loses its human
 approving-review requirement — because you are both the author and the
 authenticated identity, and GitHub forbids self-approval, so that
-requirement is unsatisfiable rather than protective. The gate executes
-from a pinned, read-only export, never from the pull request's own tree.
+requirement is unsatisfiable rather than protective. The gate's **code**
+executes from a pinned, read-only export, never from the pull request's
+own tree — though its **git facts** necessarily come from the live
+checkout, because that is the only place a real head SHA exists (§7).
 
 **The hinge, stated plainly: this takes `main` from "a human approved
 this" to "the gate approved this".** If that trade is unacceptable, reject
 the arrangement rather than trimming it — every part of it exists to make
 that single substitution safe.
+
+**Three things to read before deciding, because each is a claim the code
+did not originally support and now does:** the `Commit statuses: write`
+permission still has **no call site** (§2); the
+`blockedOnlyByPendingIndependentReview` flag **cannot tell its own missing
+context from any other unmet protection rule**, though it can never cause
+a merge (§4); and two adapters **deny every pull request when run from the
+export** unless action 8 is built the way §7 specifies.
 
 ---
 
@@ -325,7 +335,7 @@ that is documented.
 > something this arrangement solves.**
 
 > **One change the GitHub side cannot substitute for:**
-> `control/worker_entry.py:113` is `env = dict(os.environ)` with no scrub
+> `control/worker_entry.py:180` is `env = dict(os.environ)` with no scrub
 > before `Popen`. Until that is an allow-list, a worker inherits the
 > Supervisor's entire environment and the boundary is not enforced
 > whatever the file modes say. Names for the allow-list:

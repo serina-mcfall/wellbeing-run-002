@@ -93,6 +93,7 @@ C-20a(C) and remains unapproved.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -179,16 +180,59 @@ def _refused(outcome: str) -> GateRun:
     return GateRun(ok=False, outcome=outcome, decision=None)
 
 
+# The environment the GATE process may see. Allow-list, for the same reason
+# `worker_entry.WORKER_ENV_ALLOWED` is one, and found the same way: by
+# measuring rather than assuming.
+#
+# This spawn passed no `env=` at all, so the gate inherited the Supervisor's
+# entire environment. Two names in it decide WHAT CODE THE GATE RUNS:
+#
+#   NODE_PATH     prepends module search roots. REPRODUCED 2026-10-02: a
+#                 `live-gate.js` that fails `Cannot find module 'ajv/dist/2020'`
+#                 from a real read-only export loads successfully when
+#                 NODE_PATH points at a writable tree elsewhere. So the
+#                 dependency tree of the thing judging a pull request could
+#                 come from outside the pinned export.
+#   NODE_OPTIONS  Node applies it to every process. `--require <file>` runs
+#                 arbitrary code before the entry point.
+#
+# Neither is reachable by a product worker under the approval package's §6,
+# so this is defence in depth rather than a live hole. It is cheap, the
+# countermeasure already existed one layer down, and the whole point of §7
+# is that the gate executes only code the pin covers - an argument that
+# `NODE_PATH` quietly undoes.
+#
+# PATH is passed because `node` and `git` are looked up through it; the
+# runbook should pin an absolute `node`, which is a deployment concern
+# rather than something this module can enforce.
+GATE_ENV_ALLOWED: frozenset[str] = frozenset({
+    "PATH", "HOME", "LANG", "LC_ALL", "TZ",
+})
+
+
+def gate_child_env(parent: dict) -> dict:
+    """The environment ONE gate process may see. Allow-list, not deny-list.
+
+    A name invented tomorrow is dropped without anyone remembering to drop
+    it. NODE_PATH and NODE_OPTIONS are absent by construction rather than
+    by being named, which is the property that matters.
+    """
+    return {name: parent[name] for name in GATE_ENV_ALLOWED if name in parent}
+
+
 def run_node(argv: list[str], stdin_text: str, timeout: int) -> RunResult:
     """The default runner: a LOCAL subprocess. Never a network call.
 
     Separated from `invoke_gate` so every test can inject its own and
     nothing spawns a process a test did not write itself. Shaped like
     `control/gh.py::run` — returned faults, never raised ones.
+
+    The child environment is ALLOW-LISTED. See GATE_ENV_ALLOWED.
     """
     try:
         proc = subprocess.run(argv, input=stdin_text, capture_output=True,
-                              text=True, timeout=timeout, check=False)
+                              text=True, timeout=timeout, check=False,
+                              env=gate_child_env(os.environ))
     except subprocess.TimeoutExpired:
         return RunResult(code=124, stdout="", timed_out=True)
     except (OSError, ValueError) as exc:  # noqa: BLE001 - finite, not raised

@@ -866,12 +866,30 @@ class NothingReachesPublicationCase(unittest.TestCase):
     # PATH rather than by name - so that is closed explicitly by the last
     # alternative rather than left to the exclusion. Net: strictly fewer false
     # positives AND one more true positive than before.
+    # WIDENED 2026-10-02 after an independent review ran the compiled
+    # pattern against the spellings someone would actually use.
+    #
+    # `from control.publisher import publish` - THE most idiomatic way to
+    # wire this - did not match. Neither did `import_module`, `run_path`
+    # or `exec(open(...))`. A file could import the publisher and call it,
+    # and the class whose entire purpose is the containment guarantee
+    # stayed green. That hole predates the earlier narrowing and was not
+    # introduced by it, but it was missed by it.
+    #
+    # The filename spelling (`publisher.py`) is still excluded from the
+    # attribute-access alternative, because ordinary prose says it; the
+    # load-by-path spellings are caught by naming the LOADER instead
+    # (`run_path(`, `exec(`, `import_module(`, `spec_from_file_location`),
+    # which prose does not contain. Both properties are asserted below.
     WIRED = re.compile(r"\bimport\s+publisher\b"
-                       r"|\bfrom\s+\.?\s*publisher\s+import\b"
-                       r"|\bimport\b[^\n]*\bpublisher\b"
+                       r"|\bimport\s+[\w.]*\.publisher\b"
+                       r"|\bfrom\s+[\w.]*\bpublisher\s+import\b"
+                       r"|\bfrom\s+\.+\s*[\w.]*\bpublisher\s+import\b"
                        r"|\bpublisher\.(?!py\b)[A-Za-z_]"
+                       r"|import_module\([^\n]*publisher"
                        r"|spec_from_file_location[^\n]*publisher"
-                       r"|publisher[^\n]*spec_from_file_location")
+                       r"|run_path\([^\n]*publisher"
+                       r"|exec\s*\([^\n]*publisher")
 
     ALLOWED = {"control/publisher.py",
                "experiment/github-app/publication_path.py",
@@ -894,6 +912,59 @@ class NothingReachesPublicationCase(unittest.TestCase):
                     continue
                 path = Path(dirpath) / name
                 yield path.relative_to(ROOT).as_posix(), path
+
+    # Every way a Python file can reach another module, written out. If a
+    # spelling is missing here it is missing from the guard, and the guard
+    # is the whole containment claim.
+    WIRING_SPELLINGS = (
+        "from control.publisher import publish",
+        "from control import publisher",
+        "import control.publisher",
+        "import publisher",
+        "from publisher import publish",
+        "from .publisher import publish",
+        "from ..control.publisher import publish",
+        'importlib.import_module("control.publisher")',
+        'runpy.run_path("control/publisher.py")',
+        'exec(open("control/publisher.py").read())',
+        "publisher.publish(decision, head, poster=poster)",
+        'spec_from_file_location("publisher", path)',
+    )
+
+    # Prose that NAMES the publisher without reaching it. Every one of
+    # these appears somewhere in this repository's documentation.
+    PROSE = (
+        "control/publisher.py posts only through an injected `poster`",
+        "the publisher is still unwritten",
+        "**The publisher**, written and **disabled**",
+        "# publisher.py holds the context constant",
+    )
+
+    def test_the_guard_catches_every_way_of_wiring_it(self):
+        """The guard for the guard.
+
+        A scan is only as good as its pattern, and this one's pattern was
+        wrong in a way no test could see: it missed
+        `from control.publisher import publish`, so the containment claim
+        would have survived the most ordinary wiring anyone would write.
+        Scanning files proves nothing if the thing doing the scanning
+        cannot recognise what it is looking for.
+        """
+        for spelling in self.WIRING_SPELLINGS:
+            self.assertRegex(spelling, self.WIRED,
+                             f"the guard does not recognise {spelling!r} - "
+                             "the publisher could be wired this way and the "
+                             "repo-wide scan would stay green")
+
+    def test_the_guard_does_not_fire_on_prose_that_merely_names_it(self):
+        """The other half, and it is not optional.
+
+        A guard that cries wolf is a guard someone eventually deletes.
+        This one already failed on a documentation sentence once.
+        """
+        for sentence in self.PROSE:
+            self.assertNotRegex(sentence, self.WIRED,
+                                f"the guard fires on prose: {sentence!r}")
 
     def test_only_the_publication_path_reaches_the_publisher(self):
         callers = []

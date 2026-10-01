@@ -74,7 +74,7 @@ environments: one `GH_TOKEN` per process, never both.
 | `HOME` | `run002-wrk`'s own home — `claude` and `codex` keep state in `$HOME` (§7 R5) |
 
 **The worker environment must be constructed from an allow-list**, not from
-`dict(os.environ)` as `control/worker_entry.py:113` does today. Any name in
+`dict(os.environ)` as `control/worker_entry.py:180` does today. Any name in
 section 2 above that reaches a worker process defeats the boundary.
 
 Proposed allow-list for the worker child environment: `PATH`, `HOME`,
