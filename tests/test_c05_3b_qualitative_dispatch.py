@@ -366,6 +366,62 @@ class QualitativeDispatchCase(unittest.TestCase):
         self.sv.store._write(doc)
         self.assertEqual(len(self.plan(doc)), 1)
 
+    # ------------------------------------------------------- restart recovery
+
+    def restarted(self):
+        """A genuinely new Supervisor over the SAME durable store.
+
+        Not the same object with its lists cleared - a restart is a fresh
+        process reading state.json back, and anything the claim needed
+        that lived only in memory would be gone.
+        """
+        with mock.patch.object(sv_mod, "ledger_mod"), \
+                mock.patch.object(sv_mod, "telemetry"), \
+                mock.patch.object(sv_mod, "jev"):
+            fresh = sv_mod.Supervisor(self.cfg)
+        fresh.store = state_mod.Store(path=self.root / "state.json", tz=TZ)
+        fresh.ledger = mock.Mock()
+        fresh.notifier = mock.Mock()
+        fresh.log = mock.Mock(
+            side_effect=lambda e, **k: self.logged.append((e, k)))
+        fresh.notify_out = mock.Mock(return_value={"queued": True,
+                                                   "intent_id": "NTF-2"})
+        fresh._accessibility_plans = []
+        fresh._accessibility_review_plans = []
+        self.sv = fresh
+        return fresh
+
+    def test_a_restart_does_not_re_dispatch_an_in_flight_review(self):
+        """The claim is durable, so a Supervisor that died between the
+        spawn and the result must not spend a second provider call on the
+        same commit."""
+        self.dispatched()
+        self.restarted()
+        doc = self.sv.store.read()
+        self.assertEqual(self.plan(doc), [])
+
+    def test_a_restart_keeps_the_claim_and_its_lease(self):
+        plan = self.dispatched()
+        before = self.sv.store.read()["prs"]["7"]["accessibility_review"]
+        self.restarted()
+        after = self.sv.store.read()["prs"]["7"]["accessibility_review"]
+        self.assertEqual(after, before)
+        self.assertEqual(after["worker"], plan.worker)
+        self.assertIsNotNone(after["lease_expires_at"])
+
+    def test_a_restart_can_still_ingest_the_result_it_did_not_dispatch(self):
+        """The head and attempt id the ingest re-verifies against travel
+        on the WORKER record, not in the dead process's memory."""
+        plan = self.dispatched()
+        self.restarted()
+        doc = self.reap(plan.worker,
+                        block({"verdict": "ACCESSIBILITY_PASS",
+                               "findings": []}))
+        self.assertEqual(
+            doc["prs"]["7"]["accessibility_review"]["verdict"],
+            ac.ACCESSIBILITY_PASS)
+        self.assertEqual(doc["tasks"]["TASK-001"]["state"], "REVIEW")
+
     def test_the_gate_needs_the_qualitative_leg_too(self):
         """A PASS on the other two classes is not enough: before this
         chain existed, nothing could ever supply this one."""
