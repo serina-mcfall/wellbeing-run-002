@@ -98,20 +98,36 @@ asserts that each `gh`/API call still exists at the file and line the
 permission was derived from, and fails loudly if one moves. Run it:
 `python3 experiment/github-app/check-templates.py`.
 
-> **THE ONE EXCEPTION IS THE PERMISSION THIS WHOLE ARRANGEMENT EXISTS TO
-> GRANT.** `Commit statuses: write` has **no call site**, because
-> `control/publisher.py` has no transport: its `poster` is a required,
-> undefaulted argument and every caller in the repository is a test passing
-> a simulated one. So the check cannot assert anything about it, and does
-> not pretend to.
+> **THE PERMISSION THIS WHOLE ARRANGEMENT EXISTS TO GRANT NOW HAS A CALL
+> SITE — UPDATED 2026-10-02.** `Commit statuses: write` is exercised by
+> `experiment/github-app/status_transport.py`, the only module in Run 002
+> that builds a GitHub commit-status request. Its contract is taken from
+> GitHub's own documentation, read 2026-10-02:
 >
-> This is the surviving half of finding F7. The other half is closed —
-> F7 was "the permission at the centre of this proposal exists to serve
-> code nobody has written", and that code is now written. What remains is
-> narrower and still true: **nothing in this repository has ever posted a
-> commit status, and no code here builds the `statuses/` path at all.**
-> Approving this permission approves it for a transport that does not yet
-> exist; building that transport is action 9.
+> ```
+> POST /repos/{owner}/{repo}/statuses/{sha}
+> Accept: application/vnd.github+json
+> X-GitHub-Api-Version: 2026-03-10
+> body {state, context, description?, target_url?}
+> state ∈ {"error","failure","pending","success"}   201 Created
+> ```
+>
+> **F7 IS NOW FULLY CLOSED AS A "NOBODY WROTE IT" FINDING.** The permission
+> serves real code. What replaces it is a narrower and more honest
+> statement: **no request has ever been sent.** `http` is a required,
+> undefaulted argument; the module imports no `urllib`, `requests`,
+> `socket` or `httpx`; nothing imports the module; and the enable switch is
+> a required injected callable, re-read per call. Four mechanical checks
+> (`E2`) assert each of those, and all four were proved red by mutation.
+>
+> **`check-templates.py` check E changed its claim rather than being
+> relaxed.** It used to assert "no code anywhere constructs a commit-status
+> API call", which this transport makes false. Because the check greps
+> outside `experiment/`, leaving it alone would have kept it GREEN while
+> its stated claim was false — which is worse than red, and was refused on
+> exactly those grounds once before. E now asserts what survives: no
+> ORDINARY EXECUTION PATH builds the call. E2 asserts what keeps the
+> transport inert.
 
 **F1 is resolved and shown.** §41.7's set lacked `Checks: read`, so the
 gate could not read `ci` — which lives only on the check-run surface — and
@@ -458,7 +474,7 @@ rows are marked **ADDED**; two existing rows are marked **CORRECTED**.
 | **7b** | **ADDED 2026-10-02, AND WITHOUT IT THE GATE CANNOT RUN AT ALL.** `cd <export>/apparatus && npm ci --omit=dev`, **before** the `chown`/`chmod`. See the box below | yes — delete the export |
 | 7c | **Only now** `chown -R run002-sup:run002` and `chmod -R a-w` the export | yes |
 | 8 | Build the gate invoker that runs `live-gate.js` from that export. **Read the §7 box on `WORKSPACE_MISMATCH` first** — the obvious implementation denies every pull request | yes — code |
-| 9 | Wire `control/publisher.py` to the gate invoker and the gate credential, and give it a real transport | yes — code |
+| 9 | Wire the publisher to the gate invoker and the gate credential. **The transport itself is now BUILT** (`status_transport.py`, 31 tests, 6 mutations) — this action is the wiring and the credential, not the request | yes — code |
 | 10 | Run the falsification plan on the THROWAWAY repository — **V1–V13**, including deliberately reproducing the F5 deadlock (V10). **V12 and V13 were added 2026-10-02**: V12 is the second-required-context check behind §4's box, and **V13 runs the gate from the read-only export, which is the step that would have caught the §7 trap.** V13 must pass before action 11 | n/a |
 | 10b | **STOP GATE.** Do not proceed unless every V-step passed. The proposal had two such gates; compressing to twelve actions lost both | n/a |
 | 10c | **CORRECTED. Only now install the three Apps on `serina-mcfall/wellbeing-run-002`** | yes — uninstall |
@@ -550,6 +566,7 @@ before 8–10 deadlocks every product PR permanently.
 | **The gate program itself** (action 8's deployment half): envelope in on stdin, the gate's decision out verbatim, built around all three `__dirname` traps and proved by a regression test that runs it from a directory that is NOT the configured workspace | `apparatus/pr-evidence/gate-cli.js`, 29 tests |
 | **The `ajv` packaging fix** for action 7b, with `npm ci --omit=dev` verified to install it and not playwright | `apparatus/package.json`, `package-lock.json` |
 | **The gate process's environment allow-list** — `NODE_PATH` and `NODE_OPTIONS` both choose what code Node runs, and the spawn passed neither through a filter | `control/gate_invoker.py::gate_child_env`, 7 tests |
+| **The commit-status transport**, contract derived from GitHub's published documentation, **with no client, no socket import, no importer and no request ever sent** | `experiment/github-app/status_transport.py`, 31 tests, 6 mutations, 4 mechanical checks (`E2`) |
 
 ---
 
@@ -567,6 +584,34 @@ before 8–10 deadlocks every product PR permanently.
 ---
 
 ## 12. Recommendations on the two open questions
+
+> ### TWO POLICY CHOICES THE TRANSPORT CANNOT MAKE — ADDED 2026-10-02
+>
+> Everything else about the request is settled by GitHub's documentation.
+> These two are not specified by the documentation, by this package, or by
+> the proposal, and I have implemented a default rather than guess at your
+> intent. Both are one-line changes.
+>
+> **1. What a human sees in the checks list.** `description` and
+> `target_url` are optional and **both are currently omitted**, so the pull
+> request shows the bare context name `run-002/independent-review` with no
+> explanation and no link. The alternative is a short description (e.g.
+> "evidence verified at `<sha>`") and possibly a `target_url`. There is
+> nowhere obvious for a URL to point — no artefact is published anywhere —
+> so a description alone may be the sensible middle. **Recommendation: add
+> a description, omit `target_url`.** It costs nothing and it is the only
+> thing a human reading a blocked pull request will see.
+>
+> **2. Whether `pending` is ever posted.** GitHub's enum has four states;
+> this system emits only `success` and `failure`, and never posts anything
+> while it is still deciding. So between a push and a verdict the required
+> context is simply **absent**, which GitHub reports as `BLOCKED` — the
+> same thing it reports for the F5 deadlock. Posting `pending` on entry
+> would make "the gate is working on it" distinguishable from "the gate
+> never ran". **Recommendation: leave it as-is for launch.** It adds a
+> second write per evaluation and a second failure mode, and the
+> distinction it buys is diagnostic rather than protective. Worth revisiting
+> if the gate ever appears to stall.
 
 | Question | Recommendation | Why |
 |---|---|---|

@@ -891,7 +891,12 @@ class NothingReachesPublicationCase(unittest.TestCase):
                        r"|run_path\([^\n]*publisher"
                        r"|exec\s*\([^\n]*publisher")
 
+    # `tests/test_c20b_status_transport.py` exercises the publisher through
+    # its public constants to prove the two states this system can emit are
+    # inside GitHub's documented enum. That is a test OF publication, not a
+    # wiring of it - the transport it drives is injected and simulated.
     ALLOWED = {"control/publisher.py",
+               "tests/test_c20b_status_transport.py",
                "experiment/github-app/publication_path.py",
                "tests/test_c20a_publisher_disabled.py",
                "tests/test_c20a_publication_path.py"}

@@ -235,10 +235,67 @@ hits = [l for l in grep.stdout.splitlines()
         and not l.startswith("tests/")
         and ".test.js:" not in l
         and "node_modules" not in l]
-check(not hits, "E. no code constructs a commit-status API call",
+check(not hits, "E. no ORDINARY EXECUTION PATH constructs a commit-status call",
       f"{len(hits)} hit(s): {hits[0]}" if hits
-      else "control/publisher.py posts only through an injected `poster`; "
-           "no module builds the statuses/ path itself")
+      else "nothing in control/, bin/ or apparatus/ builds the statuses/ "
+           "path; the only module that does is the transport below")
+
+# ------------------------------------------- E2. the transport, and its limits
+#
+# THE CLAIM THIS CHECK MAKES CHANGED ON 2026-10-02, AND IT WAS NOT RELAXED.
+#
+# Check E used to assert "no code ANYWHERE constructs a commit-status API
+# call", which was the surviving half of finding F7. That is now FALSE:
+# `experiment/github-app/status_transport.py` exists and builds exactly
+# that request. It lives in `experiment/` with the other undeployed
+# artefacts, and `git grep` above excludes `experiment/` — so leaving E
+# alone would have kept a GREEN check whose stated claim was false, which
+# is worse than a red one and was refused on those grounds once already.
+#
+# So E was re-aimed at the property that survives the transport existing
+# (no ordinary execution path builds the call), and E2 asserts what now
+# keeps the transport inert. Between them they say something true and
+# still worth proving. Neither is a weaker version of the old claim; the
+# old claim simply stopped being a fact.
+TRANSPORT = ROOT / "experiment" / "github-app" / "status_transport.py"
+if not TRANSPORT.exists():
+    check(False, "E2. the status transport is where this check expects it",
+          "status_transport.py is missing — if it moved, re-aim this check")
+else:
+    src = TRANSPORT.read_text()
+    body = src.split('"""', 2)[2] if src.count('"""') >= 2 else src
+    reachable = [n for n in ("urllib", "http.client", "requests", "socket",
+                             "urlopen", "httpx")
+                 if n in body]
+    check(not reachable,
+          "E2. the transport cannot open a socket of its own",
+          f"it imports {reachable}" if reachable
+          else "no urllib/requests/socket/httpx — `http` is injected or "
+               "nothing happens")
+    check("def send(request: StatusRequest, *, http, environ)" in src,
+          "E2. `http` is a REQUIRED KEYWORD argument with no default",
+          "a default client is how 'we never called it' becomes false")
+    check("def poster_for(repo: str, *, http, environ, enabled)" in src,
+          "E2. the poster factory requires BOTH a client and a switch",
+          "neither may be defaulted")
+    # SOURCE ONLY. The first version of this searched every tracked file in
+    # those directories and immediately caught the approval package, which
+    # names the module because it DOCUMENTS it. A document that describes an
+    # unwired module is not a wiring of it, and a check that says otherwise
+    # makes it impossible to write the document.
+    importers = subprocess.run(
+        ["git", "grep", "-l", "status_transport", "--",
+         "control/*.py", "bin/*", "apparatus/*.js",
+         "experiment/github-app/*.py"],
+        cwd=ROOT, capture_output=True, text=True,
+    ).stdout.split()
+    importers = [f for f in importers
+                 if not f.endswith("status_transport.py")
+                 and not f.endswith("check-templates.py")]
+    check(not importers,
+          "E2. nothing imports the transport — action 9 is not taken",
+          f"imported by {importers}" if importers
+          else "built to be reviewed, not deployed")
 
 required = json.loads((ROOT / "config" / "experiment.json").read_text())["github"]["required_checks"]
 check(required == ["ci"],

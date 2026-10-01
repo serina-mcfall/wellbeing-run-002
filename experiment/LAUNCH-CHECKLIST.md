@@ -116,10 +116,22 @@ failures are discovered.
 2. **Deployment Readiness / Preflight Remediation** — mandatory, after phase 1
    and before T+00. Run the complete real preflight against the actual
    deployment environment **without starting T+00**.
-3. **Rehearsal** — rerun the complete rehearsal until it passes.
+3. **The Protocol v2 §"Preflight" conditions no gate checks** — eleven of its
+   twenty, including the contradiction-audit PASS, which is Protocol v2's
+   FIRST condition and the binding one.
 4. **T+00** — a final complete clean preflight immediately before, then start.
 
-Each phase gates the next. A partial pass at any phase authorises nothing.
+A partial pass at any phase authorises nothing.
+
+**"Each phase gates the next" was the rule here until 2026-10-02, and it was
+wrong in one specific way.** Phase 3 item 1 — the C-04a realistic multi-cycle
+verification — is fixture-bound by audit C-04a's own words and needs no
+secrets, no GitHub access and no C-20a(C) decision. Sequencing it behind
+Phase 2 deferred a check that depends on nothing in Phase 2. It runs in
+parallel; its real precondition is C-04's gate join, which is a Phase 1 item.
+Phases 2 and 4 remain genuinely distinct from each other: Phase 2 is the
+remediation loop that produces the first all-green `preflight.json`, Phase 4
+step 4 is a freshness re-run on a quiet host immediately before start.
 
 ---
 
@@ -131,7 +143,7 @@ Each row's C-number row in `CONTRADICTION-AUDIT.md` is authoritative.
 | Item | Status | Remaining action |
 |---|---|---|
 | C-05.3a security dispatch | **Implemented and COMMITTED** — row corrected 2026-10-01 | The "UNCOMMITTED" status was stale: the work landed in `6880229` and is tracked and CI-visible. `git status --porcelain` over `control/` and `tests/` is empty. Its one open defect — `security_claim_is_valid` raising `TypeError` on an unhashable `verdict` or `claim_state` instead of returning a diagnostic (handover §36.5 D1) — was repaired 2026-10-01 in this module, policy unchanged, with safe denial tested and both guards mutation-proved |
-| C-18 transaction boundary | **OPEN — all 7 stages and the annunciate residual now implemented; the rehearsal and T+00 clauses keep it open** | Stage 1 (`route_prs` GitHub observation moved outside T1) and stage 2 (notification delivery moved behind a durable intent queue and a bounded post-commit drain, corrected 2026-10-01 so the drain limits are per tick, the send budget is measured after the fence, and a transport-level ambiguous outcome is no longer retried as a failure) implemented and mutation-checked 2026-10-01. Stage 3 (`workers.allocate_port` split into a no-bind under-lock selection half and an external probe) implemented and mutation-checked 2026-10-01 — but the dispatch call sites were **not** migrated, so port binds have **not** left T1 yet. **Stage 4 (builder) landed 2026-10-01** on a shared dispatch harness — plan writes only state inside T1, execute runs lockless after it commits, commit/fail re-verify the claim — which is what makes stages 5 and 6 genuinely parallel from here. **Stages 5 (reviewer) and 6 (fixer) landed 2026-10-01**, built in parallel on separate branches and meeting at integration in one adjacent-line conflict. Stage 5 also SHA-binds the review ledger events and repairs a KeyError in `on_dispatch_failure`. **STAGE 7 AND THE ANNUNCIATE RESIDUAL BOTH LANDED 2026-10-01** under explicit operator delegation. Stage 7 bounds five post-T1 phases that previously declared nothing at all, each from the sum of its OWN external timeouts rather than from the worker's lease - the proposed table priced builder execution at 3600 s, the lease, when the phase only spawns and returns, which would have let a wedged `workmux add` look healthy for an hour against a 120 s threshold. `execute_merges` was missing from the proposal entirely and is included. The annunciate residual is closed by the notification amendment: the Supervisor's path queues a durable intent and the drain delivers it, while the Watchdog's path still sends immediately because it has no drain and exists for the case where the Supervisor is not ticking. Row C-18: "REQUIRED BEFORE: unattended multi-cycle rehearsal, the 5-hour unattended stress test, and T+00" — the **5-hour clause is waived** by human decision 2026-10-01 (audit row C-18a); the other two clauses stand, and **one stage still does not satisfy them** |
+| C-18 transaction boundary | **OPEN — all 7 stages and the annunciate residual now implemented; the rehearsal and T+00 clauses keep it open** | Stage 1 (`route_prs` GitHub observation moved outside T1) and stage 2 (notification delivery moved behind a durable intent queue and a bounded post-commit drain, corrected 2026-10-01 so the drain limits are per tick, the send budget is measured after the fence, and a transport-level ambiguous outcome is no longer retried as a failure) implemented and mutation-checked 2026-10-01. Stage 3 (`workers.allocate_port` split into a no-bind under-lock selection half and an external probe) implemented and mutation-checked 2026-10-01 — but the dispatch call sites were **not** migrated, so port binds have **not** left T1 yet. **Stage 4 (builder) landed 2026-10-01** on a shared dispatch harness — plan writes only state inside T1, execute runs lockless after it commits, commit/fail re-verify the claim — which is what makes stages 5 and 6 genuinely parallel from here. **Stages 5 (reviewer) and 6 (fixer) landed 2026-10-01**, built in parallel on separate branches and meeting at integration in one adjacent-line conflict. Stage 5 also SHA-binds the review ledger events and repairs a KeyError in `on_dispatch_failure`. **STAGE 7 AND THE ANNUNCIATE RESIDUAL BOTH LANDED 2026-10-01** under explicit operator delegation. Stage 7 bounds five post-T1 phases that previously declared nothing at all, each from the sum of its OWN external timeouts rather than from the worker's lease - the proposed table priced builder execution at 3600 s, the lease, when the phase only spawns and returns, which would have let a wedged `workmux add` look healthy for an hour against a 120 s threshold. `execute_merges` was missing from the proposal entirely and is included. The annunciate residual is closed by the notification amendment: the Supervisor's path queues a durable intent and the drain delivers it, while the Watchdog's path still sends immediately because it has no drain and exists for the case where the Supervisor is not ticking. Row C-18: "REQUIRED BEFORE: unattended multi-cycle rehearsal, the 5-hour unattended stress test, and T+00" — the **5-hour clause is waived** by human decision 2026-10-01 (audit row C-18a); the other two clauses stand. **WHICH stage, named 2026-10-02 instead of left as "one stage":** stage 3. Audit row C-18 closes with "no numbered stage and no named residual remains unimplemented", and that is true — stage 3 IS implemented. What is not done is the call-site migration this same cell records above: `workers.allocate_port` was split, but the dispatch call sites were never moved onto the split, so **port binds have not left T1**. Implemented and adopted are different claims, and the unnamed "one stage" let them read as the same one |
 | C-19 Jev implementation is not Jev | **OPEN — `worker_health` path implemented and live-verified 2026-10-01; governance items remain** | `control/jev.py` now posts to `/api/alpha/decisions` with `typesafe/jev-1.13`, records requested and returned model identifiers separately, and refuses the four kinds whose `criteria` are unapproved before any HTTP call. Budget denial prevents the call from **both** the Supervisor and `gate_jev`, through a durable reservation committed before the request leaves and settled after it (governed bound $0.002688/call, basis in `config/experiment.json`). A request lost in flight — a crash between sending and settling — is marked `ABANDONED` and that one logical consultation is never re-sent, so neither a Supervisor restart nor a re-run of `ctl preflight` can re-buy an answer that may already have been paid for; the identity is the task plus its attempt, worker, progress marker and state (§25.4), so a new attempt or real progress is a new question that proceeds, while polling and the clock are not (§25; the earlier claim that exposure arithmetic alone did this was wrong and is withdrawn). Verified by mocked transport only: 1595/1595 tests, 8/8 plus 8/8 plus 6/6 mutations detected. **Live-verified 2026-10-01**: one budget-gated `worker_health` request returned `HEALTHY` from `typesafe/jev-1.13-20260917` for $0.000022764, settling its reservation to zero exposure (§27). **C-19's `worker_health` integration is complete and live-verified**; the endpoint remains alpha, which is a standing risk rather than an open task. The four governance questions about the kinds that are NOT wired moved to audit row **C-19a** on 2026-10-01 and are explicitly **not a T+00 blocker** — they concern kinds with no call site and imply no code change. Record in `C05-3a-SESSION-HANDOVER.md` §24 (implementation), §25 (crash/restart correction) and §27 (live verification) |
 | C-05.3b accessibility dispatch | **BOTH HALVES NOW GENUINELY REACH THE TICK 2026-10-01; C-02a resolved** | `WAITING_EVIDENCE` has a governed exit (`advance_if_evidence_complete`), reached from the security ingest AND from `route_evidence` itself. The AUTOMATED half runs G3's five phases on G2/G9's claim/execute/commit lifecycle with every external service injected; each phase gets `min(own bound, what remains of 1080 s)`, teardown is a `finally`, and the port returns only once the listener is observed gone. The QUALITATIVE half parses and adjudicates the reviewer's block against the canonical registry, with a SHA-bound worker name and G1's lease. The tick plans, executes outside every transaction, and commits with re-verification. **CORRECTION TO THIS ROW'S EARLIER WORDING:** "both halves built and wired" overstated it. The automated half was tick-connected but gated on a services factory that was `None`, so it never planned; the qualitative half was never called from `route_evidence` at all. Both are now genuinely connected. **C-02a is RESOLVED** - the frozen example reads `ACC-DOD-VISIBLE_FOCUS` under a recorded freeze amendment, and the remaining sixteen identifiers reach the reviewer through the `{{evidence}}` substitution rather than through any further frozen-file change or parser alias. **The services factory now exists** (`control/accessibility_services.py`), so the automated half is no longer inert: G3's clean isolated checkout at the trusted SHA, process-group teardown, and disposal after the verdict is durable. **The qualitative dispatch now exists**: claim in T1, spawn outside it, confirm in its own transaction, ingest through the ordinary reaper. **Remaining, and unchanged:** no real accessibility scan has ever run - no product exists, every service in every test is injected, and the dispatch has never faced a real PR or URL |
 | C-04 live merge-gate composition | **OPEN — composition layer built and now exercised end to end through the C-04a fixture; never run against real GitHub, and not wired into the Supervisor** | The CI-result and reviewer-identity adapters landed 2026-10-01 (57/57 tests, 17/17 mutations), and `ci.yml` now runs the apparatus suite and the validator — it previously ran **no Node test at all**. The composition layer now computes a live decision and is driven end to end by the fixture harness, which caught the irrelevant-security-surface `sha` defect that made the gate unopenable. Still missing: any exercise against real GitHub, and the join to the control plane — `control/supervisor.py` calls `control/routing.py::evaluate_merge`, never `live-gate.js`, so two merge gates exist in two languages and only one is reachable from a tick |
@@ -239,46 +251,101 @@ remediation is prescribed before diagnosis.**
 
 ---
 
-## Phase 3 — Rehearsal
+## Phase 3 — Protocol v2 §"Preflight" conditions that no gate checks
 
-Rerun the complete rehearsal until it passes.
+Phase 2 runs the 24 gates in `control/preflight.py::GATES`. **Those gates
+implement nine of the twenty conditions Protocol v2 §"Preflight" names.** This
+phase is the other eleven: conditions that forbid T+00 just as absolutely, that
+no gate evaluates, and that therefore cannot appear in `preflight.json` at all.
 
-The rehearsal must cover **every applicable governed launch prerequisite**:
+**This is not a rehearsal, and this document no longer calls it one.** Protocol
+v2 contains no rehearsal requirement — the word appears nowhere in `protocol/`,
+checked rather than assumed. The earlier title came from this checklist's own
+required-content note (`experiment/PREFLIGHT-FINDINGS.md`, recorded
+2026-09-26), four days before C-18 existed and five before `REHEARSAL-PLAN.md`
+did, so the "complete rehearsal" it asked for was never the five-hour endurance
+test and C-18a never reached it. There is nothing here to rerun, because
+nothing here has ever run.
 
-CPU headroom · RAM headroom · disk headroom · file-descriptor headroom ·
-inotify watches · inotify instances · port availability and contention ·
-workers and processes · browser and resource availability · resource ownership
-and lifecycle · immutable manifest and freeze integrity · provider and model
-readiness · budgets · GitHub access · notification delivery · the deterministic
-secret and security controls · evidence and artifact paths · Supervisor
-readiness · Watchdog readiness · repository and configuration cleanliness and
-freeze requirements · and every other applicable Protocol preflight gate.
+**The list of launch prerequisites formerly printed here has moved, because it
+was already in Phase 2.** Every machine-checkable entry — headroom, manifest
+and freeze integrity, provider and model readiness, budgets, GitHub access,
+notification delivery, Supervisor and Watchdog readiness, repository
+cleanliness — is a named gate in Phase 2's own enumeration above. Three entries
+matched no gate and are carried into the table below rather than lost: resource
+ownership and lifecycle, the deterministic secret and security controls, and
+evidence and artifact paths.
 
-### One rehearsal, not two — amended 2026-10-01
+> **A green `preflight.json` is not a statement that Protocol v2 §"Preflight"
+> is satisfied.** It is a statement about nine of its twenty conditions. This
+> phase is the rest, and no gate will refuse on its behalf.
 
-`CONTRADICTION-AUDIT.md` C-18 named them separately and in sequence, and until
-2026-10-01 no authoritative rule permitted collapsing them. **Row C-18a is now
-that rule.**
+### What this phase requires
+
+| # | Condition | Governing source | Precondition | Status |
+|---|---|---|---|---|
+| 1 | Realistic Builder→PR→Review FAIL→Fix→CI→Accessibility/Security→fresh re-review→merge; **≥2 review cycles**; exact-SHA evidence invalidation/regeneration; P2 demonstrably non-blocking | Protocol v2 §"Preflight"; `BOOTSTRAP.md` deliverable 4; audit C-04a; C-18 clause 1 | **C-04's gate join — a Phase 1 item, NOT Phase 2.** See the note below | Fixture ran 2026-10-01 against the production composition; audit row is PARTIAL, not GREEN |
+| 2 | **Contradiction audit proves all frozen documents can be simultaneously satisfied** | Protocol v2 §"Preflight", its FIRST condition; `CONTRADICTION-AUDIT.md`: "T+00 is blocked until … the audit is marked PASS" | every audit row RESOLVED, which requires C-22 | **OPEN.** The audit header says so. **This is the binding pre-T+00 condition, and until 2026-10-02 no phase of this document named it at all** |
+| 3 | Deliberate stalled worker detected, healthy worker preserved · deliberate dead Supervisor recovered · long Observer does not create false death | Protocol v2 §"Preflight"; audit C-11 | — | **EVIDENCED** — Trial 0, 2026-09-28, `experiment/evidence/C-11-trial0-scenarios-A-B-C.txt`. Recorded here, not re-run |
+| 4 | Run 001 isolation | Protocol v2 §"Preflight"; `BOOTSTRAP.md` deliverable 5 | — | No register row exists. Must be established, not assumed |
+| 5 | Role capability matrix live | Protocol v2 §"Preflight"; `BOOTSTRAP.md` deliverable 6 | the four provider gates | Partially carried by those gates; the matrix itself is not evidenced |
+| 6 | Worker awareness and independent reconciliation | Protocol v2 §"Preflight" | — | Unit-test evidence only |
+| 7 | Fail-before/pass-after regression proof | Protocol v2 §"Preflight" | — | Not established |
+| 8 | Fresh context reconstructs solely from durable state | Protocol v2 §"Preflight" | — | Not established |
+| 9 | Jev **deterministic floor/override** — the half the gate does not reach | Protocol v2 §"Preflight" | C-05.3b ingest | `control/severity.py::apply_severity_policy` has **no caller in `control/`**, so the floor runs only in `apparatus/`, which the runtime never invokes. See the Phase 1 runtime-merge-gate row |
+| 10 | Resource ownership and lifecycle · the deterministic secret and security controls · evidence and artifact paths | this checklist's required-content note; audit C-09 for the first | — | No gate covers any of the three. Carried forward rather than dropped |
+| 11 | C-18a's durable-evidence obligations — see "What it adds" below | audit C-18a | — | Verified against what the apparatus records, `C05-3a-SESSION-HANDOVER.md` §37 |
+
+**Item 1 does not wait for Phase 2.** Audit C-04a makes its pre-T+00 half
+fixture-bound — "an isolated FIXTURE PR/worktree with real git mechanics and
+real (not simulated) schema/validator/adapter calls," with a real product task
+PR explicitly **not** required. It needs no secrets, no GitHub remote, no
+branch protection and no C-20a(C) decision. What it needs is C-04's gate join:
+`control/supervisor.py` calls `control/routing.py::evaluate_merge` and never
+`live-gate.js`, so two merge gates exist in two languages and only one is
+reachable from a tick. **So item 1 runs in parallel with Phase 2, not after
+it** — "each phase gates the next" does not apply to it, and holding it behind
+the two human actions delays a check that depends on neither.
+
+**One sentence in audit C-04a pulls the other way, and is not resolved here.**
+Requirement (1) says a real product PR is explicitly not required; the same
+row's "STILL NOT CLOSED" paragraph lists "no run has occurred against real
+GitHub" among what is missing. If that second reading is a closure condition
+rather than context, item 1 acquires the eight secrets, C-20a(C) and real
+GitHub access as preconditions and moves after Phase 2. **That reading is the
+operator's to choose; this checklist does not choose it.**
+
+### The five-hour endurance rehearsal is waived — amended 2026-10-01
+
+`CONTRADICTION-AUDIT.md` C-18 named two steps in sequence, and until 2026-10-01
+no authoritative rule permitted collapsing them. **Row C-18a is now that rule.**
+Only the middle clause of C-18's "REQUIRED BEFORE" sentence was waived; that
+sentence is left unedited in C-18 so the original requirement stays readable.
 
 1. **C-04a realistic multi-cycle preflight** — Builder→PR→Review FAIL→Fix→CI→
    Accessibility/Security→fresh re-review→merge, **≥2 review cycles**, with
    exact-SHA evidence invalidation/regeneration and P2 demonstrably
    non-blocking. Protocol v2 §"Preflight" requires this directly. **STILL
    REQUIRED, and untouched by the amendment** — it is a separate prerequisite
-   and must run against the production apparatus, not a stand-in.
+   and must run against the production apparatus, not a stand-in. It is item 1
+   above.
 2. **Five-hour unattended endurance rehearsal** — **WAIVED as a pre-T+00
    requirement by human decision 2026-10-01 (audit row C-18a).** Run 002 itself
    now serves as the endurance experiment: how long the apparatus operates is an
    observed result, and its failures inform Run 003. The five-hour test must
    **not** be started. `experiment/REHEARSAL-PLAN.md` is retained as the record
-   of what it would have been; its decisions D5–D10 are moot as rehearsal
-   blockers and are reclassified in that document.
+   of what it would have been; its decisions D5–D10 are no longer blockers of
+   that test and are reclassified in that document's **§9** — D6 only **partly**,
+   because its evidence-retention and autonomous-versus-human half is re-homed
+   onto the real run under C-18a and is live below.
 
 **What the waiver does not touch.** Realistic multi-cycle verification through
 the production apparatus, every required launch gate, independent review, the
 accessibility and security checks, exact-SHA evidence, budget enforcement,
 recovery checks and stop controls all stand exactly as before. The waiver is of
-one duration, not of any safeguard.
+one duration, not of any safeguard. Protocol v2 §"Preflight" is not amended by
+it — the five-hour figure originated in this repository's own C-18 row and
+`REHEARSAL-PLAN.md`, never in Protocol v2.
 
 **What it adds.** Because the run is now the experiment, its durable evidence
 must let a reader reconstruct the first failure, elapsed runtime, task and PR
