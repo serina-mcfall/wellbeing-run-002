@@ -9,6 +9,7 @@ from the reviewed head.
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -391,7 +392,13 @@ class TestFixerDispatchedNotification(OrderedCallCase):
         return doc
 
     def dispatch(self, doc, findings):
+        """C-18 stage 6 drives the three phases; the notification is queued
+        in the commit phase, with the repair_cycles it reports."""
         builder_worktree = Path("/tmp/run-002-test/task-001-builder")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.sup.store = state.Store(path=Path(tmp.name) / "state.json", tz=TZ)
+        self.sup._dispatch_plans = []
         with mock.patch.object(supervisor_mod.workers, "worktree_for_branch",
                                return_value=builder_worktree), \
                 mock.patch.object(supervisor_mod.workers, "create_worker"), \
@@ -405,6 +412,11 @@ class TestFixerDispatchedNotification(OrderedCallCase):
                 mock.patch.object(supervisor_mod.prompts, "write",
                                   return_value=Path("/tmp/p.md")):
             self.sup.dispatch_fixer(doc, doc["tasks"]["TASK-001"], PR, findings)
+            self.sup.store._write(doc)          # T1 commits
+            results = self.sup.execute_dispatches(self.sup._dispatch_plans,
+                                                  snapshot=doc)
+        for result in results:
+            self.sup.apply_dispatch_result(doc, result)
 
     def test_exactly_one_info_notification_after_successful_dispatch(self):
         doc = self._doc_in_review()

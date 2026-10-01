@@ -330,11 +330,13 @@ def allocate_port(doc: dict, lo: int | None = None,
     exhaustion message are unchanged, so every existing caller and test is
     unaffected.
 
-    C-18 stage 3 split the two halves apart. Stage 4 migrated
-    `dispatch_builder` onto them - it selects candidates under the lock and
-    probes outside it - so the only caller left is `dispatch_fixer`, which
-    still calls this composed form inside T1. A bind therefore still happens
-    under the state lock on the fixer path today; moving it is stage 6.
+    C-18 stage 3 split the two halves apart; stage 4 migrated
+    `dispatch_builder` onto them and stage 6 migrated `dispatch_fixer`. Both
+    now select candidates under the state lock and probe outside it, so NO
+    supervisor dispatch path calls this composed form any more and no port
+    bind happens under the state lock. It is kept because it is the honest
+    single-shot allocator for anything outside a transaction, and because
+    the stage-3 tests pin its contract.
     """
     candidates, why = select_port_candidates(doc, lo, hi)
     for port in candidates:

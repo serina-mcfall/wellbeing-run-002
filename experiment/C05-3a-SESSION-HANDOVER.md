@@ -5670,3 +5670,230 @@ Stated plainly, because §34.1 reads stronger than the evidence is.
 - **The audit was not edited.** `experiment/CONTRADICTION-AUDIT.md` rows C-04
   and C-04a have concurrent edits from other streams; whoever reconciles them
   should cite the three evidence files named in §34.9.
+
+---
+
+## 33. C-18 stage 6 (fixer) — implemented (2026-10-01)
+
+**The fixer only.** C-18 stays **OPEN**: stages 5 and 7 (§14.3) are untouched,
+and so is the `merge_invariant.annunciate` residual (§19.7 item 3, §20.6
+item 5).
+
+Branch `wip/c18-stage6-fixer`, off `wip/c05-1-persistence` at `8425e32`.
+Built against the harness interface as §30.2 specifies it; the stage-4 diff
+was not read.
+
+### 33.1 What left T1
+
+| Call | Was | Now |
+|---|---|---|
+| `prompts.write` | inside T1 | `_execute_fixer_dispatch` |
+| `workers.acquire_worktree(..., reuse_if_checked_out=True)` (a `git worktree list`, and `workmux add` on the create path) | inside T1 | `_execute_fixer_dispatch` |
+| `workers.allocate_port` (**real 127.0.0.1 bind**) | inside T1 | split: `select_port_candidates` in T1 (no bind), `probe_port` in execute |
+| `workers.write_job` | inside T1 | `_execute_fixer_dispatch` |
+| `workers.start_job` (process/tmux spawn) | inside T1 | `_execute_fixer_dispatch` |
+
+Commit-side state — `repair_cycles += 1`, `open_finding_ids`, `task["worker"]`,
+the `doc["workers"]` record, `retained_worktrees.pop`, the FIX_REQUIRED
+transition, the `FIX_DISPATCHED` ledger event and the `notify_out` queue write
+— commits afterwards in `_commit_fixer_dispatch`.
+
+Four decisions stay entirely inside T1, because each is a state decision with
+no external effect: the paused-provider branch (`WAITING_PROVIDER_RESET`), the
+repair-cycle-limit escalation, an empty candidate list from
+`select_port_candidates`, and a claim `state.new_dispatch_claim` refuses. None
+of the four writes a claim, so there is nothing to recover and nothing to undo.
+
+**`notify_out` is still the stage-2 durable queue write.** It was not turned
+back into a synchronous send; it simply moved from T1 to the commit
+transaction, so the intent is still committed with the state change that
+earned it. Pinned by `test_the_commit_queues_the_notification_and_sends_nothing`
+and `test_any_delivery_of_that_intent_happens_with_the_lock_free`.
+
+### 33.2 The reused-worktree hazard, and how it is resolved
+
+This is why the plan of record sequenced the fixer last.
+
+`acquire_worktree(..., reuse_if_checked_out=True)` does not give the fixer a
+private checkout. Git allows a branch in exactly one worktree and the Fixer
+commits to the Builder's PR branch, so it works in **whichever worktree
+already holds that branch** — the Builder's. That worktree is shared mutable
+state. Before C-18 the claim authorising its use was taken in the same
+transaction as the spawn and could not go stale between them. Splitting plan
+from execute opens that window; a `ctl` command, or any other writer, can
+replace or clear the fixer claim between T1 committing and the spawn.
+
+The asymmetry that decides the fix: for the **builder**, a commit lost to a
+superseded claim leaves an orphan worktree nobody owns. For the **fixer**, it
+leaves a **live paid agent writing into a branch checkout a different owner is
+now responsible for**, and no later transaction can take that back.
+
+**Resolution.** `_execute_fixer_dispatch` re-verifies the claim against the
+**committed** document — read-only, no lock, the same thing `execute_dispatches`
+already does for its controls — immediately before anything irreversible, and
+abandons the dispatch if it has moved on. The check sits at a deliberate
+boundary in the method:
+
+* **Above it, everything is repeatable.** `prompts.write` overwrites its own
+  path; acquisition either reuses an existing checkout or runs
+  `workmux add --open-if-exists`, which is a no-op on a second run.
+* **Below it, nothing is.** The job file is the durable spawn evidence
+  `resume_dispatch_claims` reads, and `start_job` launches an agent.
+
+It is deliberately **unconditional** rather than only on the reuse path. Even
+a worktree the fixer creates itself is a checkout of the shared PR branch, so
+there is no case where skipping it is safe, and one unconditional check is
+simpler than a conditional one.
+
+**Fail-closed.** An unreadable or missing document answers False and refuses
+to spawn. The costs are not symmetric: refusing costs one retry, spawning
+costs a shared branch. Three guards now exist and they are different guards —
+lock-held at plan, **lock-free at execute**, lock-held at commit. Only the
+middle one can prevent the external effect; the other two only keep state
+consistent. M3 below is the measurement of exactly that: with the execute-side
+check removed, the state-outcome tests stay green and only the
+external-effect tests go red.
+
+**Half-prepared, after a crash.** On the reuse path `acquire_worktree`
+mutates the worktree not at all — it looks it up and returns it, pinned by
+`test_the_reuse_path_prepares_nothing_inside_the_worktree`. Everything the
+fixer does prepare (prompt file, job file) lives outside the worktree and is
+rewritten identically on a retry under the same claimed worker name. So the
+crash cases reduce to the two §30.2 already handles: no job file → re-planned
+under the same identity; job file present → committed from it, never
+re-spawned. Both measured end to end.
+
+### 33.3 Files changed
+
+| File | Change |
+|---|---|
+| `control/supervisor.py` | `DISPATCH_HANDLERS` gains `"fixer"`; `dispatch_fixer` rewritten as a planner; `_dispatch_claim_still_current`, `_execute_fixer_dispatch`, `_commit_fixer_dispatch`, `_fail_fixer_dispatch` added |
+| `control/workers.py` | `allocate_port` docstring corrected — no supervisor dispatch path calls it any more |
+| `tests/test_c18_stage6_fixer.py` | **NEW** — 48 tests |
+| `tests/test_c18_stage3_port_split.py` | boundary marker narrowed again (see §33.5) |
+| `tests/test_fixer_dispatch.py` · `tests/test_notification_coverage.py` · `tests/test_intervention_integration.py` · `tests/test_c09_resource_lifecycle.py` | helpers drive the three phases; **no assertion changed** |
+
+`control/supervisor.py`'s `dispatch_reviewer`, `on_dispatch_failure`,
+`control/merge_invariant.py` and everything under `apparatus/` were not
+touched. No frozen source (`product/`, `tasks/`, `protocol/`,
+`config/tasks.json`) was touched. All five test-file changes were declared in
+`.claude/.test-change` before the edits.
+
+### 33.4 Verification
+
+```
+python3 -m unittest discover -s tests   →  Ran 1712 tests ... OK   (was 1664)
+python3 scripts/check_no_secrets.py     →  no secret-shaped material, 194 files
+git diff --check                        →  exit 0
+Preflight().gate_protocol()             →  ok=True
+```
+
+The `[FAIL] c16_probe` stderr lines remain the C-16 deliberate-exception
+probe, not failures.
+
+**The transaction-boundary proof is measured, not structural.** A spy records
+`lock_is_held(store.lock_path)` — an independent `open()` plus
+`flock(LOCK_NB)` against the real lock file — at the moment of every
+`prompts.write`, `worktree_for_branch`, `create_worker`, `probe_port`,
+`write_job` and `start_job` in a full real tick that routes a REVIEW_FAIL
+task to a fixer. A second test leaves `probe_port` unmocked so a **genuine
+127.0.0.1 bind** is measured through a spy socket, and asserts the port that
+really bound is the port that was committed. `acquire_worktree` is NOT mocked
+in these ticks — only its `git worktree list` call is spied — so the real
+reuse decision runs.
+
+Three companion tests prove the instrument: the lock probe detects a held
+lock; the **socket** spy reports `[('bind', True)]` for a deliberate
+in-transaction bind; the **call** spy reports `[('start_job', True)]` for a
+deliberate in-transaction call. Neither boundary test can be green because an
+instrument is broken.
+
+**Mutations — 5 run, 5 caught.** `control/supervisor.py` restored from a
+byte-identical backup after each, SHA-256 verified before and after
+(`bd397493…`), the mutation marker grepped for and absent, and the full suite
+re-run green afterwards.
+
+| Mutation | Result |
+|---|---|
+| **M1 the harness is bypassed** — `dispatch_fixer` executes and commits inline inside T1 | **caught, 16 tests.** The boundary spy reports `[('prompts.write', True), ('worktree_for_branch', True), ('probe_port', True), ('write_job', True), ('start_job', True)]` against the expected all-False; the real-bind spy reports `[True]` against `[False]` |
+| **M2 the port bind returns to T1** — the composed `allocate_port` restored under the lock | **caught, 7 tests.** The real-bind spy reports `[True, False]` against `[False, False]`; the stage-3 marker fires on both of its new assertions |
+| **M3 a reused worktree is accepted without re-verifying the claim** | **caught, 5 tests** — a stolen claim, a cleared claim, an unreadable document and a missing document all spawn; a job file appears for an abandoned dispatch. **Every state-outcome test stayed green**, which is the point: only the external-effect tests can see this |
+| **M4 the claim is invisible to `has_worker`** | caught, 5 tests — 2 new, and 3 pre-existing stage-4 tests |
+| **M5 `repair_cycles` counted at plan instead of at commit** | caught, 9 tests — 7 new, and 2 pre-existing `test_fixer_dispatch` tests |
+
+Every test uses temporary directories, mocked subprocesses and mocked GitHub.
+No worker was launched, no notification was delivered to any destination, no
+paid call was made and no rehearsal was run. The only socket operations are
+loopback binds on ports the tests first proved were free.
+
+### 33.5 The stage-3 boundary marker, narrowed again
+
+`OnlyTheFixerStillBindsUnderTheLock` asserted that exactly ONE
+`workers.allocate_port(doc)` call survived in `supervisor.py` and that it was
+the fixer's. Stage 6 migrating the fixer is **exactly the event that marker
+existed to make visible**, so it fired as designed. It is now
+`NoDispatchPathStillBindsUnderTheLock`: ZERO composed allocator calls survive,
+and each of the two dispatch roles selects under the lock in its planning half
+and probes outside it in its execute half. It was narrowed rather than deleted
+— it still fails the moment a bind is put back by hand, which is what M1 and
+M2 above use it for.
+
+### 33.6 What stage 6 requires from the parallel stage-5 work
+
+`on_dispatch_failure` is shared by the reviewer and the fixer, and stage 5 is
+generalising it. Stage 6 did not touch it. **The requirement is simply that
+its existing signature and behaviour survive:**
+
+```python
+def on_dispatch_failure(self, doc, task, pr_number: int, role: str, reason: str) -> None
+```
+
+`_fail_fixer_dispatch` calls it positionally as
+`self.on_dispatch_failure(doc, task, plan.pr, "fixer", result.reason)`, and
+`dispatch_fixer` calls it the same way on its two in-T1 failure branches. It
+already takes `role`, so no change is needed for the fixer; if stage 5 adds
+parameters, they must be keyword arguments with defaults. The fixer also
+relies on it remaining **state-only** — it is now reached from
+`confirm_dispatches`' per-result transaction, which must not perform external
+work.
+
+`_fail_fixer_dispatch` guards the call with `str(plan.pr) in doc["prs"]`
+because `on_dispatch_failure` indexes `doc["prs"][str(pr_number)]`
+unconditionally and a KeyError there would abort the commit transaction and
+leave the claim behind, producing a retry loop.
+
+### 33.7 What stage 6 does NOT claim, and known limitations
+
+1. **`dispatch_reviewer` is unchanged** by this branch and still makes
+   `gh.pr_diff_sha`, `evidence.collect` and `routing.material_diff_hash`
+   calls inside T1. Stage 5, in parallel.
+2. **`merge_invariant.annunciate` still sends synchronously inside T1.**
+   Untouched by instruction.
+3. **`workers.allocate_port` now has no production caller at all.** It is
+   kept, not deleted: its contract is pinned by the stage-3 tests and it is
+   the honest single-shot allocator for anything outside a transaction. Its
+   docstring says so. Removing it is a separate decision, not stage 6's.
+4. **A job file written immediately before a crash commits a worker that may
+   never have started.** `resume_dispatch_claims` treats the job file as
+   spawn evidence, so a crash in the microseconds between `write_job` and
+   `start_job` commits a fixer record with no process. C-09's lease machinery
+   is what surfaces that. This is the harness's existing §30.10 item 5
+   property, inherited rather than introduced.
+5. **The fixer's orphan-worktree exposure is smaller than the builder's, not
+   larger.** On the reuse path no worktree is created, so the §30.10 item 4
+   window does not apply; on the create path it applies exactly as it does to
+   the builder.
+6. **A claim whose observation says "worker live, no job file" defers
+   forever.** Inherited from `resume_dispatch_claims` (§30.2); nothing expires
+   a dispatch claim yet, so `lease_expires_at` on a claim is currently
+   recorded and unread. Not introduced here and not fixed here.
+7. **A fail-closed `RuntimeError` in the commit phase would re-run the
+   external work on the next tick.** §30.10 item 6, unchanged; the fixer's
+   commit phase raises nothing of its own.
+8. **`declare_busy` bounds are still stage 7.** Not applied.
+9. **No rehearsal, no live launch, no paid call, no notification delivered.**
+   This change is not evidence of launch readiness and does not claim any.
+
+Stages 5 and 7 remain outstanding. C-18 remains **OPEN** and still carries
+*"REQUIRED BEFORE: unattended multi-cycle rehearsal, the 5-hour unattended
+stress test, and T+00."*

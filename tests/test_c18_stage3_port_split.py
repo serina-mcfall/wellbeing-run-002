@@ -16,10 +16,12 @@ Stage 3 delivers exactly that split and nothing more:
   * `allocate_port` - unchanged signature, contract and exhaustion message,
     now composed from the two.
 
-WHAT STAGE 3 DOES NOT DO, and these tests say so rather than implying
-otherwise: `dispatch_builder` and `dispatch_fixer` still call the composed
-`allocate_port` inside T1. A bind therefore still happens under the state
-lock today. Migrating those two call sites is stages 4 and 6.
+WHAT STAGE 3 DID NOT DO, recorded here because this file is where the
+boundary has been tracked: stage 3 delivered only the split, leaving
+`dispatch_builder` and `dispatch_fixer` still calling the composed
+`allocate_port` inside T1. Stage 4 migrated the builder and stage 6 the
+fixer, so `NoDispatchPathStillBindsUnderTheLock` at the end of this file now
+pins that no supervisor dispatch path binds under the state lock at all.
 
 Nothing here launches a worker, and every bind is against 127.0.0.1 in the
 governed test range.
@@ -410,33 +412,34 @@ class AllocatePortStillBehavesExactlyAsBefore(PortHarness):
 # ------------------------------------------- the integration boundary, stated
 
 
-class OnlyTheFixerStillBindsUnderTheLock(unittest.TestCase):
-    """The stage-3 boundary marker, moved on by stage 4 rather than deleted.
+class NoDispatchPathStillBindsUnderTheLock(unittest.TestCase):
+    """The stage-3 boundary marker, narrowed again by stage 6.
 
     It was written so nobody could read "stage 3 done" as "port binds have
     left T1" while BOTH dispatch sites still called the composed allocator.
-    Stage 4 migrated the builder, which is exactly the event the marker
-    existed to make visible - so it now pins the remaining boundary: ONE
-    composed call is left, it is `dispatch_fixer`'s, and that is stage 6.
+    Stage 4 migrated the builder and the marker narrowed to "one composed
+    call left, and it is the fixer's". Stage 6 migrated the fixer, which is
+    the last of the two - so it narrows once more, to the end state it was
+    always counting down to: NO composed allocator call survives in
+    `supervisor.py`, and each dispatch site selects under the lock and probes
+    outside it.
 
-    Read this as the answer to "have port binds left T1 yet?" The honest
-    answer is "for the builder, yes; for the fixer, not yet."
+    It is still the answer to "have port binds left T1 yet?" - the answer is
+    now "yes, for both dispatch roles" - and it still fails the moment a bind
+    is put back, which is what the mutation testing for stages 4 and 6 uses it
+    for. It deliberately keeps counting source occurrences rather than being
+    deleted: a structural marker costs nothing and is the only thing that
+    notices a regression someone writes by hand.
     """
 
     def source(self) -> str:
         return Path(supervisor_mod.__file__).read_text(encoding="utf-8")
 
-    def test_exactly_one_composed_allocator_call_is_left(self):
-        self.assertEqual(self.source().count("workers.allocate_port(doc)"), 1)
-
-    def test_the_remaining_call_is_the_fixer_and_it_is_still_inside_t1(self):
-        source = self.source()
-        fixer = source.index("def dispatch_fixer")
-        after = source.index("def on_dispatch_failure", fixer)
-        body = source[fixer:after]
-        self.assertIn("workers.allocate_port(doc)", body,
-                      "the surviving in-T1 bind must be the fixer's; if it "
-                      "moved, stage 6 landed and this marker should move too")
+    def test_no_composed_allocator_call_is_left(self):
+        self.assertEqual(self.source().count("workers.allocate_port(doc)"), 0,
+                         "a composed allocate_port call in the supervisor is a "
+                         "bind under the state lock; use select_port_candidates "
+                         "in the planning half and probe_port in the execute half")
 
     def test_the_builder_uses_the_split_halves(self):
         source = self.source()
@@ -447,6 +450,18 @@ class OnlyTheFixerStillBindsUnderTheLock(unittest.TestCase):
         self.assertIn("workers.select_port_candidates",
                       source[builder:execute])
         self.assertNotIn("workers.probe_port", source[builder:execute])
+        # The bind outside it, in the execute half.
+        self.assertIn("workers.probe_port", source[execute:commit])
+        self.assertNotIn("workers.allocate_port", source[execute:commit])
+
+    def test_the_fixer_uses_the_split_halves(self):
+        source = self.source()
+        fixer = source.index("def dispatch_fixer")
+        execute = source.index("def _execute_fixer_dispatch", fixer)
+        commit = source.index("def _commit_fixer_dispatch", execute)
+        # Selection under the lock, in the planning half.
+        self.assertIn("workers.select_port_candidates", source[fixer:execute])
+        self.assertNotIn("workers.probe_port", source[fixer:execute])
         # The bind outside it, in the execute half.
         self.assertIn("workers.probe_port", source[execute:commit])
         self.assertNotIn("workers.allocate_port", source[execute:commit])
