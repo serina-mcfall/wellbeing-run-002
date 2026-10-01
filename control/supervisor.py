@@ -14,8 +14,11 @@ import os
 import secrets
 import signal
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
+from typing import Mapping
 
 from . import (
     budget,
@@ -49,6 +52,118 @@ JEV_INTERVAL_SECONDS = 900
 # Derived from each operation's own timeout, never open-ended.
 JEV_BOUND_SECONDS = 60
 BUSY_MARGIN_SECONDS = 60
+
+
+# ====================================================================
+# C-18: the dispatch harness
+# ====================================================================
+#
+# THE PROBLEM. Every dispatch used to write a job file, run git, open a
+# socket and spawn a process while the exclusive state lock was held, so one
+# slow subprocess stalled every task in the run. C-18's remediation is the
+# shape C-14.1 already uses for merges and C-05.3a already uses for security
+# evidence: CLAIM in state, do the external work with NO lock held, COMMIT
+# the result in a separate transaction that re-verifies what it acted on.
+#
+# THE INTERFACE, for stages 5 (reviewer) and 6 (fixer). Each role supplies
+# exactly three methods and ONE entry in `Supervisor.DISPATCH_HANDLERS`.
+# Nothing else in the pass changes - that is the whole point of the table.
+#
+#   1. PLAN, inside T1, STATE ONLY.
+#      Build a `state.new_dispatch_claim(...)`, store it at
+#      `task["dispatch_claims"][role]`, then call
+#      `self._plan_dispatch(self.dispatch_plan(claim))`.
+#      `_plan_dispatch` is an accumulator rather than a return value
+#      precisely because reviewer and fixer plans originate inside
+#      `reap_workers` callbacks, which cannot return anything to `tick`.
+#
+#   2. EXECUTE, after T1 commits, NO LOCK HELD.
+#      `execute(plan: DispatchPlan) -> DispatchResult`.
+#      May do anything external. MUST NOT touch the state document: by the
+#      time it runs, the document T1 read has committed and moved on.
+#      Everything it needs travels on the frozen `DispatchPlan`.
+#
+#   3. COMMIT / FAIL, inside a state transaction, STATE ONLY.
+#      `commit(doc, plan, result)` and `fail(doc, plan, result)`.
+#      Both run under a lock - `confirm_dispatches`' own per-result
+#      transaction on the ordinary path, and T1 itself on the recovery
+#      path - so they must be state-only and re-entrant. Both MUST re-verify
+#      identity with `_current_dispatch_claim` before changing anything, and
+#      both MUST clear the claim they acted on.
+#
+# RECOVERY is generic and already written. `observe_dispatch_claims` reads
+# each claim's job file before the lock; `resume_dispatch_claims` then either
+# commits a claim whose job file proves it spawned, or re-plans one that
+# never got that far. A role gets this for free by storing a claim.
+#
+# WHAT A CLAIM BUYS. It reserves the role's slot durably, so
+# `route_awaiting_dispatch` (through `has_worker`) and `dispatchable` both
+# see a planned-but-unspawned dispatch and refuse to start a second one.
+
+
+@dataclass(frozen=True)
+class DispatchPlan:
+    """One claimed dispatch, as it crosses OUT of the state transaction.
+
+    Frozen, and carrying only immutable values, for the same reason
+    `routing.SecurityPlan` is: the execute phase runs after T1 committed, so
+    a reference into that transaction's document would be read - or mutated -
+    with no lock held. `context` is a read-only mapping of the role-specific
+    facts only that role's own three methods interpret.
+    """
+    role: str
+    task_id: str
+    pr: int | None
+    worker: str
+    branch: str
+    port_candidates: tuple[int, ...] = ()
+    observed_head: str | None = None
+    context: Mapping = field(default_factory=lambda: MappingProxyType({}))
+
+
+@dataclass(frozen=True)
+class DispatchObservation:
+    """What the filesystem says about one claim, read BEFORE the lock.
+
+    `job_file` is the spawn evidence, exactly as it is in C-05.3a: the job
+    file is written immediately before `start_job`, so its presence means the
+    external phase got far enough that a worker may exist and must never be
+    started again. `worktree` and `port` are read back from that same file,
+    which is why a commit lost to a crash can still be reconstructed.
+
+    `worker_live` is None when the /proc scan itself failed - unknown, never
+    "not running".
+    """
+    task_id: str
+    role: str
+    worker: str
+    job_file: bool
+    worktree: str | None = None
+    port: int | None = None
+    worker_live: bool | None = None
+
+
+@dataclass(frozen=True)
+class DispatchResult:
+    """What the external phase actually achieved, for the commit phase."""
+    plan: DispatchPlan
+    ok: bool
+    worktree: str | None = None
+    port: int | None = None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class _DispatchHandler:
+    """One role's three methods, by name.
+
+    Names rather than bound methods so the table can be a class attribute
+    that a subclass or a test may override, and so `Supervisor` does not have
+    to build it in `__init__`.
+    """
+    execute: str
+    commit: str
+    fail: str
 
 
 def jev_consultation_identity(task: dict) -> str:
@@ -139,6 +254,10 @@ class Supervisor:
         self.telemetry = telemetry.Telemetry(experiment_id=self.cfg.experiment_id)
         self.jev = jev.DecisionService(self.cfg.roles["jev"].model)
         self.stopping = False
+        # C-18: this tick's planned dispatches, accumulated inside T1 by
+        # _plan_dispatch and executed after it commits. Reset at the top of
+        # every tick - the durable claim, not this list, survives a crash.
+        self._dispatch_plans: list[DispatchPlan] = []
         # Held open for the process lifetime once run() takes it. Closing it,
         # or letting it be collected, releases the singleton lock.
         self._singleton_lock = None
@@ -633,15 +752,30 @@ class Supervisor:
 
         depth = state_mod.review_queue_depth(doc)
         limit = state_mod.builder_limit(depth, self.cfg.max_builders)
-        running = len([t for t in doc["tasks"].values() if t["state"] in ("ASSIGNED", "ACTIVE")])
+        # C-18: a builder claim is a committed reservation that becomes a
+        # builder process, so it consumes a concurrency slot exactly as an
+        # ASSIGNED task does. Without this, max_builders would bound only the
+        # dispatches that have already committed and the claims in flight
+        # would be free - the governed limit would not be a limit.
+        claimed = [t for t in doc["tasks"].values()
+                   if state_mod.dispatch_claim_active(
+                       state_mod.dispatch_claim(t, "builder"))]
+        running = len([t for t in doc["tasks"].values()
+                       if t["state"] in ("ASSIGNED", "ACTIVE")]) + len(claimed)
         slots = limit - running
         if slots <= 0:
             return []
 
+        claimed_ids = {t["id"] for t in claimed}
         ready: list[dict] = []
         for task in doc["tasks"].values():
             if task["state"] not in ("QUEUED", "READY", "WAITING_PROVIDER_RESET",
                                      "WAITING_DB_LOCK"):
+                continue
+            if task["id"] in claimed_ids:
+                # Already reserved; resume_dispatch_claims drives it, and
+                # offering it here would only consume a slot for a task
+                # dispatch_builder is going to refuse anyway.
                 continue
             if not state_mod.dependencies_met(doc, task):
                 continue
@@ -650,8 +784,285 @@ class Supervisor:
         ready.sort(key=lambda t: t["id"])
         return ready[:slots]
 
+    # ------------------------------------------------ C-18 dispatch harness
+
+    #: role -> the three methods that role supplies. Stages 5 and 6 add one
+    #: entry each; nothing else in `execute_dispatches`,
+    #: `apply_dispatch_result`, `confirm_dispatches` or
+    #: `resume_dispatch_claims` changes.
+    DISPATCH_HANDLERS: dict[str, _DispatchHandler] = {
+        "builder": _DispatchHandler(execute="_execute_builder_dispatch",
+                                    commit="_commit_builder_dispatch",
+                                    fail="_fail_builder_dispatch"),
+    }
+
+    def _plan_dispatch(self, plan: DispatchPlan) -> None:
+        """Accumulate one planned dispatch for execution after T1 commits.
+
+        An accumulator rather than a return value because reviewer and fixer
+        plans originate inside `reap_workers`' role-finished callbacks, which
+        are nested in T1 and have no way to return anything to `tick`. The
+        list is reset at the top of every tick, so a plan can never leak from
+        one cycle into the next - the durable claim, not this list, is what
+        survives a crash.
+        """
+        self._dispatch_plans.append(plan)
+
+    @staticmethod
+    def dispatch_plan(claim: dict) -> DispatchPlan:
+        """Copy a committed claim out of T1 as an immutable plan."""
+        return DispatchPlan(
+            role=claim["role"],
+            task_id=claim["task_id"],
+            pr=claim.get("pr"),
+            worker=claim["worker"],
+            branch=claim["branch"],
+            port_candidates=tuple(claim.get("port_candidates") or ()),
+            observed_head=claim.get("observed_head"),
+            context=MappingProxyType(dict(claim.get("context") or {})),
+        )
+
+    def observe_dispatch_claims(self, snapshot: dict,
+                                entries: dict | None) -> dict:
+        """Phase A for dispatch. Read-only, OUTSIDE the state lock.
+
+        Returns {(task_id, role): DispatchObservation} for every ACTIVE
+        claim. Reading the job file here rather than in T1 is what keeps the
+        recovery path state-only: the transaction decides from an observation
+        someone else took, and never touches a file itself.
+        """
+        observations: dict[tuple[str, str], DispatchObservation] = {}
+        for task in (snapshot.get("tasks") or {}).values():
+            task_id = task.get("id")
+            if not isinstance(task_id, str):
+                continue
+            claims = task.get(state_mod.DISPATCH_CLAIMS_KEY) or {}
+            if not isinstance(claims, dict):
+                continue
+            for role, claim in claims.items():
+                if not state_mod.dispatch_claim_active(claim):
+                    continue
+                worker = claim.get("worker")
+                if not isinstance(worker, str) or not worker:
+                    continue
+                job_path = config.WORKER_LOG_DIR / f"{worker}.job.json"
+                present = job_path.exists()
+                worktree = port = None
+                if present:
+                    try:
+                        job = json.loads(job_path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        job = {}
+                    if not isinstance(job, dict):
+                        job = {}
+                    if isinstance(job.get("worktree"), str):
+                        worktree = job["worktree"]
+                    if isinstance(job.get("port"), int) and \
+                            not isinstance(job.get("port"), bool):
+                        port = job["port"]
+                observations[(task_id, role)] = DispatchObservation(
+                    task_id=task_id, role=role, worker=worker,
+                    job_file=present, worktree=worktree, port=port,
+                    worker_live=(worker in entries)
+                    if entries is not None else None)
+        return observations
+
+    def resume_dispatch_claims(self, doc: dict, observations: dict) -> None:
+        """T1. STATE ONLY. Converge claims left behind by a lost commit.
+
+        Two outcomes, and the job file decides between them:
+
+          * The job file EXISTS. The external phase reached the spawn, so a
+            worker may be running that nothing owns. Commit it from the claim
+            and the job file's own record of the worktree and port - the same
+            commit the ordinary path would have made. Re-spawning is refused
+            by construction, because this path never plans anything.
+          * The job file does NOT exist. Nothing was ever started under this
+            claim, so it is re-planned for this tick's execute phase. The
+            identity is unchanged: same worker name, same branch, same
+            reservation. `workmux add --open-if-exists` makes a repeated
+            worktree creation a no-op rather than an error.
+
+        A claim with no observation bound to it is left exactly as it is.
+        Nothing may be concluded about a spawn that was never looked at, and
+        a claim costs only the role's slot until the next tick observes it.
+        """
+        for task in sorted(doc.get("tasks", {}).values(),
+                           key=lambda t: t.get("id") or ""):
+            for role in state_mod.DISPATCH_ROLES:
+                claim = state_mod.dispatch_claim(task, role)
+                if not state_mod.dispatch_claim_active(claim):
+                    continue
+                observation = observations.get((task.get("id"), role))
+                if observation is None or \
+                        observation.worker != claim.get("worker"):
+                    self.log("DISPATCH_RESUME_DEFERRED", task_id=task.get("id"),
+                             role=role, pr_id=claim.get("pr"),
+                             activity_class="ORCHESTRATION",
+                             outcome="OBSERVATION_MISSING",
+                             metadata_redacted={"worker": claim.get("worker")})
+                    continue
+                plan = self.dispatch_plan(claim)
+                if observation.job_file:
+                    self.log("DISPATCH_RECOVERED", task_id=plan.task_id,
+                             role=role, pr_id=plan.pr, agent_id=plan.worker,
+                             activity_class="ORCHESTRATION",
+                             outcome="SPAWN_EVIDENCE_FOUND")
+                    self.apply_dispatch_result(
+                        doc, DispatchResult(plan=plan, ok=True,
+                                            worktree=observation.worktree,
+                                            port=observation.port,
+                                            reason="RECOVERED_FROM_JOB_FILE"))
+                    continue
+                if observation.worker_live:
+                    # No job file but a live entry: the two disagree, so
+                    # nothing is concluded and nothing is re-spawned.
+                    self.log("DISPATCH_RESUME_DEFERRED", task_id=plan.task_id,
+                             role=role, pr_id=plan.pr, agent_id=plan.worker,
+                             activity_class="ORCHESTRATION",
+                             outcome="WORKER_LIVE_WITHOUT_JOB_FILE")
+                    continue
+                self.log("DISPATCH_RESUMED", task_id=plan.task_id, role=role,
+                         pr_id=plan.pr, agent_id=plan.worker,
+                         activity_class="ORCHESTRATION", outcome="REPLANNED")
+                self._plan_dispatch(plan)
+
+    def _dispatch_block(self, doc: dict, role: str) -> str:
+        """Why a claimed dispatch may not spawn RIGHT NOW, or "" if it may.
+
+        Re-read after T1 has committed, because the decision that matters is
+        the one true at the instant a paid worker would start. A `ctl freeze`
+        or a provider entering COOLDOWN lands in the document between the two.
+
+        Every control here already governs this dispatch somewhere else:
+        `frozen_at` and `safe_hold` through `dispatchable`, and
+        `providers.may` through `dispatchable` (builder), `dispatch_fixer`
+        ("new_builds") and `dispatch_reviewer` ("review"). None is invented.
+        A document whose controls cannot be read is not a document that
+        permits spending.
+        """
+        if doc.get("frozen_at"):
+            return "RUN_FROZEN"
+        capability = "review" if role == "reviewer" else "new_builds"
+        try:
+            if not providers.may(doc, capability):
+                return "PROVIDER_PAUSED"
+            if role == "builder" and providers.safe_hold(doc):
+                return "SAFE_HOLD"
+        except (KeyError, TypeError, AttributeError):
+            return "CONTROLS_UNREADABLE"
+        return ""
+
+    def execute_dispatches(self, plans: list, snapshot: dict | None = None):
+        """Phase C for dispatch. External work, with NO state lock held.
+
+        Returns one `DispatchResult` per plan that was actually attempted. A
+        plan held by a control is NOT returned: its claim stays exactly as it
+        is, reserving the same worker name and branch, and the next tick's
+        `resume_dispatch_claims` re-plans it.
+        """
+        results: list[DispatchResult] = []
+        if not plans:
+            return results
+        if snapshot is None:
+            snapshot = self.store.read() if self.store.exists() else {}
+        for plan in plans:
+            handler = self.DISPATCH_HANDLERS.get(plan.role)
+            if handler is None:
+                self.log("DISPATCH_EXECUTION_HELD", task_id=plan.task_id,
+                         role=plan.role, pr_id=plan.pr,
+                         activity_class="ORCHESTRATION", outcome="NO_HANDLER")
+                continue
+            if self.stopping:
+                # A stop signal arrived after T1 committed. The claim is
+                # durable and resumes on the next start; spawning a worker
+                # the shutdown is about to orphan is not recoverable.
+                self.log("DISPATCH_EXECUTION_HELD", task_id=plan.task_id,
+                         role=plan.role, pr_id=plan.pr,
+                         activity_class="ORCHESTRATION",
+                         outcome="SUPERVISOR_STOPPING")
+                break
+            blocked = self._dispatch_block(snapshot, plan.role)
+            if blocked:
+                self.log("DISPATCH_EXECUTION_HELD", task_id=plan.task_id,
+                         role=plan.role, pr_id=plan.pr,
+                         activity_class="ORCHESTRATION", outcome=blocked)
+                continue
+            results.append(getattr(self, handler.execute)(plan))
+        return results
+
+    def apply_dispatch_result(self, doc: dict, result: DispatchResult) -> None:
+        """Commit one dispatch outcome. STATE ONLY.
+
+        Separate from `confirm_dispatches` because the same commit is reached
+        from two places - its own transaction on the ordinary path, and T1 on
+        the recovery path - and both must run exactly the same code.
+        """
+        handler = self.DISPATCH_HANDLERS.get(result.plan.role)
+        if handler is None:
+            self.log("DISPATCH_COMMIT_REFUSED", task_id=result.plan.task_id,
+                     role=result.plan.role, pr_id=result.plan.pr,
+                     activity_class="ORCHESTRATION", outcome="NO_HANDLER")
+            return
+        getattr(self, handler.commit if result.ok else handler.fail)(
+            doc, result.plan, result)
+
+    def confirm_dispatches(self, results: list) -> None:
+        """Phase D for dispatch. ONE TRANSACTION PER RESULT, deliberately.
+
+        A single shared transaction would mean one task's fail-closed abort
+        (C-15 raises rather than persist false release evidence) discarding
+        another task's commit - and that other task's worker has already been
+        spawned, so the state would be lost while the process ran on. Per
+        result, the blast radius is the one dispatch that went wrong, and
+        anything uncommitted is recovered from its claim and job file on the
+        next tick.
+        """
+        for result in results:
+            with self.store.transaction() as doc:
+                self.apply_dispatch_result(doc, result)
+
+    def _current_dispatch_claim(self, doc: dict, plan: DispatchPlan):
+        """(task, claim) only if the claim is still the exact one acted on.
+
+        Returns (task, None) when the task is still there but the claim has
+        been superseded, and (None, None) when the task itself is gone.
+        """
+        task = doc.get("tasks", {}).get(plan.task_id)
+        if task is None:
+            return None, None
+        claim = state_mod.dispatch_claim(task, plan.role)
+        if not state_mod.dispatch_claim_active(claim):
+            return task, None
+        if claim.get("worker") != plan.worker or claim.get("pr") != plan.pr:
+            return task, None
+        return task, claim
+
+    @staticmethod
+    def _clear_dispatch_claim(task: dict, role: str) -> None:
+        state_mod.dispatch_claims(task).pop(role, None)
+
+    @staticmethod
+    def _snapshot_claims(task) -> list:
+        """A task's claims, read defensively from a NON-authoritative read.
+
+        The snapshot is whatever is on disk, so the map may be absent or the
+        wrong type entirely. A tick must not fail on that - T1 re-reads under
+        the lock and decides from there.
+        """
+        if not isinstance(task, dict):
+            return []
+        claims = task.get(state_mod.DISPATCH_CLAIMS_KEY)
+        return list(claims.values()) if isinstance(claims, dict) else []
+
     def dispatch_builder(self, doc: dict, task: dict) -> None:
         lock_newly_acquired = False
+        if state_mod.dispatch_claim_active(
+                state_mod.dispatch_claim(task, "builder")):
+            # A claim already reserves this task's builder. Re-planning would
+            # allocate a second worker name for one reservation; the existing
+            # claim is resumed by resume_dispatch_claims instead.
+            return
         if task.get("schema_changing"):
             # C-15: fresh-vs-re-entrant ownership decides what a dispatch
             # failure may do with the lock. Read inside this same transaction,
@@ -668,77 +1079,267 @@ class Supervisor:
 
         worker = f"{task['id'].lower()}-builder"
         branch = f"task/{task['id'].lower()}"
-        role_cfg = self.cfg.roles["builder"]
 
         if task["state"] != "READY":
             self.transition(doc, task["id"], "READY", "dependencies met")
 
-        prompt_text = prompts.builder(task, branch, self.cfg.github_repo,
-                                      self.cfg.main_branch)
-        prompt_path = prompts.write(worker, prompt_text)
-
-        created = workers.create_worker(worker, branch, prompt_path,
-                                        self.cfg.tmux_session, self.cfg.main_branch)
-        if not created.ok:
-            self.log("WORKER_CREATE_FAILED", task_id=task["id"], role="builder",
-                     activity_class="FAILED_WORK", outcome="FAILED",
-                     metadata_redacted={"stderr": created.stderr[:500]})
-            self.on_builder_dispatch_failure(doc, task, lock_newly_acquired,
-                                             "worktree creation failed")
-            return
-
-        path = workers.worktree_path(worker)
-        if path is None:
-            self.on_builder_dispatch_failure(doc, task, lock_newly_acquired,
-                                             "worktree path not resolvable")
-            return
-
-        port, port_why = workers.allocate_port(doc)
-        if port is None:
+        # C-18 stage 4: the ports this state permits, chosen under the lock.
+        # NO BIND happens here - `select_port_candidates` is the half of
+        # allocation stage 3 proved performs no network operation. The probe
+        # that proves one of them binds runs in the execute phase.
+        candidates, port_why = workers.select_port_candidates(doc)
+        if not candidates:
             self.log("PORT_ALLOCATION_FAILED", task_id=task["id"], role="builder",
                      activity_class="FAILED_WORK", outcome="FAILED",
                      metadata_redacted={"why": port_why})
+            # Still inside the transaction that acquired the lock, so the
+            # in-memory freshness answer is exactly as durable as the acquire
+            # it came from. This is the one failure path that does not cross
+            # the transaction boundary.
             self.on_builder_dispatch_failure(doc, task, lock_newly_acquired,
                                              f"no governed port: {port_why}")
             return
 
-        job = workers.write_job(
-            worker, "builder", role_cfg.provider, role_cfg.model, task["id"], path,
-            prompt_path, self.tz, hard_timeout_seconds=self.cfg.extra["timeouts"]["builder"],
-            fallback_model=role_cfg.escalation_model, port=port,
-        )
-        started = workers.start_job(worker, job, path)
-        if not started.ok:
-            self.log("WORKER_START_FAILED", task_id=task["id"], role="builder",
-                     activity_class="FAILED_WORK", outcome="FAILED",
-                     metadata_redacted={"stderr": started.stderr[:500]})
+        try:
+            claim = state_mod.new_dispatch_claim(
+                role="builder", task_id=task["id"], worker=worker,
+                branch=branch, claimed_at=clock.iso(self.now()),
+                lease_expires_at=self._lease_expires("builder"),
+                port_candidates=candidates,
+                context={
+                    # The prompt is rendered outside the lock, so the fields
+                    # it reads travel as a frozen copy. Handing out the task
+                    # dict would let the execute phase read a value that has
+                    # since changed.
+                    "task_title": task.get("title") or task["id"],
+                    "task_body": task.get("body") or "",
+                    "depends_on": list(task.get("depends_on") or []),
+                    "schema_changing": bool(task.get("schema_changing")),
+                    "port_exhaustion_reason": port_why,
+                    # C-15 evidence, recorded under the same lock that did
+                    # the acquire. `_migration_lock_release_permitted`
+                    # re-derives the fresh-vs-re-entrant answer from these
+                    # facts AND the committed document, never from either
+                    # alone - see its docstring.
+                    "lock_newly_acquired": lock_newly_acquired,
+                    "lock_acquired_at":
+                        (doc.get("migration_lock") or {}).get("acquired_at"),
+                })
+        except ValueError as exc:
+            # A claim state would refuse is worse than no claim: the slot
+            # would be reserved by something that can never spawn.
+            self.log("DISPATCH_CLAIM_REFUSED", task_id=task["id"], role="builder",
+                     activity_class="FAILED_WORK", outcome="CLAIM_REFUSED",
+                     metadata_redacted={"error": str(exc)})
             self.on_builder_dispatch_failure(doc, task, lock_newly_acquired,
-                                             "worker start failed")
+                                             "builder claim refused")
             return
 
-        task["worker"] = worker
-        task["branch"] = branch
+        state_mod.dispatch_claims(task)["builder"] = claim
+        self.log("DISPATCH_CLAIMED", task_id=task["id"], role="builder",
+                 branch=branch, agent_id=worker, activity_class="BUILD",
+                 outcome="CLAIMED",
+                 metadata_redacted={"port_candidates": len(candidates),
+                                    "lease_expires_at": claim["lease_expires_at"]})
+        self._plan_dispatch(self.dispatch_plan(claim))
+
+    def _execute_builder_dispatch(self, plan: DispatchPlan) -> DispatchResult:
+        """C-18 stage 4, Phase C. NO STATE LOCK IS HELD.
+
+        Every call here used to run inside T1: the prompt file write, the
+        workmux/git subprocess that creates the worktree, the workmux call
+        that resolves its path, the real 127.0.0.1 bind, the job file write
+        and the process spawn. The ledger appends stay here too - they are
+        not transactional, so a failure is annunciated at the moment it
+        happens rather than one commit later.
+        """
+        role_cfg = self.cfg.roles["builder"]
+        prompt_text = prompts.builder(
+            {"id": plan.task_id,
+             "title": plan.context.get("task_title") or plan.task_id,
+             "body": plan.context.get("task_body") or "",
+             "depends_on": list(plan.context.get("depends_on") or []),
+             "schema_changing": bool(plan.context.get("schema_changing"))},
+            plan.branch, self.cfg.github_repo, self.cfg.main_branch)
+        prompt_path = prompts.write(plan.worker, prompt_text)
+
+        created = workers.create_worker(plan.worker, plan.branch, prompt_path,
+                                        self.cfg.tmux_session,
+                                        self.cfg.main_branch)
+        if not created.ok:
+            self.log("WORKER_CREATE_FAILED", task_id=plan.task_id, role="builder",
+                     activity_class="FAILED_WORK", outcome="FAILED",
+                     metadata_redacted={"stderr": created.stderr[:500]})
+            return DispatchResult(plan=plan, ok=False,
+                                  reason="worktree creation failed")
+
+        path = workers.worktree_path(plan.worker)
+        if path is None:
+            return DispatchResult(plan=plan, ok=False,
+                                  reason="worktree path not resolvable")
+
+        port = next((candidate for candidate in plan.port_candidates
+                     if workers.probe_port(candidate)), None)
+        if port is None:
+            why = plan.context.get("port_exhaustion_reason") or \
+                "no candidate port bound"
+            self.log("PORT_ALLOCATION_FAILED", task_id=plan.task_id, role="builder",
+                     activity_class="FAILED_WORK", outcome="FAILED",
+                     metadata_redacted={"why": why})
+            return DispatchResult(plan=plan, ok=False,
+                                  reason=f"no governed port: {why}")
+
+        job = workers.write_job(
+            plan.worker, "builder", role_cfg.provider, role_cfg.model,
+            plan.task_id, path, prompt_path, self.tz,
+            hard_timeout_seconds=self.cfg.extra["timeouts"]["builder"],
+            fallback_model=role_cfg.escalation_model, port=port,
+        )
+        started = workers.start_job(plan.worker, job, path)
+        if not started.ok:
+            self.log("WORKER_START_FAILED", task_id=plan.task_id, role="builder",
+                     activity_class="FAILED_WORK", outcome="FAILED",
+                     metadata_redacted={"stderr": started.stderr[:500]})
+            return DispatchResult(plan=plan, ok=False,
+                                  reason="worker start failed")
+        return DispatchResult(plan=plan, ok=True, worktree=str(path), port=port)
+
+    def _commit_builder_dispatch(self, doc: dict, plan: DispatchPlan,
+                                 result: DispatchResult) -> None:
+        """C-18 stage 4, commit side. STATE ONLY.
+
+        Everything here used to commit in the same transaction as the spawn:
+        the attempts increment, the ASSIGNED transition, the worker record
+        and the retained-worktree handover. They now commit after the spawn
+        has actually happened, which is also what makes `attempts` honest -
+        it still counts exactly one per real dispatch.
+        """
+        task, claim = self._current_dispatch_claim(doc, plan)
+        if task is None:
+            self.log("DISPATCH_COMMIT_REFUSED", task_id=plan.task_id,
+                     role="builder", agent_id=plan.worker,
+                     activity_class="ORCHESTRATION", outcome="TASK_GONE")
+            return
+        if doc.get("workers", {}).get(plan.worker):
+            # Already committed - a lost confirm converged by recovery, or a
+            # recovery that raced its own confirm. Idempotent by design.
+            self._clear_dispatch_claim(task, "builder")
+            return
+        if claim is None:
+            self.log("DISPATCH_COMMIT_REFUSED", task_id=plan.task_id,
+                     role="builder", agent_id=plan.worker,
+                     activity_class="ORCHESTRATION", outcome="CLAIM_SUPERSEDED")
+            return
+
+        role_cfg = self.cfg.roles["builder"]
+        assigned_at = clock.iso(self.now())
+        task["worker"] = plan.worker
+        task["branch"] = plan.branch
         task["attempts"] += 1
-        task["assigned_at"] = clock.iso(self.now())
-        task["last_progress_at"] = task["assigned_at"]
+        task["assigned_at"] = assigned_at
+        task["last_progress_at"] = assigned_at
         task["progress_marker"] = 0
-        self.transition(doc, task["id"], "ASSIGNED", "builder dispatched")
-        doc["workers"][worker] = state_mod.new_worker_record(
-            "builder", task["id"], branch, task["assigned_at"],
-            worktree=str(path), port=port,
+        self.transition(doc, plan.task_id, "ASSIGNED", "builder dispatched")
+        doc["workers"][plan.worker] = state_mod.new_worker_record(
+            "builder", plan.task_id, plan.branch, assigned_at,
+            worktree=result.worktree, port=result.port,
             lease_expires_at=self._lease_expires("builder"))
-        task.setdefault("retained_worktrees", {}).pop(str(path), None)
-        self.log("TASK_DISPATCHED", task_id=task["id"], role="builder",
-                 provider=role_cfg.provider, model=role_cfg.model, branch=branch,
-                 agent_id=worker, activity_class="BUILD", outcome="DISPATCHED")
+        if result.worktree:
+            task.setdefault("retained_worktrees", {}).pop(result.worktree, None)
+        self._clear_dispatch_claim(task, "builder")
+        self.log("TASK_DISPATCHED", task_id=plan.task_id, role="builder",
+                 provider=role_cfg.provider, model=role_cfg.model,
+                 branch=plan.branch, agent_id=plan.worker,
+                 activity_class="BUILD", outcome="DISPATCHED")
+
+    def _fail_builder_dispatch(self, doc: dict, plan: DispatchPlan,
+                               result: DispatchResult) -> None:
+        """C-18 stage 4, failure side. STATE ONLY.
+
+        The claim is released first, so the task is free to be dispatched
+        again, and then C-15's decision is taken from durable evidence.
+        """
+        task, claim = self._current_dispatch_claim(doc, plan)
+        if task is None or claim is None:
+            self.log("DISPATCH_FAILURE_REFUSED", task_id=plan.task_id,
+                     role="builder", agent_id=plan.worker,
+                     activity_class="ORCHESTRATION",
+                     outcome="TASK_GONE" if task is None else "CLAIM_SUPERSEDED")
+            return
+        permitted = self._migration_lock_release_permitted(doc, plan)
+        self._clear_dispatch_claim(task, "builder")
+        self.on_builder_dispatch_failure(doc, task, permitted, result.reason)
+
+    def _migration_lock_release_permitted(self, doc: dict,
+                                          plan: DispatchPlan) -> bool:
+        """C-15 fresh-vs-re-entrant, RE-DERIVED from the committed document.
+
+        Before C-18 this was a local boolean: `owner_before is None`, read a
+        few statements earlier in the SAME transaction that would act on it.
+        Once the dispatch failure can be handled after T1 has committed, that
+        boolean is no longer evidence of anything - the document it described
+        is gone, and between the two transactions the lock can be released,
+        re-acquired, or acquired by another task.
+
+        So the answer is rebuilt here from four durable facts, ALL of which
+        must hold before the lock may be auto-released:
+
+          1. This plan acquired the lock rather than inheriting it
+             (`lock_newly_acquired`, written under the lock that did it).
+          2. This task still owns the lock.
+          3. It is still the SAME ownership episode. `acquired_at` is set on
+             a fresh acquisition, left untouched by a re-acquire from the
+             same owner, and cleared on release - so an episode that ended
+             and began again has a different value, and this plan knows
+             nothing about the new one.
+          4. No builder has been dispatched under that episode.
+             `assigned_at` is written only by a committed builder dispatch,
+             so `assigned_at >= acquired_at` is exactly C-15's "a previous
+             builder ran while it held the lock", read from state instead of
+             inferred from control flow.
+
+        Every disagreement answers False, which RETAINS the lock. That is the
+        safe direction: retaining a lock no builder ever used costs a human
+        decision, while releasing one a builder mutated schema under is the
+        corruption C-15 exists to prevent.
+
+        Timestamps are compared as datetimes, never as strings: Pacific/
+        Auckland changes offset twice a year, and across that boundary a
+        later instant can sort earlier lexicographically. An unparseable
+        timestamp answers False.
+        """
+        context = plan.context
+        if not context.get("lock_newly_acquired"):
+            return False
+        acquired_at = context.get("lock_acquired_at")
+        if not acquired_at:
+            return False
+        lock = doc.get("migration_lock") or {}
+        if lock.get("owner_task") != plan.task_id:
+            return False
+        if lock.get("acquired_at") != acquired_at:
+            return False
+        assigned_at = (doc.get("tasks", {}).get(plan.task_id) or {}).get(
+            "assigned_at")
+        if assigned_at:
+            try:
+                if clock.parse(assigned_at) >= clock.parse(acquired_at):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return True
 
     def on_builder_dispatch_failure(self, doc: dict, task: dict,
                                     lock_newly_acquired: bool, why: str) -> None:
         """C-15: a builder dispatch failed at a proven pre-execution point.
 
-        All three call sites fail before any builder process exists for THIS
+        Every call site fails before any builder process exists for THIS
         dispatch, so ownership history decides what may happen to the
-        migration lock:
+        migration lock. `lock_newly_acquired` means "this dispatch acquired
+        the lock and no builder has run under that ownership" - C-18 stage 4
+        moved most failures out of the acquiring transaction, so the caller
+        on that path derives it with `_migration_lock_release_permitted`
+        rather than remembering it:
 
           * FRESH owner (this dispatch newly acquired it): no builder has ever
             run under this ownership, so no schema mutation is attributable to
@@ -2374,9 +2975,36 @@ class Supervisor:
         self.dispatch_reviewer(doc, task, pr_number)
 
     def has_worker(self, doc: dict, pr_number: int, roles: tuple[str, ...]) -> bool:
-        """Whether a worker in any of these roles is already live on this PR."""
-        return any(meta.get("pr") == pr_number and meta.get("role") in roles
-                   for meta in doc["workers"].values())
+        """Whether this PR already has a worker, or a claim on one, in these roles.
+
+        C-18: a dispatch claim counts. Between T1 planning a dispatch and the
+        spawn being committed there is no worker record, and without this
+        `route_awaiting_dispatch` would see "no live worker" on the next tick
+        and dispatch a SECOND one - two reviewers on one pull request, or two
+        fixers on one branch. The claim is the durable reservation that
+        closes that window.
+        """
+        if any(meta.get("pr") == pr_number and meta.get("role") in roles
+               for meta in doc["workers"].values()):
+            return True
+        return self.has_dispatch_claim(doc, pr_number, roles)
+
+    @staticmethod
+    def has_dispatch_claim(doc: dict, pr_number: int,
+                           roles: tuple[str, ...]) -> bool:
+        """Whether an ACTIVE dispatch claim in these roles holds this PR."""
+        for task in (doc.get("tasks") or {}).values():
+            claims = task.get(state_mod.DISPATCH_CLAIMS_KEY) or {}
+            if not isinstance(claims, dict):
+                continue
+            for role, claim in claims.items():
+                if role not in roles:
+                    continue
+                if not state_mod.dispatch_claim_active(claim):
+                    continue
+                if claim.get("pr") == pr_number:
+                    return True
+        return False
 
     def invariant_violated(self, doc: dict, task: dict, record: dict,
                            pr_number: int, pr_view: dict | None) -> bool:
@@ -2924,6 +3552,9 @@ class Supervisor:
         open_prs = gh.list_open_prs(self.cfg.github_repo)
         merge_candidates: list[tuple[str, int]] = []
         planned_security: list = []
+        # C-18: one list per tick. Reset here rather than only in __init__ so
+        # a plan can never leak from one cycle into the next.
+        self._dispatch_plans = []
 
         # C-05.3a Phase A + Phase E-publish, and C-18 stage 1's pull-request
         # observation, all OUTSIDE the lock. The snapshot is
@@ -2931,6 +3562,7 @@ class Supervisor:
         # PR, SHA and attempt identity before acting.
         security_observations: dict = {}
         pr_observations: dict = {}
+        dispatch_observations: dict = {}
         if self.store.exists():
             snapshot = self.store.read()
             # C-18 stage 1: the `gh pr view` route_prs used to make while
@@ -2944,8 +3576,23 @@ class Supervisor:
                       if task.get("state") in self.EVIDENCE_STATES}
             eligible = [pr["number"] for pr in open_prs
                         if pr["number"] in wanted]
-            if eligible:
+            # C-18 stage 4: one /proc scan serves both the security phases
+            # and dispatch recovery. It is taken when either needs it and
+            # skipped entirely when neither does, so a quiet tick adds no
+            # scan it did not already perform.
+            claims_present = any(
+                state_mod.dispatch_claim_active(claim)
+                for task in (snapshot.get("tasks") or {}).values()
+                for claim in self._snapshot_claims(task))
+            entries = None
+            if eligible or claims_present:
                 entries = proc.worker_entry_processes(config.WORKER_LOG_DIR)
+            if claims_present:
+                # C-18 stage 4 Phase A: the job file that proves whether a
+                # claim ever spawned, read here so T1 touches no filesystem.
+                dispatch_observations = self.observe_dispatch_claims(
+                    snapshot, entries)
+            if eligible:
                 heads = {number: gh.pr_diff_sha(self.cfg.github_repo, number)
                          for number in eligible}
                 self.publish_security_results(snapshot, entries)
@@ -2982,6 +3629,10 @@ class Supervisor:
                 self.freeze(doc)
                 return
 
+            # C-18 stage 4: converge dispatch claims BEFORE reaping, so a
+            # worker recovered from its job file gets its record back in time
+            # to be reaped in this same tick rather than the next one.
+            self.resume_dispatch_claims(doc, dispatch_observations)
             self.reap_workers(doc)
             # C-05.3a T1: claim, and ingest evidence already durable on disk.
             # Deliberately not folded into reap_workers - that callback path
@@ -3005,10 +3656,17 @@ class Supervisor:
 
             self.checkpoints(doc, cs)
 
-        # T1 has committed and the lock is released. C-05.3a Phase C runs
-        # here - materialise the claimed attempt, write the job file, spawn -
-        # with no state lock held, then Phase D caches the spawn in its own
-        # transaction.
+        # T1 has committed and the lock is released. C-18 stage 4's dispatch
+        # execution runs FIRST among the post-transaction phases: it is the
+        # direct continuation of the planning T1 just did, and a spawned
+        # worker with no committed record is the one outcome worth shortening
+        # the window on. It holds no transaction, so it cannot roll back a
+        # merge and C-14.1's guarantee is unaffected.
+        self.confirm_dispatches(self.execute_dispatches(self._dispatch_plans))
+
+        # C-05.3a Phase C runs next - materialise the claimed attempt, write
+        # the job file, spawn - with no state lock held, then Phase D caches
+        # the spawn in its own transaction.
         #
         # Placed before execute_merges as directed. C-14.1's reason for
         # running merges early is ROLLBACK safety: each merge gets its own

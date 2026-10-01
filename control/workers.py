@@ -330,11 +330,11 @@ def allocate_port(doc: dict, lo: int | None = None,
     exhaustion message are unchanged, so every existing caller and test is
     unaffected.
 
-    C-18 stage 3 split the two halves apart but did NOT migrate the callers.
-    `dispatch_builder` and `dispatch_fixer` still call this function inside
-    T1, so a bind still happens under the state lock today - that migration
-    is stages 4 and 6. What stage 3 delivers is a selection half proven to
-    perform no bind, which those stages need before they can move anything.
+    C-18 stage 3 split the two halves apart. Stage 4 migrated
+    `dispatch_builder` onto them - it selects candidates under the lock and
+    probes outside it - so the only caller left is `dispatch_fixer`, which
+    still calls this composed form inside T1. A bind therefore still happens
+    under the state lock on the fixer path today; moving it is stage 6.
     """
     candidates, why = select_port_candidates(doc, lo, hi)
     for port in candidates:

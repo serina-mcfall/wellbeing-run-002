@@ -250,9 +250,25 @@ class TestDispatchPopulation(SupervisorCase):
         self.assertEqual(self.cfg.extra["timeouts"]["lease_grace_seconds"], 60)
 
     def dispatch(self, doc, task, *, port=(LO, "")):
+        """Drive a whole builder dispatch, as tick() does.
+
+        C-18 stage 4: `dispatch_builder` selects candidate ports under the
+        lock and claims; the bind probe, the spawn and the commit happen
+        afterwards. `port` keeps its old meaning - a port and no reason, or
+        None and an exhaustion reason - and is translated into the candidate
+        list the under-lock half now returns.
+        """
         wt = Path("/wt/task-001-builder")
-        with mock.patch.object(supervisor_mod.workers, "allocate_port",
-                               return_value=port) as alloc, \
+        chosen, why = port
+        candidates = ([chosen], "") if chosen is not None else ([], why)
+        # tick() runs providers.ensure at the top of T1, so the document the
+        # execute phase re-reads its controls from always has them.
+        supervisor_mod.providers.ensure(doc)
+        self.sup._dispatch_plans = []
+        with mock.patch.object(supervisor_mod.workers, "select_port_candidates",
+                               return_value=candidates) as alloc, \
+                mock.patch.object(supervisor_mod.workers, "probe_port",
+                                  return_value=True), \
                 mock.patch.object(supervisor_mod.workers, "create_worker",
                                   return_value=ok_result()), \
                 mock.patch.object(supervisor_mod.workers, "worktree_path",
@@ -264,6 +280,10 @@ class TestDispatchPopulation(SupervisorCase):
                 mock.patch.object(supervisor_mod.prompts, "write",
                                   return_value=Path("/tmp/p")):
             self.sup.dispatch_builder(doc, task)
+            results = self.sup.execute_dispatches(self.sup._dispatch_plans,
+                                                  snapshot=doc)
+        for result in results:
+            self.sup.apply_dispatch_result(doc, result)
         return alloc, wj, sj, wt
 
     def test_builder_record_carries_worktree_port_and_lease(self):

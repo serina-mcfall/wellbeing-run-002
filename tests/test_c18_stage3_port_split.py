@@ -410,15 +410,46 @@ class AllocatePortStillBehavesExactlyAsBefore(PortHarness):
 # ------------------------------------------- the integration boundary, stated
 
 
-class StageThreeDidNotMigrateTheDispatchSites(unittest.TestCase):
-    """Recorded as a test so nobody can later read "stage 3 done" as "port
-    binds have left T1". They have not. Stages 4 and 6 do that."""
+class OnlyTheFixerStillBindsUnderTheLock(unittest.TestCase):
+    """The stage-3 boundary marker, moved on by stage 4 rather than deleted.
 
-    def test_both_dispatch_sites_still_call_the_composed_allocator(self):
-        source = Path(supervisor_mod.__file__).read_text(encoding="utf-8")
-        self.assertEqual(source.count("workers.allocate_port(doc)"), 2)
-        self.assertNotIn("workers.select_port_candidates", source)
-        self.assertNotIn("workers.probe_port", source)
+    It was written so nobody could read "stage 3 done" as "port binds have
+    left T1" while BOTH dispatch sites still called the composed allocator.
+    Stage 4 migrated the builder, which is exactly the event the marker
+    existed to make visible - so it now pins the remaining boundary: ONE
+    composed call is left, it is `dispatch_fixer`'s, and that is stage 6.
+
+    Read this as the answer to "have port binds left T1 yet?" The honest
+    answer is "for the builder, yes; for the fixer, not yet."
+    """
+
+    def source(self) -> str:
+        return Path(supervisor_mod.__file__).read_text(encoding="utf-8")
+
+    def test_exactly_one_composed_allocator_call_is_left(self):
+        self.assertEqual(self.source().count("workers.allocate_port(doc)"), 1)
+
+    def test_the_remaining_call_is_the_fixer_and_it_is_still_inside_t1(self):
+        source = self.source()
+        fixer = source.index("def dispatch_fixer")
+        after = source.index("def on_dispatch_failure", fixer)
+        body = source[fixer:after]
+        self.assertIn("workers.allocate_port(doc)", body,
+                      "the surviving in-T1 bind must be the fixer's; if it "
+                      "moved, stage 6 landed and this marker should move too")
+
+    def test_the_builder_uses_the_split_halves(self):
+        source = self.source()
+        builder = source.index("def dispatch_builder")
+        execute = source.index("def _execute_builder_dispatch", builder)
+        commit = source.index("def _commit_builder_dispatch", execute)
+        # Selection under the lock, in the planning half.
+        self.assertIn("workers.select_port_candidates",
+                      source[builder:execute])
+        self.assertNotIn("workers.probe_port", source[builder:execute])
+        # The bind outside it, in the execute half.
+        self.assertIn("workers.probe_port", source[execute:commit])
+        self.assertNotIn("workers.allocate_port", source[execute:commit])
 
     def test_the_split_halves_exist_and_are_separately_callable(self):
         self.assertTrue(callable(workers.select_port_candidates))
