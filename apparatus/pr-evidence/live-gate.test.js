@@ -635,3 +635,89 @@ test('the LATEST review cycle governs: an older passing cycle cannot cover a new
   assert.equal(result.ok, false);
   assert.equal(result.code, 'REVIEW_PROVENANCE_SHA_MISMATCH');
 });
+
+// ------------------------------------- F5: blockedOnlyByPendingIndependentReview
+//
+// THE DEADLOCK THIS BREAKS. Once `run-002/independent-review` is a REQUIRED
+// context on main, GitHub reports mergeStateStatus BLOCKED until something
+// publishes it — and the thing that publishes it is this gate. Left alone the
+// gate denies for PR_BLOCKED_BY_BRANCH_PROTECTION, nothing ever publishes, and
+// every product PR is blocked forever: strictly worse than today, which is why
+// proposal §0.1 lists it as one of the three blockers that must be resolved
+// before the App is provisioned.
+//
+// The flag is a REPORTED FIELD for the publisher. It is never an input to
+// `verified`, and `decision` is computed before it.
+
+test('F5: the flag is false on a pull request that is already eligible', () => {
+  const result = evaluate();
+  assert.equal(result.decision, ELIGIBLE);
+  assert.equal(result.blockedOnlyByPendingIndependentReview, false);
+});
+
+test('F5: BLOCKED as the ONLY reason, with CI verified green, sets the flag', () => {
+  const result = evaluate({ prView: prView({ mergeStateStatus: 'BLOCKED' }) });
+  assert.deepEqual(codes(result), ['PR_BLOCKED_BY_BRANCH_PROTECTION']);
+  assert.equal(result.blockedOnlyByPendingIndependentReview, true);
+});
+
+test('F5: the flag never makes the decision ELIGIBLE', () => {
+  const result = evaluate({ prView: prView({ mergeStateStatus: 'BLOCKED' }) });
+  assert.equal(result.decision, DENIED);
+});
+
+test('F5: BLOCKED with a FAILING CI does not set the flag', () => {
+  // The case the entire safety argument is about: GitHub reports BLOCKED
+  // for a failing required check too, so a flag derived from the raw state
+  // would bless a pull request whose CI is red.
+  const result = evaluate(
+    { prView: prView({ mergeStateStatus: 'BLOCKED' }) },
+    { resolveCi: () => ({ ok: false, determination: VERIFIED_FALSE,
+      reason: 'CI_FAILED', detail: 'ci concluded failure' }) }
+  );
+  assert.equal(result.blockedOnlyByPendingIndependentReview, false);
+  assert.ok(codes(result).includes('CI_UNVERIFIED'));
+});
+
+test('F5: BLOCKED alongside any second reason does not set the flag', () => {
+  const result = evaluate({
+    prView: prView({ mergeStateStatus: 'BLOCKED', isDraft: true }),
+  });
+  assert.ok(result.reasons.length > 1);
+  assert.equal(result.blockedOnlyByPendingIndependentReview, false);
+});
+
+test('F5: a different merge-state denial does not set the flag', () => {
+  for (const state of ['DIRTY', 'BEHIND', 'UNKNOWN', 'UNSTABLE']) {
+    const result = evaluate({ prView: prView({ mergeStateStatus: state }) });
+    assert.equal(result.blockedOnlyByPendingIndependentReview, false,
+      'state ' + state + ' must not set the flag');
+  }
+});
+
+test('F5: an unobserved pull request does not set the flag', () => {
+  const result = evaluate({ prView: undefined });
+  assert.equal(result.blockedOnlyByPendingIndependentReview, false);
+});
+
+test('F5 MUTATION: deriving the flag from mergeStateStatus is fail-open', () => {
+  // Demonstrated, not asserted — the proposal required this before the
+  // resolution is believed. Both formulations are computed over the SAME
+  // observation, for a pull request whose CI is VERIFIED FAILING.
+  const observation = prView({ mergeStateStatus: 'BLOCKED' });
+  const result = evaluate(
+    { prView: observation },
+    { resolveCi: () => ({ ok: false, determination: VERIFIED_FALSE,
+      reason: 'CI_FAILED', detail: 'ci concluded failure' }) }
+  );
+
+  // The REJECTED formulation, written out in full.
+  const rejected = String(observation.mergeStateStatus).toUpperCase() === 'BLOCKED';
+  assert.equal(rejected, true,
+    'the rejected formulation would publish an independent-review PASS for a ' +
+    'pull request whose CI concluded failure');
+
+  // The IMPLEMENTED one refuses, because it reads the reason list and the
+  // CI adapter rather than the raw state.
+  assert.equal(result.blockedOnlyByPendingIndependentReview, false);
+});

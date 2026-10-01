@@ -556,6 +556,33 @@ function evaluateLiveMergeEligibility(request, adapters) {
   const draftOnly =
     reasons.length === 1 && reasons[0].code === 'PR_IS_DRAFT';
 
+  // F5's resolution, and the deadlock it exists to break.
+  //
+  // Once `run-002/independent-review` is a REQUIRED context on main,
+  // GitHub reports mergeStateStatus BLOCKED until something publishes it —
+  // and the thing that publishes it is this gate. So the gate would deny
+  // for PR_BLOCKED_BY_BRANCH_PROTECTION, nothing would ever publish, and
+  // every product PR would be blocked forever. §4.3b option (ii): the
+  // PUBLISHER may act on `eligible || blockedOnlyByPendingIndependentReview`,
+  // while the Supervisor's merge path keeps acting on `eligible` alone.
+  //
+  // THE SAFETY CONDITION IS THE WHOLE OF IT. Computed from the reason list
+  // being PRECISELY ONE reason, and that reason being the protection one,
+  // AND CI independently verified green — never from
+  // `mergeStateStatus === 'BLOCKED'`, which is also what GitHub reports
+  // for a failing `ci`, an unsatisfied conversation requirement, or any
+  // other protection rule (see the comment at PR_BLOCKED_BY_BRANCH_PROTECTION
+  // above). Deriving it from the raw state would publish an independent-review
+  // pass for a pull request whose CI is red.
+  //
+  // IT IS A REPORTED FIELD, NEVER AN INPUT TO `verified`. The default-deny
+  // backstop above is untouched and `decision` is computed before this
+  // line. A merge still requires ELIGIBLE.
+  const blockedOnlyByPendingIndependentReview =
+    reasons.length === 1 &&
+    reasons[0].code === 'PR_BLOCKED_BY_BRANCH_PROTECTION' &&
+    ciResult !== null && ciResult.ok === true;
+
   return {
     decision: verified ? ELIGIBLE : DENIED,
     trustedHeadSha: trustedHeadSha,
@@ -564,6 +591,10 @@ function evaluateLiveMergeEligibility(request, adapters) {
     // draft must never be a silent stall: this is the distinguishable,
     // reportable "would merge if a human took it out of draft" condition.
     blockedOnlyByDraft: draftOnly,
+    // True when the ONLY thing holding it back is the required context
+    // this gate itself has not published yet, and CI is verified green.
+    // The publisher reads this; the merge path must not.
+    blockedOnlyByPendingIndependentReview: blockedOnlyByPendingIndependentReview,
     reasons: reasons,
     adapters: {
       headSha: headResult,
