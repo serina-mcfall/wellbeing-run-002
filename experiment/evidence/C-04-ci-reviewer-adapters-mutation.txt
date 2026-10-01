@@ -1,0 +1,33 @@
+# Mutation check for apparatus/adapters/ci-result.js and reviewer-identity.js
+# 2026-10-01, branch wip/c04-adapters.
+# Each guard was deliberately broken one at a time, the suite re-run, the file
+# restored from its pre-mutation bytes, and restoration verified by sha256.
+# A guard nobody has watched fail is not a guard.
+
+BASELINE: pass=57 fail=0
+
+M1  ci: 'skipped' counts as a pass: RED (fail=1) ['skipped, neutral, cancelled and stale conclusions are never a pass', 'skipped, neutral, cancelled and stale conclusions are never a pass']
+M2  ci: wrong-commit check run accepted: RED (fail=2) ['a check run belonging to a different commit is VERIFIED_FALSE, not ignored', 'a successful run for the PREVIOUS commit cannot pass the current one', 'a check run belonging to a different commit is VERIFIED_FALSE, not ignored']
+M3  ci: absent required check tolerated: RED (fail=2) ['a required check that never ran is VERIFIED_FALSE even when other checks passed', 'the Run 002 entrypoint still fails closed when a governed check is absent', 'a required check that never ran is VERIFIED_FALSE even when other checks passed']
+M4  ci: still-running check treated as done: RED (fail=1) ['a required check still running is COULD_NOT_VERIFY, not a failure and not a pass', 'a required check still running is COULD_NOT_VERIFY, not a failure and not a pass']
+M5  ci: zero check runs tolerated: RED (fail=1) ['no check runs at all is COULD_NOT_VERIFY, never a pass', 'no check runs at all is COULD_NOT_VERIFY, never a pass']
+M6  ci: fetcher no longer required: RED (fail=1) ['there is no default fetcher, so no call can reach GitHub by accident', 'there is no default fetcher, so no call can reach GitHub by accident']
+M7  ci: malformed head SHA accepted: RED (fail=1) ['an abbreviated, uppercase or absent head SHA is refused before any fetch', 'an abbreviated, uppercase or absent head SHA is refused before any fetch']
+M8  reviewer: any producer name accepted: RED (fail=1) ['a producer that is not the one named independent review role is VERIFIED_FALSE', 'a producer that is not the one named independent review role is VERIFIED_FALSE']
+M9  reviewer: worker-name pattern unanchored: RED (fail=1) ['forged identity: a name that merely starts like a reviewer worker is rejected', 'forged identity: a name that merely starts like a reviewer worker is rejected']
+M10 reviewer: non-independent provider accepted: RED (fail=1) ['a review produced by a non-independent provider is VERIFIED_FALSE', 'a review produced by a non-independent provider is VERIFIED_FALSE']
+M11 reviewer: self-review check disabled: RED (fail=1) ['a worker that also acted as builder or fixer cannot be its own reviewer', 'a worker that also acted as builder or fixer cannot be its own reviewer']
+M12 reviewer: claimed verdict never compared: RED (fail=2) ['a verdict the reviewer never returned is VERIFIED_FALSE', 'the latest review cycle governs: an earlier PASS cannot cover a later FAIL', 'a verdict the reviewer never returned is VERIFIED_FALSE']
+M13 reviewer: stale reviewed head accepted: RED (fail=1) ['a review of a different head SHA is stale, and stale is VERIFIED_FALSE', 'a review of a different head SHA is stale, and stale is VERIFIED_FALSE']
+M14 reviewer: malformed reviewed_head accepted: RED (fail=1) ['no PR record, or one without a usable reviewed_head, is COULD_NOT_VERIFY', 'no PR record, or one without a usable reviewed_head, is COULD_NOT_VERIFY']
+M15 reviewer: ledger role filter dropped: RED (fail=1) ["another task's or another PR's review never satisfies this one", "another task's or another PR's review never satisfies this one"]
+M16 reviewer: unparseable ledger line skipped: RED (fail=1) ['loader: one unparseable ledger line makes the whole file unusable as proof', 'loader: one unparseable ledger line makes the whole file unusable as proof']
+M17 reviewer: ledgerEvents array guard dropped: RED (fail=1) ['ledger events that are not an array fail closed', 'ledger events that are not an array fail closed']
+
+RESTORE VERIFICATION
+  ci-result.js: sha256 MATCHES pre-mutation (171a8135a0d24df6...)
+  reviewer-identity.js: sha256 MATCHES pre-mutation (2be09ef5e60d3d0b...)
+
+FINAL AFTER RESTORE: pass=57 fail=0
+
+17/17 mutations detected
