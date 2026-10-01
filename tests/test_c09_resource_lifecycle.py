@@ -317,9 +317,17 @@ class TestDispatchPopulation(SupervisorCase):
         from control import routing
         doc["prs"]["7"] = routing.blank_pr_record(7, "TASK-001", "task/task-001")
         wt = Path("/wt/task-001-fixer-1")
+        # C-18 stage 6: the fixer selects candidates under the lock and
+        # probes outside it, exactly as the builder does.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.sup.store = state.Store(path=Path(tmp.name) / "state.json", tz=TZ)
+        self.sup._dispatch_plans = []
         with mock.patch.object(supervisor_mod.providers, "may", return_value=True), \
-                mock.patch.object(supervisor_mod.workers, "allocate_port",
-                                  return_value=(LO, "")) as alloc, \
+                mock.patch.object(supervisor_mod.workers, "select_port_candidates",
+                                  return_value=([LO], "")) as alloc, \
+                mock.patch.object(supervisor_mod.workers, "probe_port",
+                                  return_value=True), \
                 mock.patch.object(supervisor_mod.workers, "acquire_worktree",
                                   return_value=(wt, "")), \
                 mock.patch.object(supervisor_mod.workers, "write_job",
@@ -329,6 +337,11 @@ class TestDispatchPopulation(SupervisorCase):
                 mock.patch.object(supervisor_mod.prompts, "write",
                                   return_value=Path("/tmp/p")):
             self.sup.dispatch_fixer(doc, task, 7, [{"id": "F1"}])
+            self.sup.store._write(doc)
+            results = self.sup.execute_dispatches(self.sup._dispatch_plans,
+                                                  snapshot=doc)
+        for result in results:
+            self.sup.apply_dispatch_result(doc, result)
         alloc.assert_called_once()
         record = doc["workers"]["task-001-fixer-1"]
         self.assertEqual(record["port"], LO)

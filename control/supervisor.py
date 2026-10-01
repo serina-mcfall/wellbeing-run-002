@@ -786,14 +786,17 @@ class Supervisor:
 
     # ------------------------------------------------ C-18 dispatch harness
 
-    #: role -> the three methods that role supplies. Stages 5 and 6 add one
-    #: entry each; nothing else in `execute_dispatches`,
+    #: role -> the three methods that role supplies. Stage 5 adds the
+    #: reviewer; nothing else in `execute_dispatches`,
     #: `apply_dispatch_result`, `confirm_dispatches` or
     #: `resume_dispatch_claims` changes.
     DISPATCH_HANDLERS: dict[str, _DispatchHandler] = {
         "builder": _DispatchHandler(execute="_execute_builder_dispatch",
                                     commit="_commit_builder_dispatch",
                                     fail="_fail_builder_dispatch"),
+        "fixer": _DispatchHandler(execute="_execute_fixer_dispatch",
+                                  commit="_commit_fixer_dispatch",
+                                  fail="_fail_fixer_dispatch"),
     }
 
     def _plan_dispatch(self, plan: DispatchPlan) -> None:
@@ -1508,6 +1511,20 @@ class Supervisor:
 
     def dispatch_fixer(self, doc: dict, task: dict, pr_number: int,
                        findings: list[dict]) -> None:
+        """C-18 stage 6, PLANNING HALF. Inside T1, STATE ONLY.
+
+        Writes a durable claim and hands it to `_plan_dispatch`. The prompt
+        write, the worktree acquisition, the 127.0.0.1 bind, the job file and
+        the spawn all happen in `_execute_fixer_dispatch` after T1 commits;
+        `repair_cycles`, `open_finding_ids`, the worker record and the
+        FIX_REQUIRED transition commit afterwards in `_commit_fixer_dispatch`.
+        """
+        if state_mod.dispatch_claim_active(
+                state_mod.dispatch_claim(task, "fixer")):
+            # A claim already reserves this task's fixer. Re-planning would
+            # allocate a second worker name for one reservation; the existing
+            # claim is resumed by resume_dispatch_claims instead.
+            return
         if not providers.may(doc, "new_builds"):
             self.transition(doc, task["id"], "WAITING_PROVIDER_RESET",
                             "fixer provider paused")
@@ -1528,55 +1545,233 @@ class Supervisor:
             return
 
         worker = f"{task['id'].lower()}-fixer-{record['repair_cycles'] + 1}"
+
+        # C-18 stage 6: the ports this state permits, chosen under the lock.
+        # NO BIND happens here - stage 3 proved `select_port_candidates`
+        # performs no network operation. The probe that proves one of them
+        # binds runs in the execute phase, with no lock held.
+        candidates, port_why = workers.select_port_candidates(doc)
+        if not candidates:
+            self.log("PORT_ALLOCATION_FAILED", task_id=task["id"], role="fixer",
+                     pr_id=pr_number, activity_class="FAILED_WORK",
+                     outcome="FAILED", metadata_redacted={"why": port_why})
+            # Decided in T1 and handled in T1: no claim was written, so there
+            # is nothing to recover and no external effect to undo.
+            self.on_dispatch_failure(doc, task, pr_number, "fixer",
+                                     f"no governed port: {port_why}")
+            return
+
+        try:
+            claim = state_mod.new_dispatch_claim(
+                role="fixer", task_id=task["id"], worker=worker,
+                branch=task["branch"], claimed_at=clock.iso(self.now()),
+                lease_expires_at=self._lease_expires("fixer"),
+                pr=pr_number, port_candidates=candidates,
+                context={
+                    # The prompt is rendered outside the lock, so the findings
+                    # it reads travel as a copy one level deep - a reference
+                    # into `record["pending_findings"]` would let the execute
+                    # phase read a list a later transaction had changed.
+                    "findings": [dict(f) if isinstance(f, dict) else f
+                                 for f in (findings or [])],
+                    "port_exhaustion_reason": port_why,
+                })
+        except ValueError as exc:
+            # A claim state would refuse is worse than no claim: the fixer
+            # slot would be reserved by something that can never spawn.
+            self.log("DISPATCH_CLAIM_REFUSED", task_id=task["id"], role="fixer",
+                     pr_id=pr_number, activity_class="FAILED_WORK",
+                     outcome="CLAIM_REFUSED",
+                     metadata_redacted={"error": str(exc)})
+            self.on_dispatch_failure(doc, task, pr_number, "fixer",
+                                     "fixer claim refused")
+            return
+
+        state_mod.dispatch_claims(task)["fixer"] = claim
+        self.log("DISPATCH_CLAIMED", task_id=task["id"], role="fixer",
+                 pr_id=pr_number, branch=task["branch"], agent_id=worker,
+                 activity_class="FIX", outcome="CLAIMED",
+                 metadata_redacted={"port_candidates": len(candidates),
+                                    "lease_expires_at": claim["lease_expires_at"]})
+        self._plan_dispatch(self.dispatch_plan(claim))
+
+    def _dispatch_claim_still_current(self, plan: DispatchPlan) -> bool:
+        """Is the claim that authorised this plan STILL the current one?
+
+        Read from the COMMITTED document, read-only and with no lock held -
+        the same thing `execute_dispatches` does for its controls, and for
+        the same reason: the decision that matters is the one true at the
+        instant a worker would start, not the one T1 took.
+
+        Fail-closed. An unreadable or absent document cannot prove the claim
+        survived, and the cost of the two answers is not symmetric: refusing
+        costs one retry, spawning an agent into a worktree somebody else now
+        owns writes into a shared branch nothing can take back.
+        """
+        try:
+            if not self.store.exists():
+                return False
+            snapshot = self.store.read()
+        except (OSError, ValueError):
+            return False
+        if not isinstance(snapshot, dict):
+            return False
+        _, claim = self._current_dispatch_claim(snapshot, plan)
+        return claim is not None
+
+    def _execute_fixer_dispatch(self, plan: DispatchPlan) -> DispatchResult:
+        """C-18 stage 6, Phase C. NO STATE LOCK IS HELD.
+
+        Every call here used to run inside T1: the prompt file write, the
+        worktree acquisition (a `git worktree list` and possibly a workmux
+        subprocess), the real 127.0.0.1 bind, the job file write and the
+        process spawn.
+
+        THE REUSED WORKTREE IS WHY THE FIXER WAS SEQUENCED LAST.
+        `reuse_if_checked_out=True` means this role does not get a private
+        checkout - it works in whichever worktree currently holds the PR
+        branch, which is the Builder's. That worktree is shared mutable
+        state, and before C-18 the claim that authorised using it was taken
+        in the same transaction as the spawn, so it could not go stale
+        between the two. It can now. The claim is therefore re-verified
+        against the committed document immediately before anything
+        irreversible happens, and the dispatch is abandoned if it has moved
+        on. See `_dispatch_claim_still_current`.
+        """
         role_cfg = self.cfg.roles["fixer"]
-        prompt_text = prompts.fixer(task, pr_number, task["branch"],
+        findings = list(plan.context.get("findings") or [])
+        prompt_text = prompts.fixer({"id": plan.task_id}, plan.pr, plan.branch,
                                     self.cfg.github_repo, findings)
-        prompt_path = prompts.write(worker, prompt_text)
+        prompt_path = prompts.write(plan.worker, prompt_text)
 
         # The Fixer commits to the Builder's PR branch, so it reuses the worktree
         # already holding that branch. It is still a fresh Claude context: a new
         # process, a new prompt, and only the reported findings in scope.
         path, why = workers.acquire_worktree(
-            worker, task["branch"], self.cfg.main_branch, self.cfg.tmux_session,
-            prompt_path, reuse_if_checked_out=True,
+            plan.worker, plan.branch, self.cfg.main_branch,
+            self.cfg.tmux_session, prompt_path, reuse_if_checked_out=True,
         )
         if path is None:
-            self.on_dispatch_failure(doc, task, pr_number, "fixer", why)
-            return
+            return DispatchResult(plan=plan, ok=False, reason=why)
 
-        port, port_why = workers.allocate_port(doc)
+        # Everything above this line is repeatable: the prompt write
+        # overwrites its own path, and acquisition either reuses or runs
+        # `workmux add --open-if-exists`. Everything below it is not - the
+        # job file is the durable spawn evidence `resume_dispatch_claims`
+        # reads, and `start_job` launches a paid agent into that worktree.
+        if not self._dispatch_claim_still_current(plan):
+            self.log("DISPATCH_EXECUTION_ABANDONED", task_id=plan.task_id,
+                     role="fixer", pr_id=plan.pr, agent_id=plan.worker,
+                     activity_class="ORCHESTRATION",
+                     outcome="CLAIM_NO_LONGER_CURRENT",
+                     metadata_redacted={"worktree": str(path)})
+            return DispatchResult(
+                plan=plan, ok=False,
+                reason="fixer claim no longer current; refused to spawn into "
+                       "the shared branch worktree")
+
+        port = next((candidate for candidate in plan.port_candidates
+                     if workers.probe_port(candidate)), None)
         if port is None:
-            self.on_dispatch_failure(doc, task, pr_number, "fixer",
-                                     f"no governed port: {port_why}")
-            return
+            port_why = plan.context.get("port_exhaustion_reason") or \
+                "no candidate port bound"
+            self.log("PORT_ALLOCATION_FAILED", task_id=plan.task_id, role="fixer",
+                     pr_id=plan.pr, activity_class="FAILED_WORK",
+                     outcome="FAILED", metadata_redacted={"why": port_why})
+            return DispatchResult(plan=plan, ok=False,
+                                  reason=f"no governed port: {port_why}")
 
         job = workers.write_job(
-            worker, "fixer", role_cfg.provider, role_cfg.model, task["id"], path,
-            prompt_path, self.tz, pr=pr_number,
+            plan.worker, "fixer", role_cfg.provider, role_cfg.model,
+            plan.task_id, path, prompt_path, self.tz, pr=plan.pr,
             hard_timeout_seconds=self.cfg.extra["timeouts"]["fixer"], port=port,
         )
-        started = workers.start_job(worker, job, path)
+        started = workers.start_job(plan.worker, job, path)
         if not started.ok:
-            self.on_dispatch_failure(doc, task, pr_number, "fixer",
-                                     f"worker did not start: {started.stderr[:200]}")
+            return DispatchResult(
+                plan=plan, ok=False,
+                reason=f"worker did not start: {started.stderr[:200]}")
+        return DispatchResult(plan=plan, ok=True, worktree=str(path), port=port)
+
+    def _commit_fixer_dispatch(self, doc: dict, plan: DispatchPlan,
+                               result: DispatchResult) -> None:
+        """C-18 stage 6, commit side. STATE ONLY.
+
+        `repair_cycles` is incremented HERE and not at plan time, for the
+        same reason the builder's `attempts` is: it counts repair cycles that
+        actually started, and a dispatch that never spawned must not consume
+        one of the governed `max_repair_cycles`.
+        """
+        task, claim = self._current_dispatch_claim(doc, plan)
+        if task is None:
+            self.log("DISPATCH_COMMIT_REFUSED", task_id=plan.task_id,
+                     role="fixer", pr_id=plan.pr, agent_id=plan.worker,
+                     activity_class="ORCHESTRATION", outcome="TASK_GONE")
+            return
+        if doc.get("workers", {}).get(plan.worker):
+            # Already committed - a lost confirm converged by recovery, or a
+            # recovery that raced its own confirm. Idempotent by design.
+            self._clear_dispatch_claim(task, "fixer")
+            return
+        if claim is None:
+            self.log("DISPATCH_COMMIT_REFUSED", task_id=plan.task_id,
+                     role="fixer", pr_id=plan.pr, agent_id=plan.worker,
+                     activity_class="ORCHESTRATION", outcome="CLAIM_SUPERSEDED")
+            return
+        record = (doc.get("prs") or {}).get(str(plan.pr))
+        if record is None:
+            self.log("DISPATCH_COMMIT_REFUSED", task_id=plan.task_id,
+                     role="fixer", pr_id=plan.pr, agent_id=plan.worker,
+                     activity_class="ORCHESTRATION", outcome="PR_RECORD_GONE")
+            self._clear_dispatch_claim(task, "fixer")
             return
 
+        role_cfg = self.cfg.roles["fixer"]
+        findings = list(plan.context.get("findings") or [])
         record["repair_cycles"] += 1
-        record["open_finding_ids"] = [f.get("id") for f in findings]
-        task["worker"] = worker
-        doc["workers"][worker] = state_mod.new_worker_record(
-            "fixer", task["id"], task["branch"], clock.iso(self.now()), pr=pr_number,
-            worktree=str(path), port=port,
+        record["open_finding_ids"] = [f.get("id") if isinstance(f, dict) else None
+                                      for f in findings]
+        task["worker"] = plan.worker
+        doc["workers"][plan.worker] = state_mod.new_worker_record(
+            "fixer", plan.task_id, plan.branch, clock.iso(self.now()),
+            pr=plan.pr, worktree=result.worktree, port=result.port,
             lease_expires_at=self._lease_expires("fixer"))
-        task.setdefault("retained_worktrees", {}).pop(str(path), None)
-        self.transition(doc, task["id"], "FIX_REQUIRED",
+        if result.worktree:
+            task.setdefault("retained_worktrees", {}).pop(result.worktree, None)
+        self._clear_dispatch_claim(task, "fixer")
+        self.transition(doc, plan.task_id, "FIX_REQUIRED",
                         f"fix cycle {record['repair_cycles']}")
-        self.log("FIX_DISPATCHED", task_id=task["id"], pr_id=pr_number, role="fixer",
-                 provider=role_cfg.provider, model=role_cfg.model, agent_id=worker,
-                 activity_class="FIX", outcome="DISPATCHED",
+        self.log("FIX_DISPATCHED", task_id=plan.task_id, pr_id=plan.pr,
+                 role="fixer", provider=role_cfg.provider, model=role_cfg.model,
+                 agent_id=plan.worker, activity_class="FIX", outcome="DISPATCHED",
                  metadata_redacted={"finding_ids": record["open_finding_ids"]})
-        self.notify_out(doc, notify.INFO, f"{task['id']} PR #{pr_number}: fixer dispatched",
+        self.notify_out(doc, notify.INFO,
+                        f"{plan.task_id} PR #{plan.pr}: fixer dispatched",
                         f"Repair cycle {record['repair_cycles']}.")
+
+    def _fail_fixer_dispatch(self, doc: dict, plan: DispatchPlan,
+                             result: DispatchResult) -> None:
+        """C-18 stage 6, failure side. STATE ONLY.
+
+        The claim is released first, so `route_awaiting_dispatch` is free to
+        try again on the next tick, and then the unchanged annunciation runs.
+        A claim that has already been superseded is NOT counted as a failure
+        of this dispatch: some other outcome already owns the fixer slot.
+        """
+        task, claim = self._current_dispatch_claim(doc, plan)
+        if task is None or claim is None:
+            self.log("DISPATCH_FAILURE_REFUSED", task_id=plan.task_id,
+                     role="fixer", pr_id=plan.pr, agent_id=plan.worker,
+                     activity_class="ORCHESTRATION",
+                     outcome="TASK_GONE" if task is None else "CLAIM_SUPERSEDED")
+            return
+        self._clear_dispatch_claim(task, "fixer")
+        if str(plan.pr) not in (doc.get("prs") or {}):
+            self.log("DISPATCH_FAILURE_REFUSED", task_id=plan.task_id,
+                     role="fixer", pr_id=plan.pr, agent_id=plan.worker,
+                     activity_class="ORCHESTRATION", outcome="PR_RECORD_GONE")
+            return
+        self.on_dispatch_failure(doc, task, plan.pr, "fixer", result.reason)
 
     def on_dispatch_failure(self, doc: dict, task: dict, pr_number: int, role: str,
                             reason: str) -> None:

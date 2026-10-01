@@ -18,6 +18,7 @@ Required proofs:
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -66,12 +67,27 @@ class FixerDispatchCase(unittest.TestCase):
         self.events: list[tuple] = []
         self.sup.log = mock.Mock(side_effect=lambda e, **k: self.events.append((e, k)))
         self.sup.notify_out = mock.Mock(return_value={"ok": True})
+        # C-18 stage 6: the execute phase re-reads the COMMITTED document to
+        # confirm its claim before spawning into the shared branch worktree,
+        # so these tests need a real store rather than the repository's.
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.sup.store = state.Store(path=Path(self.tmp.name) / "state.json",
+                                     tz=TZ)
 
     def event_types(self) -> list[str]:
         return [name for name, _ in self.events]
 
     def dispatch(self, doc, *, existing_worktree: Path | None, start_ok: bool = True,
                  create_ok: bool = True, created_path: Path | None = None):
+        """Drive a whole fixer dispatch, as tick() does.
+
+        C-18 stage 6: `dispatch_fixer` claims and selects candidate ports
+        under the lock; the bind probe, the worktree acquisition, the spawn
+        and the commit all happen afterwards. The helper commits T1 to a real
+        store first, because the execute phase re-reads it.
+        """
+        self.sup._dispatch_plans = []
         with mock.patch.object(supervisor_mod.workers, "worktree_for_branch",
                                return_value=existing_worktree) as by_branch, \
                 mock.patch.object(supervisor_mod.workers, "create_worker") as create, \
@@ -87,6 +103,11 @@ class FixerDispatchCase(unittest.TestCase):
             start.return_value = mock.Mock(ok=start_ok, stderr="boom", stdout="")
             self.sup.dispatch_fixer(doc, doc["tasks"]["TASK-001"], PR,
                                     doc["prs"][str(PR)]["pending_findings"])
+            self.sup.store._write(doc)          # T1 commits
+            results = self.sup.execute_dispatches(self.sup._dispatch_plans,
+                                                  snapshot=doc)
+        for result in results:
+            self.sup.apply_dispatch_result(doc, result)
         return by_branch, create, start
 
 
@@ -118,6 +139,7 @@ class TestFreshFixerOnExistingBranch(FixerDispatchCase):
 
     def test_only_the_reported_findings_are_passed_to_the_fixer(self):
         doc = doc_in_review()
+        self.sup._dispatch_plans = []
         with mock.patch.object(supervisor_mod.workers, "worktree_for_branch",
                                return_value=BUILDER_WORKTREE), \
                 mock.patch.object(supervisor_mod.workers, "write_job",
@@ -129,6 +151,8 @@ class TestFreshFixerOnExistingBranch(FixerDispatchCase):
                 mock.patch.object(supervisor_mod.prompts, "fixer",
                                   return_value="p") as fixer_prompt:
             self.sup.dispatch_fixer(doc, doc["tasks"]["TASK-001"], PR, FINDINGS)
+            self.sup.store._write(doc)
+            self.sup.execute_dispatches(self.sup._dispatch_plans, snapshot=doc)
         self.assertEqual(fixer_prompt.call_args.args[4], FINDINGS)
 
     def test_repair_cycle_limit_is_unchanged_and_still_escalates(self):

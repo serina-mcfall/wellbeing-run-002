@@ -129,9 +129,21 @@ class SupervisorSiteCase(unittest.TestCase):
                                 doc["prs"][str(PR)]["pending_findings"])
 
     def dispatch_ok(self, doc):
-        """dispatch_fixer with the worker layer succeeding."""
+        """dispatch_fixer with the worker layer succeeding.
+
+        C-18 stage 6 split it into plan / execute / commit, so this drives
+        all three; the execute phase re-reads the committed document, hence
+        the real temp store."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.sup.store = state.Store(path=Path(tmp.name) / "state.json", tz=TZ)
+        self.sup._dispatch_plans = []
         with mock.patch.object(supervisor_mod.workers, "acquire_worktree",
                                return_value=(Path("/tmp/wt"), "")), \
+                mock.patch.object(supervisor_mod.workers, "select_port_candidates",
+                                  return_value=([39110], "")), \
+                mock.patch.object(supervisor_mod.workers, "probe_port",
+                                  return_value=True), \
                 mock.patch.object(supervisor_mod.workers, "write_job",
                                   return_value=Path("/tmp/job.json")), \
                 mock.patch.object(supervisor_mod.workers, "start_job",
@@ -142,6 +154,11 @@ class SupervisorSiteCase(unittest.TestCase):
                 mock.patch.object(supervisor_mod.state_mod, "new_worker_record",
                                   return_value={"role": "fixer", "pr": PR}):
             self.fire_s1(doc)
+            self.sup.store._write(doc)          # T1 commits
+            results = self.sup.execute_dispatches(self.sup._dispatch_plans,
+                                                  snapshot=doc)
+        for result in results:
+            self.sup.apply_dispatch_result(doc, result)
 
 
 class TestS1RepairCycleLimit(SupervisorSiteCase):
