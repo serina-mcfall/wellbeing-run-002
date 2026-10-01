@@ -529,17 +529,29 @@ def _attested_head(event) -> str | None:
     read HERE rather than normalised at the twelve call sites, because
     changing what those events record would change the durable evidence
     format for a reason that is really about reading it.
+
+    AN EVENT THAT NAMES TWO DIFFERENT HEADS NAMES NEITHER. This returned
+    the FIRST valid spelling, so `{"head_sha": A, "head": B}` resolved
+    silently to A - the convenient one. `live-gate.js:155-165` treats that
+    same shape as `REVIEW_PROVENANCE_CONFLICT` and denies, and it is right
+    to: the repository's own rule, written three functions down, is that
+    taking the convenient reading of two contradictory records is how a
+    re-run that FAILED becomes a merge. Failing closed here costs nothing,
+    because the two spellings of a genuine event always agree.
     """
     if not isinstance(event, dict):
         return None
     meta = event.get("metadata_redacted")
     if not isinstance(meta, dict):
         return None
-    for key in ("head_sha", "head"):
-        value = meta.get(key)
-        if isinstance(value, str) and _CLAIM_SHA_RE.match(value):
-            return value
-    return None
+    found = {meta[key] for key in ("head_sha", "head")
+             if isinstance(meta.get(key), str)
+             and _CLAIM_SHA_RE.match(meta[key])}
+    if len(found) != 1:
+        # Zero: nothing usable. Two: a self-contradicting event. Either way
+        # this event attests no head, so the leg goes unattested.
+        return None
+    return found.pop()
 
 
 def _agent_id(event) -> str | None:

@@ -190,8 +190,22 @@ SHARED = {
     "the durable record can be read at all":
                                        ("LEDGER_UNREADABLE",
                                         "REVIEW_PROVENANCE_UNREADABLE"),
-    "two attestations about one commit do not disagree":
+    # CORRECTED 2026-10-02. These two codes were paired as one policy and
+    # they are two different faults:
+    #   LEDGER_ATTESTATION_CONTRADICTED  two events at one head disagree
+    #                                    about the OUTCOME
+    #   REVIEW_PROVENANCE_CONFLICT       ONE event names two different HEADS
+    # Python now refuses the second as well - `_attested_head` returned the
+    # first valid spelling, so `{"head_sha": A, "head": B}` silently
+    # resolved to A, and it now returns None so the leg goes unattested -
+    # but it arrives there through LEDGER_ATTESTATION_MISSING, not through
+    # CONTRADICTED. Same refusal, different code, and the pairing is
+    # written to say so rather than to imply a code-for-code match.
+    "two attestations about one commit do not disagree about the outcome":
                                        ("LEDGER_ATTESTATION_CONTRADICTED",
+                                        "REVIEW_PROVENANCE_CONFLICT"),
+    "one attestation does not name two different heads":
+                                       ("LEDGER_ATTESTATION_MISSING",
                                         "REVIEW_PROVENANCE_CONFLICT"),
     # The sixth, matched after C-04c recorded it as the one that could not
     # be. The reason recorded then was that the reviewer's worker name is
@@ -200,9 +214,33 @@ SHARED = {
     # binding does not have to come from the name, because both review
     # events carry their own head_sha. `routing._review_worker_attests`
     # requires a REVIEW_DISPATCHED bound to this head and requires every
-    # REVIEW_RESULT at this head to name a worker that dispatch names -
-    # exactly the comparison live-gate.js makes, with the binding taken
-    # from the events rather than from the spelling of a name.
+    # REVIEW_RESULT at this head to name a worker that dispatch names.
+    #
+    # "EXACTLY THE COMPARISON live-gate.js MAKES" IS WHAT THIS COMMENT USED
+    # TO SAY, AND IT WAS NOT TRUE. An independent review read both sides.
+    # The two gates refuse the same ATTACK and they do not make the same
+    # comparison, and an inventory whose whole job is to be honest about
+    # differences must say which:
+    #
+    #   * live-gate.js takes the LAST REVIEW_DISPATCHED/REVIEW_RESULT for
+    #     (task, pr, role) across the slice it is given. Python takes
+    #     MEMBERSHIP over every dispatch at this head. A ledger carrying
+    #     dispatch@H2 + pass@H2 and then a later-appended result@H1 is
+    #     REVIEW_PROVENANCE_SHA_MISMATCH in JavaScript and attested in
+    #     Python, because H1 is simply not this head.
+    #   * live-gate.js compares the result's `agent_id` to the worker
+    #     `reviewer-identity.js` independently resolves. Python compares it
+    #     to the DISPATCH's own `agent_id`. Python's is the weaker
+    #     anchoring where an independent resolution exists and the
+    #     stronger where it does not.
+    #   * live-gate.js filters on `role`; Python does not, and is safe only
+    #     because `supervisor.attempt_merge` hands it an inspection already
+    #     filtered by task and pull request.
+    #
+    # Neither rule admits an unreviewed merge, which is why this stays in
+    # SHARED. The differences are recorded because the next person to read
+    # "matched" should not have to re-derive that it means "refuses the
+    # same thing", not "computes the same way".
     #
     # The limit is written into that function's docstring rather than
     # implied here: the name is still not SHA-bound, and the ledger is
