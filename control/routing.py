@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from . import clock, gh, security_contract
+from . import accessibility_contract, clock, gh, security_contract
 
 SEVERITIES = ("P0", "P1", "P2", "P3")
 BLOCKING_SEVERITIES = frozenset({"P0", "P1"})
@@ -1040,3 +1040,283 @@ def security_claim_is_valid(claim) -> tuple[bool, str]:
                 else (False, "CLAIM_VERDICT_UNRECOGNISED"))
     return ((True, "") if reason in security_contract.SECURITY_FAILURE_REASONS
             else (False, "CLAIM_REASON_UNRECOGNISED"))
+
+
+# ===================================================================
+# C-05.3b foundations - accessibility evidence
+#
+# FOUNDATIONS ONLY. Nothing below is wired into the Supervisor: no
+# dispatch path, no state transition, no ingest. These are the pure
+# leaves the wiring will stand on, built and proved first so that the
+# wiring - which depends on open governance answers (G1, G3, G4, G7) -
+# has something tested to call.
+#
+# The verdict and reason tokens are ALIASES of
+# control/accessibility_contract, which owns the single string
+# definition of each, for the same reason the security aliases above
+# exist. Behaviour stays here; vocabulary stays there.
+# ===================================================================
+
+ACCESSIBILITY_PASS = accessibility_contract.ACCESSIBILITY_PASS
+ACCESSIBILITY_FAIL = accessibility_contract.ACCESSIBILITY_FAIL
+ACCESSIBILITY_UNPARSEABLE = accessibility_contract.ACCESSIBILITY_UNPARSEABLE
+ACCESSIBILITY_VERDICTS = accessibility_contract.ACCESSIBILITY_VERDICTS
+ACCESSIBILITY_AUTO_PASS = accessibility_contract.ACCESSIBILITY_AUTO_PASS
+ACCESSIBILITY_AUTO_FAIL = accessibility_contract.ACCESSIBILITY_AUTO_FAIL
+
+CHECKS_INCOMPLETE = accessibility_contract.CHECKS_INCOMPLETE
+RESULT_EMPTY = accessibility_contract.RESULT_EMPTY
+RESULT_UNREADABLE = accessibility_contract.RESULT_UNREADABLE
+SHA_MISMATCH = accessibility_contract.SHA_MISMATCH
+
+# The nine check_ids apparatus/accessibility/run.js produces, in its own
+# emission order (run.js:454-462). A test asserts this tuple still matches
+# both run.js and protocol/PR-EVIDENCE-V2.schema.json's accessibilityCheck
+# enum, so a tenth machine check cannot be added to one without the other.
+AUTOMATED_CHECK_IDS = (
+    "RESPONSIVE_375PX",
+    "NO_OVERFLOW_CLIPPING_OVERLAP",
+    "TOUCH_TARGETS",
+    "KEYBOARD_OPERATION",
+    "FOCUS_ORDER_VISIBLE_NO_TRAPS",
+    "LABELS_AND_TEXT_ERRORS",
+    "REDUCED_MOTION_NO_FLASHING_AUTOPLAY",
+    "AXE_SCAN",
+    "SCREENSHOTS_ARTIFACTS",
+)
+
+# The tenth. A human-judgement check, produced by the qualitative
+# reviewer and never by the machine. It is named separately rather than
+# appended to the tuple above so that no loop over the automated results
+# can accidentally expect it, and no qualitative review can be credited
+# with having run a browser.
+QUALITATIVE_CHECK_IDS = ("COGNITIVE_SENSORY_REVIEW",)
+
+# All ten, the schema's enum. Protocol v2's accessibility gate requires
+# every one for the exact PR SHA.
+ACCESSIBILITY_CHECK_IDS = AUTOMATED_CHECK_IDS + QUALITATIVE_CHECK_IDS
+
+# A check result is PASS or FAIL. Anything else fails closed rather than
+# slipping past as an accidental third state - the same rule
+# SURFACE_VALUES enforces for security surfaces.
+CHECK_RESULTS = frozenset({"PASS", "FAIL"})
+
+
+# Which stated product requirement a failing automated check proves unmet.
+#
+# DELIBERATELY EMPTY, and that is the current correct state rather than an
+# omission. Filling it is a policy statement about what each machine check
+# proves, it exists nowhere in this repository, and an implementer writing
+# it would be writing accessibility policy. It is open governance question
+# G6.
+#
+# The consequence is stated rather than hidden: with no mapping, an
+# automated FAIL yields a finding with no unmet_requirement, which
+# control/severity.py::apply_severity_policy rates INVALID with
+# merge_blocked=True. The gate HOLDS. A task with a failing accessibility
+# check never reaches REVIEW and never silently passes. The automated FAIL
+# path is inert-but-safe until G6 is answered - the right direction to be
+# wrong in, and a test pins it so that filling this map is a deliberate
+# act with visible consequences rather than a quiet widening.
+#
+# Note for whoever answers G6: the registry that landed
+# (apparatus/accessibility/requirement-registry.js) uses identifiers of
+# the form ACC-DOD-VISIBLE_FOCUS and ACC-COG-PREDICTABLE_NAVIGATION, and
+# it is a JavaScript module with no Python counterpart. Both facts
+# contradict assumptions the C-05.3b design recorded; see handover
+# section 36.
+CHECK_REQUIREMENT: dict[str, str] = {}
+
+
+def accessibility_auto_finding(check_id: str) -> dict:
+    """The severity-policy finding one FAILING automated check asserts.
+
+    Shaped for control/severity.py::apply_severity_policy and nothing
+    else. `jev_severity` is P1 because severity.py applies a P1 floor to
+    every FAILURE anyway (severity.py:104-107) - claiming anything lower
+    here would be a claim the policy immediately overrides, and claiming
+    P0 would assert a judgement a machine check cannot make.
+
+    `unmet_requirement` is whatever CHECK_REQUIREMENT maps the check to,
+    which today is nothing for every check. An absent citation is what
+    makes the FAIL path fail closed; see CHECK_REQUIREMENT above. This
+    function does NOT substitute a placeholder string, because
+    severity.py accepts any nonempty string that is in the registry and a
+    plausible-looking placeholder is exactly how an ungoverned mapping
+    would become policy by accident.
+    """
+    return {
+        "classification": "FAILURE",
+        "jev_severity": "P1",
+        "unmet_requirement": CHECK_REQUIREMENT.get(check_id),
+        "check_id": check_id,
+    }
+
+
+def normalize_accessibility_auto(checks, head_sha: str) -> tuple[str | None, str]:
+    """One automated run's check list, as (verdict, reason).
+
+    Exactly one of the two is meaningful: (verdict, "") when the run is
+    usable evidence about `head_sha`, or (None, one finite reason) when it
+    is not. Never both, never neither.
+
+    `checks` is the list run.js writes and gate_evidence republishes in the
+    durable attempt outcome - objects of {check_id, result, sha,
+    artifact_reference}. The whole OUTCOME record is deliberately not
+    accepted here: a FAILED outcome already carries its own finite reason
+    from gate_evidence, and re-deriving it would be a second opinion about
+    something already adjudicated.
+
+    Checked in a fixed precedence so one check list always yields one
+    deterministic reason: unusable container, then wrong commit, then
+    malformed entry, then completeness, then the results themselves.
+
+    FAIL-CLOSED THROUGHOUT. Anything unrecognised is a reason, never a
+    pass. A missing check is CHECKS_INCOMPLETE and not "nothing to
+    report": an absent result is the absence of evidence, and reading it
+    as a pass is the precise defect this normalisation exists to make
+    unreachable.
+    """
+    if not isinstance(checks, list):
+        return None, RESULT_UNREADABLE
+    if not checks:
+        return None, RESULT_EMPTY
+    if not isinstance(head_sha, str) or not _CLAIM_SHA_RE.match(head_sha):
+        # An uncheckable head cannot clear any check. Returning a pass
+        # here would make every SHA comparison below vacuous.
+        return None, SHA_MISMATCH
+
+    seen: dict[str, str] = {}
+    for check in checks:
+        if not isinstance(check, dict):
+            return None, RESULT_UNREADABLE
+        check_id = check.get("check_id")
+        result = check.get("result")
+        # Evidence bound to a different commit is not evidence about this
+        # one - gate_evidence._adjudicate's rule, re-applied here because
+        # the claim is about the head observed THIS tick, which is not
+        # necessarily the sha the attempt was started for.
+        if check.get("sha") != head_sha:
+            return None, SHA_MISMATCH
+        # isinstance BEFORE the frozenset membership test, and not for
+        # tidiness: `result in CHECK_RESULTS` hashes its left operand, so
+        # a result holding a dict or a list - both of which durable JSON
+        # can carry - would raise TypeError out of a function whose whole
+        # contract is to return a finite reason. Failing closed means
+        # returning one, never raising one.
+        if check_id not in AUTOMATED_CHECK_IDS:
+            return None, RESULT_UNREADABLE
+        if not isinstance(result, str) or result not in CHECK_RESULTS:
+            return None, RESULT_UNREADABLE
+        # A repeated check_id is refused rather than last-wins: two
+        # disagreeing results for one check is unresolved evidence, and
+        # letting the later one win would make the order of a JSON array
+        # decide a gate.
+        if check_id in seen:
+            return None, RESULT_UNREADABLE
+        seen[check_id] = result
+
+    if len(seen) != len(AUTOMATED_CHECK_IDS):
+        return None, CHECKS_INCOMPLETE
+
+    if any(result == "FAIL" for result in seen.values()):
+        return ACCESSIBILITY_AUTO_FAIL, ""
+    return ACCESSIBILITY_AUTO_PASS, ""
+
+
+# ----------------------------------------------- the composite REVIEW gate
+
+# The three evidence legs a task in WAITING_EVIDENCE must satisfy before
+# it may advance to REVIEW, each with the verdict that leg must carry.
+#
+# All three, not two: agents/ACCESSIBILITY.md:8 forbids either
+# accessibility half standing in for the other, and C-05.3a already
+# landed the security half. A leg missing from this tuple is a gate that
+# does not exist.
+REVIEW_GATE_LEGS = (
+    ("security_evidence", SECURITY_PASS),
+    ("accessibility_auto", ACCESSIBILITY_AUTO_PASS),
+    ("accessibility_review", ACCESSIBILITY_PASS),
+)
+
+
+def _leg_passes(claim, head_sha: str, expected_verdict: str) -> bool:
+    """Whether one evidence leg is a completed pass AT `head_sha`.
+
+    Structural, and deliberately so. The per-class claim validators for
+    the two accessibility legs have not been built - they belong with the
+    claims themselves - so this checks what can be checked about any leg:
+    it is an object, it is COMPLETE, it is bound to this exact head, it
+    carries the verdict this leg must carry, and it carries no failure
+    reason.
+
+    The `reason == ""` check is not redundant with the verdict check. A
+    claim carrying both a verdict and a reason is a contradiction that
+    security_claim_is_valid already refuses; for the legs whose validator
+    does not exist yet, refusing it here is what stops a completion that
+    says two things at once from being read as the one it is convenient
+    to believe.
+    """
+    if not isinstance(claim, dict):
+        return False
+    if claim.get("claim_state") != "COMPLETE":
+        return False
+    if claim.get("sha") != head_sha:
+        return False
+    if claim.get("verdict") != expected_verdict:
+        return False
+    return claim.get("reason") == ""
+
+
+def review_gate_fires(record, head_sha: str) -> bool:
+    """Whether WAITING_EVIDENCE may advance to REVIEW for this PR record.
+
+    PURE over (record, head_sha). No state is read, no file is touched, no
+    claim is mutated, nothing is cleared. True means every evidence leg is
+    a completed pass about the head observed THIS tick.
+
+    EVERY LEG IS COMPARED TO `head_sha`, NEVER TO ANOTHER LEG. That is
+    strictly stronger than pairwise agreement, which would accept three
+    claims that agree perfectly with one another and all describe a commit
+    that has since been superseded. It is the same rule plan_security
+    enforces on observation.head_sha and gate_evidence._adjudicate
+    enforces on the result file: evidence bound to a different commit is
+    not evidence about this one.
+
+    The consequence worth naming: A HEAD MOVE NEEDS NO RESET PATH. When
+    the head moves, no claim's sha equals the new head, so the gate simply
+    does not fire - nothing is cleared, nothing is invalidated, and there
+    is no half-cleared record a crash could leave behind. state.py:106-113
+    already states the governing rule: a prior SHA's pass never carries
+    forward.
+
+    FALSE IS NOT A VERDICT. It means "not all three completed passes at
+    this head", which covers absent, stale, PLANNED, RUNNING, failed and
+    malformed alike. Deciding what a FAIL routes to, and how long a hold
+    may last before escalation, are the caller's and open governance
+    question G4's respectively - not this predicate's.
+    """
+    if not isinstance(record, dict):
+        return False
+    # An unknown or malformed head can never be matched. Without this an
+    # empty head and an empty claim sha would compare equal and every leg
+    # would pass vacuously.
+    if not isinstance(head_sha, str) or not _CLAIM_SHA_RE.match(head_sha):
+        return False
+    # Structural checks on all three legs FIRST, then the one claim
+    # validator that exists. The order matters for more than cost: it
+    # means no leg's fields reach a validator until they are known to be
+    # the scalars that validator expects. security_claim_is_valid raises
+    # TypeError on a claim whose verdict is unhashable - a dict or a list,
+    # both of which durable JSON can hold - and a gate that raises mid-tick
+    # is worse than one that holds, because a crash is not a decision.
+    # That defect is C-05.3a's to fix and is recorded rather than patched
+    # from here; this ordering keeps it unreachable through this gate.
+    if not all(_leg_passes(record.get(key), head_sha, verdict)
+               for key, verdict in REVIEW_GATE_LEGS):
+        return False
+    # A structurally plausible security claim that the C-05.3a validator
+    # refuses must not clear this gate just because its visible fields
+    # read well - a worker name addressing another attempt's artefacts is
+    # the case that motivated the validator in the first place.
+    return security_claim_is_valid(record.get("security_evidence"))[0]
