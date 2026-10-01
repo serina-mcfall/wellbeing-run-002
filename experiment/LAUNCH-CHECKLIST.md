@@ -9,6 +9,14 @@ document, **they win**. This checklist orders and enumerates; it decides nothing
 T+00 remains **NOT_STARTED** (`experiment/TIMELINE.md`). Nothing in this
 document authorises launch, and no partial completion of it does either.
 
+**Session state as of 2026-10-01: `C05-3a-SESSION-HANDOVER.md` §41.** It
+carries the verified branch and HEAD (`4ae1488`, pushed, clean tree), the
+approved decisions already applied (G1, G2, G3's phase limits, G4, G6, G7,
+G9, C-18a), the four decisions genuinely pending (C-02a, C-18 stage 7's
+bounds, the notification amendment, GitHub/C-20a(C)), and the
+dependency-ordered path to launch. Verification at that HEAD: **2,171
+Python tests, 218 apparatus tests**, both exit 0.
+
 ---
 
 ## The governing rule

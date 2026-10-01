@@ -1,5 +1,16 @@
 # C-05.3a Step 6b — Session Handover, Repair Plan and Implementation Record
 
+> ## ⇒ READ SECTION 41 FIRST
+>
+> **§41 is the current session handover (2026-10-01).** It carries the
+> verified branch, HEAD, push and working-tree state, what is implemented
+> and what verifies it, the decisions already approved and applied, the
+> decisions genuinely pending, and the dependency-ordered path to launch.
+>
+> **§16 is STALE** — it predates §§28–41 and still reports C-19 as
+> unimplemented. Where any earlier section disagrees with §41, §41 wins.
+> Sections are appended in working order, not numerical order.
+
 **Status: IMPLEMENTED (2026-09-30), across three rounds.**
 
 All five proven defects, the four authorised integration repairs, and the
@@ -7218,3 +7229,210 @@ is governed separately from building the path.
 - It does not claim the qualitative half is dispatched by a tick.
 - It does not claim C-02a is resolved.
 - T+00 remains **NOT_STARTED**.
+
+## 41. SESSION HANDOVER — integration session close (2026-10-01)
+
+Read this section first. It supersedes §16, which is stale.
+
+### 41.1 State at handover — verified, not reported from memory
+
+| | |
+|---|---|
+| Branch | `wip/c05-1-persistence` |
+| HEAD | **`4ae1488`** |
+| Pushed | **Yes** — `0 0` against `origin/wip/c05-1-persistence` |
+| Working tree | **Clean.** `git status --porcelain --untracked-files=all` is empty |
+| Unfinished edits | **None.** Every change this session is committed and pushed |
+| Running processes | **None.** No background task, test run or agent is still executing; nothing will modify the checkout after this handover |
+| Subagents | **None were ever dispatched.** A parallel-agent instruction arrived and was superseded before any agent was created, so there is no agent output to review and no agent worktree to reconcile |
+| Worktrees | The nine pre-existing `agent-*` worktrees from the earlier PR streams, unchanged. **None created this session, none removed** |
+| Verification at HEAD | **2,171 Python tests OK · 218 apparatus tests OK**, both exit 0. Secret scan clean. `git diff --check` clean |
+| T+00 | **NOT_STARTED** (`started_at: None`) |
+
+**Baseline comparison.** The session began at `6f43985` with 1,852 Python
+and 197 apparatus tests, all re-verified before any change was made.
+
+### 41.2 Twelve commits, all pushed
+
+```
+4ae1488  Reconcile the C-05.3b checklist row and record section 40
+780be6d  C-05.3b: the qualitative half, and the tick that drives both
+cb85145  C-05.3b: the automated accessibility half, built and wired
+eb5349a  C-20(a): WAITING_EVIDENCE finally has a governed exit
+7681550  G6: explicit reviewed check and axe-rule requirement mappings
+6554784  Apply G3's attempt budget and G4's cumulative evidence wait
+03dd57b  G2: claim-owned product-server ports, through C-09
+da5f7d0  Apply G1 and G7; integrate claim validators and the severity floor
+e905800  Make the Supervisor's own merge gate require the evidence classes
+3748a5a  Record the integration session: section 37 and checklist reconciliation
+4d0651e  Drive the C-04a fixture through the PRODUCTION gate, and fix what that caught
+8099db6  Close D1-D4, and record the five-hour rehearsal amendment as C-18a
+```
+
+### 41.3 Approved decisions, all applied — PRESERVE THESE
+
+| Decision | Applied as | Where |
+|---|---|---|
+| **G1** | `timeouts.accessibility = 1800`, separate from the browser deadlines | `config/experiment.json`; audit **C-05c** |
+| **G7** | `max_accessibility_auto = 1`, `max_accessibility_review = 1`, typed and required at load | `config/experiment.json`, `control/config.py`; **C-05c** |
+| **G2** | Claim-owned ports through C-09; ownership ends at RELEASE, never at expiry | `workers.claimed_product_server_ports`, `reconcile`; audit **C-09a** |
+| **G9** | Claim in T1 / execute outside / commit with re-verification | `control/accessibility_evidence.py`, `Supervisor.execute_accessibility` |
+| **G3 phase limits** | install+build **600**, readiness **120**, scan **120/300**, teardown **60**, attempt total **1080** (= the sum) | `config/experiment.json`; **C-05c** |
+| **G3 direction** | Clean isolated build at the trusted head; no artefact reuse; **no NOT_APPLICABLE route** | `accessibility_evidence`; **C-05c** |
+| **G4** | Cumulative evidence wait **18000 s**, an experiment limit; HUMAN_REQUIRED at exhaustion | `control/state.py`, `Supervisor._escalate_evidence_wait` |
+| **G6** | Explicit reviewed maps; no wildcards; unmapped stays blocking | `control/routing.py` |
+| **C-18a** | Five-hour rehearsal waived; Run 002 is the endurance experiment | audit **C-18a** |
+| **A, D, E** (C-20a) | Draft→ready authority, distinct diagnostics, new-SHA invalidation | unchanged from earlier sessions |
+| **C** (C-20a) | NOT approved; investigation only | §37.10, below |
+
+### 41.4 Completed implementation, with what verifies it
+
+- **Merge gate requires evidence.** `evaluate_merge` consulted none; a PR
+  with no security and neither accessibility leg returned "all merge gates
+  satisfied". Reproduced, fixed, and verified through the **real
+  Supervisor** reaching `gh.merge` — not through the gate in isolation.
+- **`WAITING_EVIDENCE` has a governed exit** (C-20(a)), reached from the
+  security ingest *and* from `route_evidence`.
+- **Both C-05.3b halves built and wired**, with the tick path
+  (`route_evidence` → `execute_accessibility` → `commit_accessibility`)
+  proved end to end with injected services.
+- **Severity floor and both claim validators integrated** and reached from
+  live call sites.
+- **C-04a fixture drives the production gate**, which caught a defect that
+  made the live gate unopenable for any real PR.
+- Roughly **forty mutations** across the session, each proved red, restored,
+  and the restoration verified by `diff` or checksum. **Two attempted
+  mutations were discarded rather than reported** because they produced
+  `IndentationError` and therefore tested nothing.
+
+### 41.5 Remaining C-05.3b work
+
+1. **The qualitative tick dispatch.** `plan_accessibility_review` and
+   `ingest_accessibility_review` are built and proved through the
+   Supervisor, but `route_evidence` does not call them: spawning that
+   worker belongs on the C-18 stage-4 harness and spends a provider call,
+   which is governed separately.
+2. **A services factory.** Nothing injects one, so the automated half is
+   wired and inert. **This needs no decision** — it resolves when a product
+   exists to build. Planning deliberately refuses while the factory is
+   absent, rather than minting claims that could never be executed.
+3. **Connected lifecycle verification is partial.** Failed evidence,
+   repair, fresh evidence, changed-head invalidation, restart recovery,
+   cleanup and the path to REVIEW are demonstrated. **Merge confirmation
+   and dependency unblocking are demonstrated only in the JavaScript
+   fixture**, not yet in one Python test that runs the whole chain.
+
+### 41.6 C-18: stage 7 and the notification amendment — PROPOSED, NOT IMPLEMENTED
+
+**Stage 7, the `declare_busy` bound.** `supervisor.py:51` already states
+the rule — *"Derived from each operation's own timeout, never open-ended"* —
+and `observer_bound` implements it as `own timeout + BUSY_MARGIN_SECONDS`
+(60). Applying that existing rule makes every value exact:
+
+| Call site | Own timeout | Bound |
+|---|---|---|
+| builder execute | 3600 | **3660** |
+| fixer execute | 2400 | **2460** |
+| reviewer execute | 1800 | **1860** |
+| security execute | 1800 | **1860** |
+| accessibility auto execute | 1080 | **1140** |
+| accessibility review execute | 1800 | **1860** |
+| notification drain | 10/tick | **70** |
+
+An earlier recommendation of *one* bound for all sites is **withdrawn**:
+the operations differ by 3.4×, and a single value would have to be 3660,
+letting a wedged reviewer look healthy for an hour against a 120 s
+staleness threshold.
+
+**The notification amendment**, exact proposed wording:
+
+> C-14.2's annunciation evidence is satisfied by the durable
+> `NOTIFICATION_QUEUED` commit, not by a completed send. A queued intent,
+> committed atomically with the state change that produced it, is the
+> evidence that the violation was annunciated; delivery is a separate,
+> retried concern recorded by `NOTIFICATION` outcomes.
+
+Stronger than today, because stage 2 already guarantees both are durable
+at least one commit before any send, whereas a synchronous send can fail
+silently. Honest cost: annunciation becomes eventual.
+
+### 41.7 GitHub App and isolation — PREPARED, NOTHING CREATED OR CHANGED
+
+Target `serina-mcfall/wellbeing-run-002`, branch `main`. **Trusted
+apparatus revision: `4ae1488` on `wip/c05-1-persistence`.** `main` is
+`4eeaa7c` and contains neither `live-gate.js` nor
+`control/accessibility_registry.py` — verified; no merge to `main` is
+proposed.
+
+App permissions: **Commit statuses read/write; Contents read; Pull requests
+read; nothing else.** Workers get a separate credential with
+`Contents: write` + `Pull requests: write` and **no** status access.
+
+**Environment scrubbing is not isolation.** Under one UID a worker can read
+`~/.config/gh/`, invoke `gh` itself, use a credential helper, edit the gate
+code it is authored against, and write `.runtime/ledger.jsonl` — which is
+**mode 644** and append-only only by convention. The boundary requires a
+**different OS user** (or container) for workers, and the gate executing
+from a trusted revision rather than from the PR's own tree.
+
+Protection diff: add `run-002/independent-review` **app-pinned**, keep `ci`
+unchanged, `required_approving_review_count` 1 → **0**, `enforce_admins`
+false → **true**. `require_last_push_approval` is **withdrawn** — with zero
+required approvals it governs nothing. Verification runs as the worker UID
+on a throwaway repo: reading the key, `gh auth status`, posting the
+context, editing gate code and writing the ledger must **all fail**.
+
+### 41.8 Decisions genuinely pending — these need the operator
+
+1. **C-02a — the frozen prompt contradiction. BLOCKING the qualitative FAIL
+   path.** `prompts/accessibility.md` is frozen and its example cites
+   `visible-focus-indicator`, which the registry does not contain, so a
+   reviewer following its own prompt is refused `CLASSIFICATION_INVALID`.
+   Fail-closed and safe. Three options in the audit row; recommendation is
+   **(a)** amend the frozen example as a deliberate freeze amendment.
+2. **C-18 stage 7's bounds** — the table in §41.6.
+3. **The notification amendment** — the wording in §41.6.
+4. **C-20a(C) / GitHub** — §41.7. Recommendation: nothing until the App
+   route *and* the separate worker UID are both authorised.
+
+### 41.9 Environment blockers — unchanged, human action required
+
+- **`required_secrets` WILL FAIL.** `~/.config/run-002/secrets.env` does
+  not exist; 7 of 8 names absent. **Checked by name only — no value was
+  read.** Blocks `langfuse_otel_trace`, `supabase_health`,
+  `discord_delivery`.
+- **`host_headroom` FAILS.** inotify 77/128 = 60% against a governed 50%
+  ceiling. RepoQL owns 67 of 77; two `rql serve` daemons for unrelated
+  projects hold 41. **Not actioned** — unrelated host processes are out of
+  bounds. The ceiling must not be raised.
+- **No `preflight.json` exists**, so `ctl start` would refuse on all 24
+  gates as never-run. The PASS rows in the checklist are documented manual
+  observations, not durable machine records.
+- **`clean_baseline`** — the tree is clean, but the gate has not been
+  executed and an unexecuted gate is not a PASS.
+
+### 41.10 Shortest dependency-ordered path to launch
+
+1. **C-02a** (decision) → unblocks the qualitative FAIL path.
+2. **Stage 7 bounds + notification amendment** (decisions) → closes C-18.
+3. **Qualitative tick dispatch** (engineering, needs 1 and 2's harness).
+4. **A services factory** — arrives with the first product build; no
+   decision needed.
+5. **Provision the eight secrets** (human) → unblocks three gates.
+6. **Clear inotify headroom** (human decision about unrelated daemons).
+7. **Run the real preflight** → produces `preflight.json`.
+8. **C-04a against real GitHub**, then T+00.
+
+Steps 1–2 and 5–6 are independent of each other and can proceed in
+parallel. Nothing in 1–4 requires a paid call.
+
+### 41.11 What this section does not claim
+
+- No real accessibility scan has ever run; no product exists, and every
+  service in every test is injected.
+- `live-gate.js` is still not called by the runtime; `routing.evaluate_merge`
+  is the Python-side gate and the two remain unjoined.
+- No gate was run, no threshold weakened, no protection or credential
+  touched, no paid call made, no product worker launched, no merge to
+  `main`. Run 001 untouched. C-18a stands.
+- **T+00 remains NOT_STARTED.**

@@ -1,5 +1,7 @@
 # Run 002 contradiction audit — OPEN
 
+**Session state 2026-10-01: `C05-3a-SESSION-HANDOVER.md` §41.** Branch `wip/c05-1-persistence` at `4ae1488`, pushed, working tree clean, no process still running and no subagent ever dispatched. Decisions applied this session: G1, G7 (C-05c), G2, G9 (C-09a), G3's phase limits and direction (C-05c), G4, G6, and C-18a. Decisions still pending: **C-02a**, C-18 stage 7's bounds, the notification amendment, and C-20a(C).
+
 This audit compares the copied Run 001 product/task specifications with
 Protocol v2. T+00 is blocked until each item has a recorded resolution,
 the resulting files are checked together, and the audit is marked PASS.
