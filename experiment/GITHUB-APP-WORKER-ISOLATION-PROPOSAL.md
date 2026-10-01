@@ -603,8 +603,8 @@ created on GitHub, and so the F5 deadlock is resolved before it can bite.
 
 | # | Step | Who | Authorisation | Rollback |
 |---|---|---|---|---|
-| 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `6c535409cf1768bcfbd694f3707cb8a674f49bfe`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
-| **0b** | ~~**Push `wip/c05-1-persistence`** so the pinned revision exists on `origin`.~~ **DONE 2026-10-02** — pushed at `17dc358`; `6c53540` is reachable from `origin/wip/c05-1-persistence` and the pin is now independently fetchable. | done | repo write | n/a — pushing an existing local commit |
+| 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `44e1eb51c959786bcac59bb347a3213c9273791b`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
+| **0b** | ~~**Push `wip/c05-1-persistence`** so the pinned revision exists on `origin`.~~ **DONE 2026-10-02** — the branch is pushed, and each re-pin is pushed with it; `44e1eb5` is reachable from `origin/wip/c05-1-persistence` and the pin is independently fetchable. **Re-check this after any re-pin** — a pin that only exists locally cannot be exported by anyone else. | done | repo write | n/a — pushing an existing local commit |
 | 1 | Create OS users `run002-sup`, `run002-wrk` and group `run002`. Set ownership and modes per §3.3 and §9.4. | human | root | `userdel run002-sup run002-wrk; groupdel run002`; restore ownership to `serina` |
 | 2 | Create the throwaway probe repository. | human | GitHub account | delete the repository |
 | 3 | Run V1, V1b, V4, V4b, V5, V5b, V6 — the **filesystem** half of §5. No GitHub objects needed. | human | sudo | n/a (read-only assertions) |
@@ -963,7 +963,7 @@ Four things make this enforceable rather than aspirational:
 ### 9.5 THE TRUSTED APPARATUS REVISION
 
 > **TRUSTED APPARATUS REVISION:
-> `6c535409cf1768bcfbd694f3707cb8a674f49bfe`**
+> `44e1eb51c959786bcac59bb347a3213c9273791b`**
 > on `wip/c05-1-persistence`. Full 40 hex, never a branch name.
 
 **This supersedes §41.7's `4ae1488`, which is 16 commits stale.** It also
@@ -977,7 +977,7 @@ then re-checked independently by the integration owner at the final pin:
 
 ```
 $ git rev-parse HEAD
-6c535409cf1768bcfbd694f3707cb8a674f49bfe
+44e1eb51c959786bcac59bb347a3213c9273791b
 $ git rev-parse main origin/main
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
@@ -1015,18 +1015,30 @@ to exist. §41.7 said `main` is `4eeaa7c` and contains neither
 here and is still true 61 commits later**, and it is the reason `main` is
 disqualified rather than merely behind.
 
-#### Why `6c53540` and not an older branch commit
+#### Why the branch tip and not an older branch commit
 
 `4ae1488` (§41.7) is 21 behind; `1387275` (this document's original base) is
-15 behind. Both predate work the gate depends on. `6c53540` is the tip of
-the branch that holds the apparatus.
+15 behind. Both predate work the gate depends on. The pin is always the tip
+of the branch that holds the apparatus.
 
 #### The pin and the moving branch
 
 **This document's first pin went stale inside the session that wrote it.**
 It named `b66944a`; two further commits landed — `f2129c5` (C-04b, which
 changes `control/routing.py`, code the gate's decisions depend on) and
-`6c53540` (a test-isolation fix). The pin is now `6c53540`.
+`6c53540` (a test-isolation fix), so it became `6c53540`.
+
+**RE-PINNED AGAIN 2026-10-02, to `44e1eb51c959786bcac59bb347a3213c9273791b`.**
+Three further commits moved code inside the drift set: the C-22 worker
+environment allow-list (`control/worker_entry.py`), the gate invoker
+(`control/gate_invoker.py`), and the sixth provenance condition
+(`control/routing.py` — which, again, is code the gate's decisions depend
+on). `F2` went red naming `control/worker_entry.py` and stayed red until
+this line was rewritten. **That is three re-pins in two sessions, every one
+of them demanded by the check rather than noticed by a person**, which is
+the argument for the check. The drift set itself was widened in the same
+session to include `bin/` and `.github/`, so the figure it compares is now
+larger than it was for either earlier pin.
 
 That is not an embarrassment, it is the thing the check exists to catch,
 and it exposed a real defect in the FIRST version of the check, which

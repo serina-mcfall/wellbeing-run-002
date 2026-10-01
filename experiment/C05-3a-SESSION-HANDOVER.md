@@ -8266,3 +8266,154 @@ nine correct task records and a human-set budget to fix one field.
   Those fixtures were seeding a state production cannot reach — evidence
   that passed with nothing in the durable record saying so. The fix was
   one shared fixture gaining its other half, not 26 edits.
+
+## 46. SESSION HANDOVER — the session that read the decision document against the code (2026-10-02)
+
+**Read this first. It supersedes §45, §44, §43 and §42.** §41 is
+superseded; §16 is stale. §45 remains accurate about what it describes.
+
+### 46.1 Verified state — measured at handover, not remembered
+
+| | |
+|---|---|
+| Branch | `wip/c05-1-persistence` |
+| HEAD | `44e1eb5` plus this section's own documentation commit |
+| Baseline at session start | `ebfb3d1` — verified independently as 2,364 Python / 230 apparatus, clean, pushed, 0/0 with upstream |
+| Verification | **2,452 Python tests OK · 230 apparatus tests OK** · `check-templates.py` OK, 0 failing · secret scan clean over 280 tracked files · `git diff --check` clean |
+| T+00 | **NOT_STARTED** — `started_at: None`, nine tasks QUEUED, no PRs, no workers |
+| Run 001 | Untouched |
+| Trusted pin | **RE-PINNED to `44e1eb51c959786bcac59bb347a3213c9273791b`** |
+| Subagents | Three dispatched, three complete, all reviewed and integrated. None resumable, no worktree left behind |
+
+### 46.2 THE THEME: a document that claimed more than its code did
+
+§45 ended with the lesson *"a threat-model sentence is a claim about the
+world, and it is checkable."* This session applied that to the approval
+package itself, with an independent reviewer that was given no authority to
+change anything. **Every finding below was re-verified here before it was
+acted on** — the §44.7 rule that a subagent's finding is a claim, not a
+fact, was applied to all three agents and caught one false positive.
+
+**Two findings would have broken the deployment:**
+
+1. **`control/gh.py:33` runs `gh` with no `env=`.** Nothing in the eighteen
+   actions made any process authenticate as any of the three Apps — the
+   separation in §1 was a property of the manifests, not of the running
+   system, and the ambient identity holds `statuses: write`. Worse, action
+   5 re-owns the checkout to `run002-wrk`, after which a worker can read
+   neither `serina`'s `gh` config nor the SSH key: **it cannot push at
+   all.** The SSH question was sitting in §12 as a recommendation the
+   operator could decline.
+
+2. **Two adapters cannot run from the trusted export.**
+   `git-head.js:163` and `reviewer-identity.js:252` both derive their root
+   from `__dirname`. From `/opt/run-002/gate-<SHA>` the first fails
+   `WORKSPACE_MISMATCH` and the second finds no `.runtime/` — it is
+   gitignored, so a worktree export has none. Each is a **permanent deny on
+   every pull request**, and the export is `chmod -R a-w`, so neither is
+   patchable in place. **That is the F5 deadlock again, twice, in a
+   different component.** `task-record.js` and `ci-result.js` are NOT traps:
+   they read config, and config from the pinned export is correct.
+
+   > **THE RULE, now written into §7: config from the export, facts from
+   > the live checkout.**
+
+**And the protection payload was already dropping a field.**
+`required_pull_request_reviews.require_last_push_approval` is set in BEFORE
+and was absent from AFTER. The check that existed to catch exactly this
+compared **top-level keys only** and reported `missing: []`, underneath a
+§3 row claiming every field was restated. The check is now recursive, it
+went red on the real field, and the field is restated.
+
+### 46.3 The merge path never required a reviewer
+
+C-04c recorded `REVIEW_PROVENANCE_WORKER_MISMATCH` as the one provenance
+condition that could not be matched, because the reviewer's worker name is
+not SHA-bound. **That was a true statement about the NAME and a false
+conclusion about the CHECK:** the head binding does not have to come from
+the name, because both review events carry their own `head_sha`.
+
+Porting it found the hole. `ledger_attests_merge` required only that SOME
+`REVIEW_RESULT` at the head carried `REVIEW_PASS` — **no
+`REVIEW_DISPATCHED` at all, and `agent_id` never read.** One appended
+ledger line, attributed to nobody, satisfied the entire code-review leg.
+
+Reproduced against the old code and again after the fix:
+`(True, '')` → `(False, LEDGER_ATTESTATION_MISSING)`, while a real
+dispatch/result pair still passes. `_agent_id` normalises absent, blank and
+non-string to `None`, and `None` is discarded from the dispatched set, so
+**two events naming nobody do not vouch for each other.**
+
+**What was NOT done, and why it is the right call.** The reviewer's name is
+still not SHA-bound. The defect that forced SHA-binding on the security
+worker — an ordinal that restarts per head, so the name repeats by
+construction — **is not reachable for the reviewer**, whose cycle counter is
+monotonic per PR record and is never reset in `control/`. No reproduction
+was manufactured to justify the change, and the name format is a
+two-language contract (`reviewer-identity.js`, `production-gate.js`) that
+cannot move on one side alone. The asymmetry is recorded in
+`routing._review_worker_attests` rather than closed.
+
+### 46.4 The publisher now has a path, and still cannot publish
+
+- **`control/gate_invoker.py`** — action 8's Python half. Export path,
+  expected revision and live repo root are all **required and undefaulted**;
+  the export is refused as its own live root; the export's actual checkout
+  is compared to the pin; eleven finite fail-closed outcomes; never raises.
+- **`experiment/github-app/publication_path.py`** — action 9's join.
+  **Placed outside `control/` deliberately**, so the strongest existing
+  guarantee — nothing in `control/` or `bin/` reaches the publisher —
+  survives *literally* rather than being amended.
+  `tests/test_c20a_publisher_disabled.py` is **unchanged**.
+- **There is still no transport.** Nothing in this repository constructs the
+  commit-status request, and that is the surviving half of F7. The
+  permission at the centre of the whole arrangement still has no call site,
+  and §2 now says so instead of hedging.
+
+**GRADES, KEPT DISTINCT.** The invoker and publication path are a
+**CONNECTED PATH VERIFIED WITH SIMULATED EXTERNAL SERVICES** — real `node`,
+a real throwaway export, a real throwaway git repo, a gate program the test
+writes. **NOTHING is verified against GitHub. No GitHub call was made.**
+
+### 46.5 C-22 — unchanged, and nothing here touches it
+
+Workers still run as the UID that owns `.runtime/`. The allow-list for
+action 6 is **written and tested but deliberately NOT wired**: flipping it
+changes how a live worker starts, no worker has ever run, and which names a
+real `claude` or `codex` child needs cannot be verified locally. A test
+pins the unwired status so taking action 6 is a decision rather than a
+drift. **Everything in §46.3 is tamper evidence, not prevention.**
+
+### 46.6 What remains, and who owns it
+
+| # | Item | Owner |
+|---|---|---|
+| 1 | **Provision the eight secrets** | **HUMAN** — still the shortest step and still the one everything waits on |
+| 2 | **C-20a(C) / C-22** — approve, reject or amend. Now **eighteen** actions | **OPERATOR** |
+| 3 | The `orphan_annunciations` residue | OPERATOR, not urgent |
+| 4 | inotify headroom on a quiet host | HUMAN, before preflight |
+| 5 | Run the real preflight | ENGINEERING, after 1 |
+| 6 | C-04a against real GitHub | ENGINEERING, after 2 |
+| 7 | `apparatus/pr-evidence/gate-cli.js` — the deployment half of action 8 | ENGINEERING, after 2. Its contract is fixed by `gate_invoker`'s docstring and enforced by demonstration in `InvokerTrapCase` |
+| 8 | Nothing in the control plane calls `live-gate.js`, and nothing assembles a gate request | ENGINEERING — **the largest remaining gap**, and it is architectural, not a missing file |
+
+### 46.7 For whoever picks this up cold
+
+- **Read the decision document against the code, line by line.** Four
+  sessions of careful writing produced a package with two
+  deployment-breaking omissions and a protection payload that silently
+  dropped a field. None of it was carelessness; all of it was prose that
+  nobody had re-derived.
+- **A guard that cries wolf gets deleted.** A new repo-wide scan matched
+  the FILENAME `publisher.py` in ordinary prose and failed on a
+  documentation sentence — §45.8's "matched the English word in three
+  unrelated comments", again, in a guard written to avoid exactly that. It
+  was narrowed AND strengthened in the same edit: it now catches loading
+  the module by path, which the original regex would have missed.
+- **Check the whole shape of a recorded reason.** "The name is not
+  SHA-bound, so the check would be weaker than it looks" was true about the
+  name, false about the check, and it had been hiding a merge gate that
+  accepted a review from nobody.
+- **Three re-pins in two sessions, every one demanded by `F2` rather than
+  noticed by a person.** That is the argument for the check, not against
+  the pin.

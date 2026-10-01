@@ -9,10 +9,13 @@ document, **they win**. This checklist orders and enumerates; it decides nothing
 T+00 remains **NOT_STARTED** (`experiment/TIMELINE.md`). Nothing in this
 document authorises launch, and no partial completion of it does either.
 
-**Session state as of 2026-10-02: `C05-3a-SESSION-HANDOVER.md` §45**, which
-supersedes §44, §43 and §42. §41 and §16 are stale. Branch
-`wip/c05-1-persistence`, HEAD **`6c53540`** plus documentation commits.
-Verification: **2,364 Python tests, 230 apparatus tests**, both exit 0.
+**Session state as of 2026-10-02: `C05-3a-SESSION-HANDOVER.md` §46**, which
+supersedes §45, §44, §43 and §42. §41 and §16 are stale. Branch
+`wip/c05-1-persistence`, HEAD **`44e1eb5`** plus documentation commits.
+Verification: **2,452 Python tests, 230 apparatus tests**, both exit 0.
+**Trusted pin re-pinned to `44e1eb51c959786bcac59bb347a3213c9273791b`** —
+the third re-pin in two sessions, every one demanded by `check-templates.py`
+`F2` rather than noticed by a person.
 
 All earlier approvals remain applied and none was reopened (G1, G2, G3's
 phase limits, G4, G6, G7, G9, C-18a, C-20a A/D/E). Four delegated decisions
@@ -50,10 +53,18 @@ are APPLIED - C-02a, C-18 stage 7, the notification amendment, and C-02b.
 2. **Decide C-20a(C)** - one complete decision document at
    `experiment/C-20a-APPROVAL-PACKAGE.md`: identities, exact permissions,
    protection before/after, provenance, SHA binding, the pinned trusted
-   revision, isolation, verification, rollback, twelve numbered actions,
-   and a separate list of what is already done locally. **It takes `main`
-   from "a human approved this" to "the gate approved this"** - that is
-   the hinge. Do not approve §41.7's permission set.
+   revision, isolation, verification, rollback, **eighteen** numbered
+   actions, and a separate list of what is already done locally. **It takes
+   `main` from "a human approved this" to "the gate approved this"** - that
+   is the hinge. Do not approve §41.7's permission set.
+
+   **It was twelve actions until 2026-10-02.** An independent review, each
+   finding re-verified against the code before it was acted on, found that
+   the twelve carried out exactly as written would have left no process
+   authenticating as any of the three Apps, left workers unable to push at
+   all, installed production credentials before any falsification ran, and
+   overwritten live branch protection with a reconstruction. Six actions
+   were added and two corrected.
 
 **What changed this session, in one line each.**
 
@@ -63,7 +74,18 @@ are APPLIED - C-02a, C-18 stage 7, the notification amendment, and C-02b.
 | **C-22** | opened: the threat model C-04b relied on was measured and found false |
 | **C-20b / F7** | the independent-review publisher exists, with 23 tests and simulated responses only, and is DISABLED - no default transport, nothing imports it, enabled only by an exact environment variable |
 | **F5** | resolved in `live-gate.js`, with the fail-open alternative demonstrated rather than asserted |
-| **C-21 residue** | preserved and documented, not cleaned: `experiment/evidence/RUNTIME-RESIDUE-2026-10-02.txt` |
+| **C-21 residue** | preserved and documented, not cleaned: `experiment/evidence/RUNTIME-RESIDUE-2026-10-02.txt`. Re-confirmed unchanged 2026-10-02 at §46: `started_at` None, nine tasks QUEUED, no PRs, no workers, one ledger line, one `orphan_annunciations` entry (attempt 586, OBSERVED) |
+
+**What changed in §46, in one line each.**
+
+| | |
+|---|---|
+| **C-20a(C)** | the decision document was read against the code; two omissions that would have broken the deployment, one protection field already being dropped, and four claims stronger than their code. Twelve actions became eighteen |
+| **The invoker trap** | `git-head.js:163` and `reviewer-identity.js:252` both derive their root from `__dirname`, so from the read-only export each is a permanent deny on every PR. The rule is now recorded: config from the export, facts from the live checkout |
+| **The sixth provenance condition** | matched. It closed a real hole - the merge path never required a `REVIEW_DISPATCHED` and never read `agent_id`, so one appended line attributed to nobody satisfied the whole code-review leg |
+| **Action 8/9** | the gate invoker and the publication path exist, are a connected path verified against SIMULATED services only, and still have no transport. `control/` and `bin/` remain publisher-free |
+| **Action 6** | the worker environment allow-list is written and tested, deliberately NOT wired; a test pins the unwired status |
+| **C-22** | **unchanged and still open.** Nothing in this session touched it |
 
 **Test-count note.** This document previously carried 2,171/218 here and
 1,852/197 in the `control_plane_self_tests` row below, as if both were
@@ -169,6 +191,17 @@ ledger event was appended, no tmux session or worktree was created, no
 provider was called. **This is still not a `preflight.json`** - see the
 bottom row.
 
+**RE-EXECUTED 2026-10-02 in §46, same eight, same results.** Seven `ok=True`;
+`required_secrets` `ok=False` with the identical seven names absent and
+`~/.config/run-002/` still not existing. `host_headroom` `ok=True` at
+inotify instances **48/128 = 37.5%** and watches 36,558/524,288 = 7% -
+**measured while three subagents were running**, so it is a figure taken
+under load rather than on a quiet host, and the standing caveat is
+unchanged. No aggregate preflight was run and no gate with a side effect,
+network call or billable operation was touched. **The reports reconcile:
+there is no contradiction between the recorded presence results and today's
+- they agree name for name.**
+
 | Gate | Status | Evidence |
 |---|---|---|
 | `protocol_present` | **PASS** — changed 2026-10-01 | `gate_protocol()` returns `ok=True`, `missing: []`. Both previously absent `SPEC_FILES` entries now exist: `experiment/LAUNCH-CHECKLIST.md` (this file) and `skills/README.md` (imported and hash-verified). Run directly; the gate is a pure filesystem presence check with no live or paid effect |
@@ -176,7 +209,7 @@ bottom row.
 | `clean_baseline` | **PASS — gate EXECUTED 2026-10-01** | The recorded cause — "C-05.3a and C-18 stages 1–3 uncommitted" — was **stale**: that work is committed (`6880229`). The three remaining untracked paths were Python bytecode and `.claude/` session machinery, now in `.gitignore` (`f1f0878`). `git status --porcelain` is empty. The gate checks exactly that. **It has now been executed twice**: `ok=True` at "HEAD 01c0413601b2" (2026-10-01) and again at `b66944a` (2026-10-02), individually, not through an aggregate run. The earlier row correctly refused to call an unexecuted gate a PASS; it has been run, so it is one - but it is a PASS at a moment, not a durable record, and it must hold again when `ctl preflight` runs |
 | `manifest_readiness` | **PASS** | `readiness_check()` ok. The four frozen-input hashes are unchanged by the `skills/README.md` import, verified before and after |
 | `task_graph_valid` | **PASS** | 9 tasks, no errors |
-| `control_plane_self_tests` | **PASS** | **2,364** Python tests plus **230** apparatus tests OK, verified 2026-10-02 at `6c53540` (was 2,273/218 at `a0d57f6`). **A defect in this gate's own suite was found and fixed on 2026-10-02:** running it WROTE `.runtime/state.json` - 16 writes per run, through `watchdog.main()` in `test_watchdog_liveness` which stubbed the ledger, notifier and pid path but not the state store. A preflight gate that mutates the document T+00 starts from is not a read-only check. Fixed, guarded, and the guard proved red by mutation; the residue it left is reported in `experiment/evidence/LAUNCH-READINESS-2026-10-02.txt` §6 and was deliberately NOT reset. This row previously read 1852/197, which was the session-start baseline quoted as if it were the gate's current evidence; corrected. Growth: (1367 → 1404 after C-18 stage 1 → 1452 after stage 2 → 1477 after the stage 2 corrections → 1511 after stage 3 → 1569 after the C-19 `worker_health` repair → 1595 after the C-19 crash/restart correction → 1664 after the C-18 stage-4 harness → 1852 after C-18 stages 5-6, C-04 composition and C-05.3b foundations (1367 → 1404 after C-18 stage 1 → 1452 after stage 2 → 1477 after the stage 2 corrections → 1511 after stage 3 → 1569 after the C-19 `worker_health` repair → 1595 after the C-19 crash/restart correction → 1664 after the C-18 stage-4 harness → 1852 after C-18 stages 5-6, C-04 composition and C-05.3b foundations) |
+| `control_plane_self_tests` | **PASS** | **2,452** Python tests plus **230** apparatus tests OK, verified 2026-10-02 at `44e1eb5` (was 2,364/230 at `6c53540`, and 2,273/218 at `a0d57f6`). The §46 baseline was re-measured from the checkout rather than inherited: `ebfb3d1` was independently confirmed at 2,364/230 before any change. **A defect in this gate's own suite was found and fixed on 2026-10-02:** running it WROTE `.runtime/state.json` - 16 writes per run, through `watchdog.main()` in `test_watchdog_liveness` which stubbed the ledger, notifier and pid path but not the state store. A preflight gate that mutates the document T+00 starts from is not a read-only check. Fixed, guarded, and the guard proved red by mutation; the residue it left is reported in `experiment/evidence/LAUNCH-READINESS-2026-10-02.txt` §6 and was deliberately NOT reset. This row previously read 1852/197, which was the session-start baseline quoted as if it were the gate's current evidence; corrected. Growth: (1367 → 1404 after C-18 stage 1 → 1452 after stage 2 → 1477 after the stage 2 corrections → 1511 after stage 3 → 1569 after the C-19 `worker_health` repair → 1595 after the C-19 crash/restart correction → 1664 after the C-18 stage-4 harness → 1852 after C-18 stages 5-6, C-04 composition and C-05.3b foundations (1367 → 1404 after C-18 stage 1 → 1452 after stage 2 → 1477 after the stage 2 corrections → 1511 after stage 3 → 1569 after the C-19 `worker_health` repair → 1595 after the C-19 crash/restart correction → 1664 after the C-18 stage-4 harness → 1852 after C-18 stages 5-6, C-04 composition and C-05.3b foundations) |
 | `budget_configured_by_human` | **PASS** | $25 in `BUDGET.md` matches `config.budget.total_usd` |
 | `jev_minimal_decision` | **PASS** — live, 2026-10-01 | C-19's `worker_health` path exercised against the real provider for the first time: one request to `/api/alpha/decisions`, requested `typesafe/jev-1.13`, **returned `typesafe/jev-1.13-20260917`**, choice `HEALTHY` with `source == "jev"`, confidence 0.98 (advisory), provider-reported cost **$0.000022764** for 542 input tokens, 487.5 ms. The $0.002688 reservation settled as actual spend; exposure back to $0.000000. The reported cost confirms the §24.5 pricing basis exactly (542 × $0.000000042). Evidence: handover §27. **This is one gate, not launch readiness** — the full preflight has not been run and the other 23 gates remain NOT YET EVALUATED |
 | `required_secrets` | **FAIL — gate EXECUTED 2026-10-01, this is now a measured failure rather than a prediction** | `~/.config/run-002/secrets.env` **does not exist**, and 7 of the 8 required names are absent from the environment: `DISCORD_WEBHOOK_URL`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`, `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY`. Only `OPENROUTER_API_KEY` is present — which is why the Jev gate could run at all. Checked by NAME only; no value was read. **Human action: provision all eight into `~/.config/run-002/secrets.env` at mode 600.** This gate blocks `langfuse_otel_trace`, `supabase_health` and `discord_delivery` outright, and supplies credentials the paid gates need. **Re-verified 2026-10-01 by executing `gate_secrets()`: `ok=False`, "not set: DISCORD_WEBHOOK_URL, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_BASE_URL, SUPABASE_*".** Existence of the secrets file was tested with `test -f` and the eight names by presence only; no value was read, printed or logged at any point. **RE-EXECUTED 2026-10-02: unchanged, `ok=False`, the same seven names absent. The parent directory `~/.config/run-002/` does not exist either.** Full names, purposes and provisioning steps: `experiment/evidence/LAUNCH-READINESS-2026-10-02.txt` §3-4 |
