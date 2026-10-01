@@ -3131,3 +3131,275 @@ T+00 remains **NOT_STARTED**.
 
 *(Section 9 described the read-only investigation session that produced the
 plan. The implementation session that followed is recorded in section 10.)*
+
+## 28. C-04 CI-result and reviewer-identity adapters — IMPLEMENTED (2026-10-01)
+
+Branch `wip/c04-adapters`, based on `wip/c05-1-persistence` at f2aa539. Scope
+was exactly the two missing C-04 live-gate adapters and their tests. Nothing
+under `product/`, `tasks/`, `protocol/` or `config/tasks.json` was touched, and
+`apparatus/pr-evidence/validate.js` was deliberately **not** modified — another
+agent owns it. The proposed diff for it is recorded in §28.6 rather than
+applied.
+
+### 28.1 What was built
+
+**`apparatus/adapters/ci-result.js`** — replaces the self-asserted
+`pkg.ci.status` read at `validate.js:81-82` with a question GitHub answers:
+did every governed required check complete successfully for *exactly* this
+40-character head SHA?
+
+- `resolveCiResult(headSha, { repo, requiredChecks, fetchCheckRuns })` is the
+  low-level function. `fetchCheckRuns` is **required and not defaulted**, so no
+  call can reach the network unless a caller explicitly supplies a fetcher.
+  Every test injects a stub; the real `gh api` path is never executed under
+  `node --test`.
+- `resolveRun002CiResult(headSha, options)` is the real entrypoint. It reads
+  `github.repo` and `github.required_checks` from this module's own
+  repository's `config/experiment.json` (today `serina-mcfall/wellbeing-run-002`
+  and `["ci"]`) and uses
+  `gh api repos/<repo>/commits/<sha>/check-runs?per_page=100` unless
+  `options.fetchCheckRuns` overrides it.
+- Passing conclusions are an **allow-list of exactly `success`**. GitHub's
+  `neutral`, `skipped`, `stale`, `cancelled`, `timed_out` and `action_required`
+  all mean the check did not actually verify this commit, so none of them may
+  stand in for a pass.
+- A required check that GitHub never ran is `REQUIRED_CHECK_MISSING`, not an
+  absence to shrug at. This closes the "zero meaningful checks" hole that a
+  bare `check_runs.length > 0` test would leave open.
+
+**`apparatus/adapters/reviewer-identity.js`** — replaces the string allow-list
+at `validate.js:47` / `:84-87`. `ALLOWED_REVIEW_PRODUCERS = new Set(['Codex
+Reviewer'])` tests a name the submitting agent typed about itself; any worker
+can type it. Protocol v2 §"PR contract" is explicit: *"Agents cannot satisfy
+independent boxes by self-attestation."*
+
+The adapter's trusted sources are the two durable Supervisor records, never the
+evidence package:
+
+- the append-only ledger (`.runtime/ledger.jsonl`) — `REVIEW_RESULT` carries
+  `agent_id`, `role`, `provider` and `outcome`, written by the Supervisor;
+- the PR record in durable state (`.runtime/state.json`, `doc.prs[n]`) —
+  `reviewed_head`, the SHA the reviewer worker was actually dispatched against
+  (`control/supervisor.py::dispatch_reviewer`, line 877).
+
+Seven checks, each failing closed:
+`UNKNOWN_REVIEW_PRODUCER` → `NO_REVIEW_EVIDENCE` → `FORGED_REVIEWER_IDENTITY`
+(the `agent_id` must match the Supervisor's own reviewer worker-name shape,
+`<task-id-lowercased>-review-<cycle>`) → `NOT_INDEPENDENT_PROVIDER` (must be
+`codex`) → `SELF_REVIEW` (the same worker must never have acted as builder or
+fixer) → `REVIEW_VERDICT_MISMATCH` (the package's verdict must be the verdict
+the reviewer actually returned) → `REVIEW_SHA_MISMATCH`.
+
+`loadReviewerEvidence(runtimeDir, prNumber)` is the directory-agnostic loader,
+split out exactly as `git-head.js` splits `resolveTrustedHeadSha` from
+`resolveRun002TrustedHeadSha`, so the real file-reading path is unit-testable
+against temp fixtures. `resolveRun002ReviewerIdentity(claim)` hard-wires the
+runtime directory from this module's own location and accepts no override, so
+no caller can point it at another experiment's ledger.
+
+### 28.2 Verified false vs could not verify
+
+Both adapters tag every failure with a `determination` of `VERIFIED_FALSE` or
+`COULD_NOT_VERIFY`, and both document that `COULD_NOT_VERIFY` is **not** weak
+evidence of passing. A caller that treats it as healthy has reintroduced the
+defect the adapters exist to remove. Tests assert the determination, not only
+the reason code, on every failure path.
+
+### 28.3 Defects found while building
+
+1. **The ledger does not bind a review to a SHA.** `REVIEW_DISPATCHED` and
+   `REVIEW_RESULT` record task, PR, role, provider, `agent_id` and verdict —
+   and no head SHA. The *security* worker's name is SHA-bound by construction
+   (`control/routing.py::security_worker_name`,
+   `<task>-security-<sha>-<ordinal>`); the code reviewer's is not — it is
+   `<task>-review-<cycle>` (`control/supervisor.py::dispatch_reviewer`, line
+   870). This is an asymmetry between two evidence producers facing the same
+   forgery risk.
+2. **The only SHA binding available is mutable.** `prs[n].reviewed_head` lives
+   in `.runtime/state.json` and the next review cycle overwrites it. The
+   adapter therefore verifies the **current** review cycle only.
+3. **The PR-evidence package carries no PR number.**
+   `protocol/PR-EVIDENCE-V2.schema.json` has `task_id` and `head_sha` but no
+   `pr_number`, so the reviewer-identity adapter cannot be driven from the
+   package alone — the caller must supply the PR number out of band. That is
+   why §28.6's proposed `checkLiveGate` takes `options.prNumber`.
+4. **`validate.js`'s header comment is now out of date.** Lines 12-16 say the
+   CI and worker-registry adapters "do not exist in this repository yet". Two
+   of the four now do. Its owner needs to correct that text; this branch did
+   not.
+5. **`.github/workflows/ci.yml` still never calls any of this.** Confirmed
+   again this session: the workflow runs `python -m unittest discover -s tests`
+   and `scripts/check_no_secrets.py`, and runs Node steps only if a root
+   `package.json` exists — which it does not. So neither these adapters nor
+   `validate.js` run in CI today. Already recorded in the C-04 audit row and
+   still part of its closure criteria.
+
+### 28.4 Decisions taken
+
+- **Only `required_checks` is judged.** Checks outside
+  `config/experiment.json`'s `github.required_checks` are reported in
+  `observedChecks` but do not block. That list is the human-declared definition
+  of "CI" for Run 002; widening the gate inside an adapter would be a gate
+  change nobody approved. A test pins the boundary so it cannot drift silently.
+- **One page of check runs is read** (`per_page=100`, no `--paginate`, because
+  `gh --paginate` concatenates JSON objects and breaks `JSON.parse`). More than
+  100 check runs on one commit would leave a required check unseen, which is
+  reported as `REQUIRED_CHECK_MISSING` — a fail-closed outcome, never a false
+  pass.
+- **Duplicate runs under one required name must all pass.** A re-run that
+  leaves a failed entry under the required name still fails.
+- **The latest `REVIEW_RESULT` governs.** The ledger is append-only and
+  chronological, so the last matching event is the current cycle's verdict; an
+  earlier cycle's `REVIEW_PASS` cannot cover a later `REVIEW_FAIL`.
+- **Constants are drift-guarded by test, not by comment.**
+  `INDEPENDENT_REVIEW_PROVIDER` is asserted equal to `config/experiment.json`'s
+  `roles.reviewer.provider`, and `CODEX_REVIEWER_PRODUCER` is asserted to
+  appear verbatim in Protocol v2's "Agent organisation" line.
+- **The audit was not edited.** `experiment/CONTRADICTION-AUDIT.md` rows C-04
+  and C-04a still say the CI-result and reviewer-identity adapters are unbuilt.
+  That is now false, but the file has concurrent uncommitted edits from another
+  stream, so this branch left it alone. Whoever reconciles the audit should
+  update both rows and cite
+  `experiment/evidence/C-04-ci-reviewer-adapters-node-test.txt` and
+  `experiment/evidence/C-04-ci-reviewer-adapters-mutation.txt`.
+
+### 28.5 What these adapters CANNOT establish
+
+Stated plainly, because a reader skimming §28.1 could easily over-read it.
+
+**Without a real CI run** (no product PR exists; T+00 has not occurred):
+
+- Nothing here has ever been pointed at live GitHub. Every test injects a stub
+  fetcher. The `gh api` call path, its JSON shape in practice, its auth
+  behaviour, its rate limiting and its pagination behaviour are **unexercised**.
+- The adapter cannot establish that `required_checks` names the checks that
+  actually matter; it establishes only that the checks a human declared are the
+  ones it enforces.
+- It cannot tell a check run that genuinely tested the code from one produced
+  by a workflow that was itself weakened. Protocol v2 §"Anti-cheating" forbids
+  "weakening gates after seeing results"; this adapter has no view of that.
+- Check runs are read for a commit, not for a pull request. A commit that is
+  green but is not the PR's head is caught only because the SHA is supplied by
+  the caller — the trusted-SHA half remains `git-head.js`'s job, and the
+  composition that joins them does not exist yet.
+
+**Without a real worker registry** (no run has occurred, so `.runtime/` does
+not exist — it is gitignored and absent in any fresh checkout):
+
+- The adapter has never read a real ledger or a real `state.json`. Every
+  fixture is synthetic and hand-shaped to match what `control/supervisor.py` is
+  read to write.
+- It cannot bind a review to a SHA from durable append-only evidence, for the
+  reason in §28.3 item 1. It can prove only that the Supervisor's *current*
+  `reviewed_head` is the SHA being claimed. It **cannot** prove, from durable
+  evidence alone, that an older cycle's `REVIEW_PASS` was not re-presented for
+  a newer commit. Closing that needs a head SHA in the review ledger events, or
+  a SHA-bound reviewer worker name as the security worker already has.
+- It verifies that the Supervisor dispatched a worker named like a reviewer
+  with provider `codex`. It does **not** verify that the Codex process that ran
+  inside that worker was the model the role config names, that it had no
+  network, or that its output was not edited in transit. Worker-process
+  identity is Supervisor/Watchdog worker-awareness (BOOTSTRAP deliverable 2),
+  not this adapter.
+- `state.json` is mutable and is not signed. An actor who can write it can
+  change `reviewed_head`. The ledger is append-only and is the stronger of the
+  two sources; the SHA binding unavoidably rests on the weaker one today.
+
+**Neither adapter resolves C-04.** They are two of four adapters. The
+composition layer that computes a real live-gate decision still does not exist,
+`validate.js` is unchanged, and the C-04a realistic multi-cycle fixture
+preflight has not been run. `policyValid: true` plus these two adapters is
+still not launch readiness, and this branch claims none.
+
+### 28.6 Proposed `validate.js` change — NOT APPLIED
+
+Recorded here rather than made, because another agent owns that file. It adds a
+function and changes no existing behaviour; `checkOfflinePolicy` keeps its
+current signature and semantics.
+
+```diff
+--- a/apparatus/pr-evidence/validate.js
++++ b/apparatus/pr-evidence/validate.js
+@@
+ const { applySeverityPolicy } = require('../severity/severity-floor.js');
++const { resolveRun002CiResult } = require('../adapters/ci-result.js');
++const { resolveRun002ReviewerIdentity } = require('../adapters/reviewer-identity.js');
+@@
+-module.exports = { checkOfflinePolicy: checkOfflinePolicy };
++// Live gate = offline policy AND every live adapter. Never OR, and never
++// "the offline half passed, so ship it". An adapter that COULD_NOT_VERIFY
++// blocks exactly as hard as one that VERIFIED_FALSE; only ok:true clears.
++// prNumber is an explicit argument because the evidence package has no
++// pr_number field to read it from (see handover section 28.3 item 3).
++function checkLiveGate(pkg, options) {
++  options = options || {};
++  const offline = checkOfflinePolicy(pkg);
++  const errors = offline.errors.slice();
++
++  const ci = (options.resolveCi || resolveRun002CiResult)(pkg && pkg.head_sha);
++  if (!ci.ok) {
++    errors.push('CI_UNVERIFIED[' + ci.determination + ']: ' + ci.reason + ' - ' + ci.detail);
++  }
++
++  const review = pkg && pkg.review;
++  const identity = (options.resolveReviewer || resolveRun002ReviewerIdentity)({
++    taskId: pkg && pkg.task_id,
++    prNumber: options.prNumber,
++    headSha: pkg && pkg.head_sha,
++    producer: review && review.provenance && review.provenance.producer,
++    verdict: review && review.verdict,
++  });
++  if (!identity.ok) {
++    errors.push('REVIEWER_UNVERIFIED[' + identity.determination + ']: ' + identity.reason + ' - ' + identity.detail);
++  }
++
++  return {
++    policyValid: offline.policyValid,
++    liveGateEligible: errors.length === 0,
++    errors: errors,
++  };
++}
++
++module.exports = { checkOfflinePolicy: checkOfflinePolicy, checkLiveGate: checkLiveGate };
+```
+
+The header comment at `validate.js:12-16` also needs correcting — see §28.3
+item 4. Note that `checkLiveGate` as drafted does **not** remove `CI_NOT_PASS`
+or `SELF_ATTESTED_OR_UNKNOWN_PRODUCER` from `checkOfflinePolicy`; both remain,
+now as the offline half of a two-source check. Removing them would weaken the
+offline checker for callers that have no live sources, which is the wrong
+direction.
+
+### 28.7 Verification performed
+
+- `node --test apparatus/adapters/*.test.js` — **57 passed, 0 failed, exit 0**
+  (8 `git-head`, 5 `task-record`, 20 `ci-result`, 24 `reviewer-identity`).
+  Recorded in `experiment/evidence/C-04-ci-reviewer-adapters-node-test.txt`.
+  Note: `node --test apparatus/adapters/` (directory form) does **not** work on
+  Node 24 — it resolves the path as a module and fails with MODULE_NOT_FOUND.
+  The glob form above is the working command.
+- **Mutation check: 17 guards broken one at a time, 17/17 detected.** Each
+  mutation was applied, the suite re-run, the file restored from its
+  pre-mutation bytes, and restoration verified by sha256 comparison; the suite
+  was re-run after all restorations and returned to 57/0. Recorded in
+  `experiment/evidence/C-04-ci-reviewer-adapters-mutation.txt`. The guards
+  exercised were: the `success`-only conclusion allow-list; wrong-commit check
+  runs; absent required checks; incomplete checks; zero check runs; the
+  required fetcher; malformed head SHA; the producer allow-list; the anchored
+  reviewer worker-name pattern; the independent-provider check; the self-review
+  check; the verdict comparison; the stale-SHA check; the malformed
+  `reviewed_head` check; the ledger role filter; the unparseable-ledger-line
+  refusal; and the `ledgerEvents` array guard.
+- `python3 -m unittest discover -s tests` — **1595 tests, OK**. The `[FAIL]
+  c16_probe` lines in that output are deliberate probe output inside passing
+  tests, not failures.
+- `npm test --prefix apparatus` (the whole Node apparatus suite) — 78 passed,
+  2 failed. Both failures are **pre-existing and unrelated**:
+  `apparatus/pr-evidence/validate.test.js` cannot resolve `ajv/dist/2020` and
+  `apparatus/accessibility/run.test.js` cannot resolve Playwright, because
+  `apparatus/node_modules` is absent in a fresh worktree and no install was run
+  (installing would be a network call this session refused to make). Both new
+  adapters have **zero dependencies**, which is why they pass without it.
+- `python3 scripts/check_no_secrets.py` — clean, 191 tracked files.
+- `git diff --check` and `git diff --cached --check` — clean.
+- No network calls, no paid API calls, no notifications, no worker launches.

@@ -1,0 +1,74 @@
+# node --test apparatus/adapters/*.test.js
+# 2026-10-01, branch wip/c04-adapters. Exit 0.
+# NO NETWORK: the CI adapter's GitHub fetcher is injected as a stub in
+# every test; the real `gh api` path is never executed here. All git and
+# runtime fixtures are isolated temp directories.
+# These are synthetic unit fixtures, not live proof of any CI run or review.
+
+✔ positive: every required check completed successfully for this exact SHA (1.728696ms)
+✔ a check run belonging to a different commit is VERIFIED_FALSE, not ignored (1.067191ms)
+✔ a successful run for the PREVIOUS commit cannot pass the current one (0.264168ms)
+✔ no check runs at all is COULD_NOT_VERIFY, never a pass (0.388944ms)
+✔ a required check that never ran is VERIFIED_FALSE even when other checks passed (0.597196ms)
+✔ a required check still running is COULD_NOT_VERIFY, not a failure and not a pass (0.185226ms)
+✔ a required check that concluded failure is VERIFIED_FALSE (0.162188ms)
+✔ skipped, neutral, cancelled and stale conclusions are never a pass (0.236563ms)
+✔ a null conclusion on a completed run is not a pass (0.147871ms)
+✔ a re-run leaving one failed entry under the required name still fails (0.191863ms)
+✔ a fetch that throws is COULD_NOT_VERIFY, never a silent pass (0.219475ms)
+✔ a response without a check_runs array is malformed, not empty (0.20333ms)
+✔ a check run without a usable name, status or full head_sha is malformed (0.137967ms)
+✔ an abbreviated, uppercase or absent head SHA is refused before any fetch (0.10426ms)
+✔ there is no default fetcher, so no call can reach GitHub by accident (0.117714ms)
+✔ an absent or empty required-check list fails closed rather than passing vacuously (0.38341ms)
+✔ a missing repo fails closed (0.177828ms)
+✔ a failing non-required check is reported but does not itself block (0.136976ms)
+✔ the Run 002 entrypoint uses the real governed repo and required_checks (0.370784ms)
+✔ the Run 002 entrypoint still fails closed when a governed check is absent (0.182461ms)
+Preparing worktree (checking out 'run-002/task-abc')
+fatal: Needed a single revision
+✔ positive: a real run-002/ branch resolves to the SHA git itself reports (6.566367ms)
+✔ positive: a real registered worktree resolves to its own HEAD SHA (7.665656ms)
+✔ a head change makes an earlier resolved SHA stale (13.079365ms)
+✔ reject: "main" is not under the task-branch prefix (0.211433ms)
+✔ reject: an unknown ref under the prefix does not exist (2.531044ms)
+✔ reject: a symlink inside worktree_dir pointing outside it is an escape (0.648099ms)
+✔ reject: an ordinary subdirectory of worktree_dir that git never registered (2.745271ms)
+✔ reject: a real git worktree that belongs to a different repository (23.924476ms)
+✔ positive: a Supervisor-dispatched Codex reviewer verdict for this exact head verifies (2.08864ms)
+✔ forged identity: the right producer name over a builder worker is VERIFIED_FALSE (0.468668ms)
+✔ forged identity: a reviewer-shaped name for a DIFFERENT task is rejected (0.171986ms)
+✔ forged identity: a name that merely starts like a reviewer worker is rejected (0.200484ms)
+✔ a later review cycle is a legitimate reviewer worker (0.144537ms)
+✔ a review produced by a non-independent provider is VERIFIED_FALSE (0.154129ms)
+✔ a worker that also acted as builder or fixer cannot be its own reviewer (0.258798ms)
+✔ a verdict the reviewer never returned is VERIFIED_FALSE (0.24658ms)
+✔ the latest review cycle governs: an earlier PASS cannot cover a later FAIL (0.183003ms)
+✔ a review of a different head SHA is stale, and stale is VERIFIED_FALSE (0.16031ms)
+✔ no PR record, or one without a usable reviewed_head, is COULD_NOT_VERIFY (0.210587ms)
+✔ no REVIEW_RESULT in the ledger is COULD_NOT_VERIFY, never an implicit pass (0.118777ms)
+✔ another task's or another PR's review never satisfies this one (0.176132ms)
+✔ a producer that is not the one named independent review role is VERIFIED_FALSE (0.132504ms)
+✔ a malformed claim fails closed before any ledger evidence is weighed (0.171062ms)
+✔ ledger junk entries are skipped without throwing, and absence still fails closed (0.117287ms)
+✔ ledger events that are not an array fail closed (3.452958ms)
+✔ the independent reviewer provider matches config/experiment.json (0.359957ms)
+✔ the producer name matches the role Protocol v2 actually names (0.248816ms)
+✔ loader: a real ledger and state file on disk feed a verifying result (0.284154ms)
+✔ loader: an absent ledger is COULD_NOT_VERIFY, never an empty-and-therefore-fine ledger (0.435995ms)
+✔ loader: one unparseable ledger line makes the whole file unusable as proof (0.392893ms)
+✔ loader: a missing state file leaves the reviewed SHA unverifiable, not assumed (0.380516ms)
+✔ loader: a missing runtimeDir argument fails closed (0.065443ms)
+✔ a real task_id resolves to its declared fields (1.740401ms)
+✔ a task with multiple dependencies resolves them all (0.235625ms)
+✔ an unknown task_id fails closed as NO_SUCH_TASK (0.157009ms)
+✔ missing repoRoot on the low-level function fails closed (0.218706ms)
+✔ an empty task_id fails closed (0.161047ms)
+ℹ tests 57
+ℹ suites 0
+ℹ pass 57
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 166.984904
