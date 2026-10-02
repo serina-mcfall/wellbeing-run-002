@@ -9,15 +9,23 @@ document, **they win**. This checklist orders and enumerates; it decides nothing
 T+00 remains **NOT_STARTED** (`experiment/TIMELINE.md`). Nothing in this
 document authorises launch, and no partial completion of it does either.
 
-**Session state as of 2026-10-02: `C05-3a-SESSION-HANDOVER.md` §51**, which
-supersedes §50, §49, §48, §47, §46, §45, §44, §43 and §42. §41 and §16 are stale.
-Branch `wip/c05-1-persistence`, HEAD **`47f35f5`** plus documentation commits.
-Verification: **2,721 Python tests, 259 apparatus tests**, both exit 0.
-**Context handover arrangement: §51.** The overseeing session's occupancy IS
-readable (measured 30.6% at handover); the runtime agents' is not, because each
-worker is a one-shot fresh context by design. The 50% notification is built,
-locally verified and **undeliverable** — `DISCORD_WEBHOOK_URL` is a Stage 3
-secret and is unset, asserted by a test rather than assumed.
+**Session state as of 2026-10-02: `C05-3a-SESSION-HANDOVER.md` §52**, which
+supersedes §51, §50, §49, §48, §47, §46, §45, §44, §43 and §42. §41 and §16
+are stale. Branch `wip/c05-1-persistence`, code HEAD `40b3933`, trusted pin
+**`47f35f5`**, plus documentation commits.
+Verification re-measured 2026-10-02: **2,721 Python tests (11 skipped), 259
+apparatus tests**, both exit 0; `check-templates.py` 0 failing.
+**Context handover arrangement: §51, corrected by §52.** The overseeing
+session's occupancy IS readable; the runtime agents' is not, because each
+worker is a one-shot fresh context by design.
+**`scripts/context_handover.py` IS NOT AN ALERT.** It is a manual script
+with **no automatic invocation** — no hook, no timer, no daemon — and **no
+working remote delivery**: `DISCORD_WEBHOOK_URL` is an unset Stage 3 secret,
+asserted by a test rather than assumed. It reports only when a person runs
+it.
+**What actually warns today is local and passive:** the status line turns
+`ctx:NN%` bold red and appends `HANDOVER` at or above 50%, from Claude
+Code's own `context_window.used_percentage`. See §52.
 **Trusted pin re-pinned to `47f35f50fd9ebaebf6eadbd2902d53123ef1ed44`** —
 the eighth re-pin in two sessions, every one demanded by `check-templates.py`
 `F2` rather than noticed by a person. The thirteen new tests are the
@@ -31,6 +39,12 @@ Run 003 deferrals** — R1 per-role `gh` call sites, R2 a caller for
 one with teeth:** Stage 2 makes `run-002/independent-review` required on
 `main`, and nothing in the running system posts it. None of the three
 blocks Stage 1.
+
+**ORDERING CORRECTED 2026-10-02: all three are due before STAGE 2, not
+before Stage 3.** The required context starts refusing merges at Stage 2's
+PUT, so the publisher must be wired and **observed posting** on Stage 1's
+throwaway before that PUT is executed — otherwise Stage 2 installs a
+required check nothing in the system can satisfy. Stage 1 is unaffected.
 
 All earlier approvals remain applied and none was reopened (G1, G2, G3's
 phase limits, G4, G6, G7, G9, C-18a, C-20a A/D/E). Four delegated decisions
@@ -73,7 +87,7 @@ the previous stage's verification rather than on a date
 | Stage | What | Touches `main`? | Costs? | Status |
 |---|---|---|---|---|
 | **1** | Host isolation + throwaway repository — §9 rows 0–10b | **no** | no | **READY FOR APPROVAL.** Needs none of the eight secrets |
-| **2** | The Run 002 repository and its branch protection — §9 rows 10c–12 | **YES** | no | gated on Stage 1's V-steps passing at the 10b STOP |
+| **2** | The Run 002 repository and its branch protection — §9 rows 10c–12 | **YES** | no | gated on Stage 1's V-steps passing at the 10b STOP, **and on R1/R2/R3 implemented and verified** |
 | **3** | Paid preflight, then T+00 | yes | **YES** | gated on Stage 2, on C-22 closed, and on the audit marked PASS |
 
 **Provision the eight secrets** — `~/.config/run-002/secrets.env`, mode

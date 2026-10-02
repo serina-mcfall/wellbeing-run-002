@@ -22,20 +22,39 @@ impact so the retrospective can weigh it against what actually happened.
 | 8 | **Three worktree-root definitions disagree** (`workers.py`, `isolation.json`, `config.py`). | `git-head.js`'s worktree-kind identity is unusable; the gate uses branch identities, which work. Cosmetic until something tries worktree identity. |
 | 9 | **Residual `orphan_annunciations` entry** (attempt 586, OBSERVED, resource gone). | One stale key in `state.json`. Preserved deliberately. Appears in the launch document as test residue. |
 
-## NOT deferred — REQUIRED RUN 002 WIRING, before Stage 3
+## NOT deferred — REQUIRED RUN 002 WIRING, before **STAGE 2**
 
 These were wrongly listed above as Run 003 items. They are Run 002
 work: without them the arrangement does not operate as designed, and a
 24-hour run fails. **None of them blocks Stage 1.**
+
+**ORDERING CORRECTED 2026-10-02 (second correction).** This section, the
+approval package and the deployment procedure all said *before Stage 3*.
+That was off by one stage. **Stage 2 is the step that makes
+`run-002/independent-review` a required context on `main` with
+`enforce_admins: true`** — so the deadlock starts at Stage 2's PUT, not at
+Stage 3's launch. Approving Stage 2 against an unwired publisher would
+create a required check that nothing in the running system can satisfy,
+and GitHub would refuse every merge from that moment, including the
+Supervisor App's.
+
+**So the dependency runs the other way round: the publisher must exist and
+be observed posting the status BEFORE the status is made required.**
+Concretely, all three must be **implemented and verified** before Stage 2
+is approved, and "verified" means observed on Stage 1's throwaway
+repository, where posting a commit status is already exercised by V3b,
+V8, V10 and V12 — not asserted from unit tests alone. Stage 1 is
+unaffected: it creates no required context and none of the three blocks
+it.
 
 Each one is also a numbered gap in `experiment/github-app/DEPLOYMENT-PROCEDURE.md`
 §10, which is where the deployment-side detail lives.
 
 | # | Item | Why it is Run 002 work |
 |---|---|---|
-| **R1** | **Per-role `gh` authentication has no call site** (procedure §10 **G1**). `role=` exists on every wrapper; nothing in `control/` passes it | Until a call site passes it, every `gh` call uses ambient host auth, and the three-principal separation is a property of the manifests rather than of the running system. Ambient holds `statuses: write` **and** merge rights. **Required before Stage 2/3** |
-| **R2** | **Token renewal has no caller** (procedure §10 **G5**). `gh.ensure_token` is built; no daemon or tick hook invokes it | An App installation token lasts one hour. A 24-hour run outlives it many times over, and every `gh` call fails once it expires. **Required before Stage 3** |
-| **R3** | **The gate invoker and the publisher have no caller** (procedure §10 **G6**). `control/gate_invoker.py` and `control/publisher.py` are built, tested and deliberately unwired; `check-templates.py` `E2` *asserts* nothing in `control/`, `bin/`, `apparatus/` or `experiment/github-app/` imports the transport, so publication is a **hand-run operator step** (procedure C5–C6) | **ADDED 2026-10-02, and it is the one with teeth.** Stage 2 makes `run-002/independent-review` a **required context** on `main` with `enforce_admins: true`. Nothing in the running system posts it. GitHub then refuses every merge — including the Supervisor App's — until a human posts a status for that exact head, which is V10's F5 deadlock arriving as ordinary operation rather than as a test. The frozen acceptance property is **"no human step"**, and in the fixture the gate and publisher are called automatically; deployed, they are not called at all. **Required before Stage 3, and it is a DECISION first**: either wire the publication path and re-aim `E2` at a narrower claim — the way `E` was re-aimed rather than relaxed — or accept a human status post per head and stop claiming the run is unattended. Writing an HTTP client into `control/` is what `E2` exists to prevent, so this cannot be done quietly |
+| **R1** | **Per-role `gh` authentication has no call site** (procedure §10 **G1**). `role=` exists on every wrapper; nothing in `control/` passes it | Until a call site passes it, every `gh` call uses ambient host auth, and the three-principal separation is a property of the manifests rather than of the running system. Ambient holds `statuses: write` **and** merge rights. **Required before Stage 2** — and Stage 2 is where it bites: once `enforce_admins: true` lands, ambient auth stops being a usable fallback, and the status must be posted by the principal whose manifest grants `statuses: write`, not by whatever token the host happens to hold |
+| **R2** | **Token renewal has no caller** (procedure §10 **G5**). `gh.ensure_token` is built; no daemon or tick hook invokes it | An App installation token lasts one hour. A 24-hour run outlives it many times over, and every `gh` call fails once it expires. **Required before Stage 2.** Stage 2 itself is a short operator session that one token outlives, so R2 is not driven by Stage 2's own duration — it moves with R1 and R3 because the publisher R3 wires is what needs a live token every time it posts, and shipping a publisher that dies after an hour is shipping the deadlock with a delay on it |
+| **R3** | **The gate invoker and the publisher have no caller** (procedure §10 **G6**). `control/gate_invoker.py` and `control/publisher.py` are built, tested and deliberately unwired; `check-templates.py` `E2` *asserts* nothing in `control/`, `bin/`, `apparatus/` or `experiment/github-app/` imports the transport, so publication is a **hand-run operator step** (procedure C5–C6) | **ADDED 2026-10-02, and it is the one with teeth.** Stage 2 makes `run-002/independent-review` a **required context** on `main` with `enforce_admins: true`. Nothing in the running system posts it. GitHub then refuses every merge — including the Supervisor App's — until a human posts a status for that exact head, which is V10's F5 deadlock arriving as ordinary operation rather than as a test. The frozen acceptance property is **"no human step"**, and in the fixture the gate and publisher are called automatically; deployed, they are not called at all. **Required before Stage 2 — CORRECTED 2026-10-02 from "before Stage 3", which put the fix a stage later than the breakage. It is a DECISION first**: either wire the publication path and re-aim `E2` at a narrower claim — the way `E` was re-aimed rather than relaxed — or accept a human status post per head and stop claiming the run is unattended. Writing an HTTP client into `control/` is what `E2` exists to prevent, so this cannot be done quietly |
 
 ## What is NOT on this list
 

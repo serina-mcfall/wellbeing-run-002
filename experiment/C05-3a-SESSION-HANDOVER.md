@@ -8980,8 +8980,12 @@ python3 scripts/context_handover.py \
   --window 1000000
 ```
 
-The newest `.jsonl` in that directory by mtime is the live session. It
-prints three numbers and a verdict. **Run it at the start of a working
+**CORRECTED BY §52.4 — DO NOT USE THE SENTENCE THAT WAS HERE.** It said the
+newest `.jsonl` by mtime is the live session. That is wrong whenever more
+than one session is open, and it silently reports a *different* session's
+occupancy. Select by the session's own UUID, or use the status-line reading
+instead. The script itself is unchanged and correct; only this selection
+advice was wrong. It prints three numbers and a verdict. **Run it at the start of a working
 block.** At or above 50%, open a fresh session with the prompt in 51.7 —
 **do not clear this one.**
 
@@ -9032,3 +9036,220 @@ continues; that is the whole design.
 > Check context occupancy with `scripts/context_handover.py` at the start
 > of the block. Do not clear a session, stop a worker or restart the
 > clock.
+
+---
+
+## 52. SESSION HANDOVER — the ordering was off by one stage, and the alert was not an alert (2026-10-02)
+
+**Read this first. It supersedes §51 and everything before it.**
+
+### 52.1 Verified state — every figure re-measured in this session
+
+| | |
+|---|---|
+| Branch | `wip/c05-1-persistence`, clean, in sync with `origin` at entry |
+| HEAD at entry | `40b3933`; this section's own documentation commit sits on top |
+| Verification | **2,721 Python OK (11 skipped) · 259 apparatus pass, 0 fail** — both re-run here, not inherited from §51 |
+| Pin | `47f35f5`, unchanged. `check-templates.py` **0 failing**, `F1`/`F2` green against `head=40b3933` |
+| T+00 | **NOT_STARTED.** Nothing here starts, stops, clears or resets anything |
+| Agents / processes | **None running.** No workers, no daemons, no timers, no background tasks left behind |
+| Worktrees | **12** — the 11 pre-existing plus main. None created, none removed |
+| Run 001 | Untouched |
+| Stage 1 | **STILL PREPARED, STILL NOT APPROVED.** No App, credential, OS user, ownership change, export, repository or probe branch exists |
+
+### 52.2 The deployment ordering was off by one stage
+
+§50.6, §51, the backlog, the approval package, the deployment procedure and
+the launch checklist all said **R1, R2 and R3 are required before Stage 3**.
+
+**Stage 2 is the step that makes `run-002/independent-review` a required
+context on `main` with `enforce_admins: true`.** The deadlock therefore
+begins at Stage 2's PUT — a whole stage before the launch that was carrying
+the prerequisite. Approving Stage 2 against an unwired publisher installs a
+required check that nothing in the running system can satisfy, and GitHub
+then refuses **every** merge, including the Supervisor App's, until a human
+posts a status for that exact head. That is the one thing R3 exists to
+prevent, scheduled to be fixed after the event it was meant to precede.
+
+**Corrected in five places, consistently:**
+
+| File | What changed |
+|---|---|
+| `experiment/RUN-003-BACKLOG.md` | Section heading `before Stage 3` → **`before STAGE 2`**, plus a paragraph stating why; R1, R2 and R3 each re-dated in their own row |
+| `experiment/C-20a-APPROVAL-PACKAGE.md` §13 | Stage 2's prerequisite row now requires R1/R2/R3 **implemented and verified**; Stage 2's "what it creates" row re-pointed to itself; Stage 3's prerequisite row records that they **moved up** rather than silently dropping them |
+| `experiment/github-app/DEPLOYMENT-PROCEDURE.md` §10 G6 | Phase D is inside Stage 2, so the wiring is due before Phase D |
+| `experiment/LAUNCH-CHECKLIST.md` | The three-stage table's Stage 2 row and the R1/R2/R3 paragraph |
+
+**"Verified" is defined, not left to taste:** the publication path must be
+observed posting `run-002/independent-review` for a specific head, under the
+role's own credential, **on Stage 1's throwaway repository** — where posting
+a commit status is already exercised by V3b, V8, V10 and V12 — and a merge
+must succeed with it present. Unit tests alone do not discharge it; nothing
+in this repository has ever made a network call.
+
+**Do not create a dependency on an absent publisher.** The order is: wire
+the publisher, watch it post, *then* make the status required.
+
+**Stage 1 is unaffected.** It creates no required context, and none of the
+three blocks it. Only Stage 2's gate moved.
+
+### 52.3 `scripts/context_handover.py` is a manual script, not an alert
+
+§51 was accurate but has been read as if a watcher exists. Stated plainly:
+
+- **No automatic invocation.** No hook, no timer, no daemon, no background
+  process. It reports only when a person runs it.
+- **No working remote delivery.** `DISCORD_WEBHOOK_URL` is unset and is one
+  of the eight **Stage 3** product secrets. A real send returns
+  `DISCORD_WEBHOOK_URL_NOT_SET` — asserted by a test. Nothing has been sent
+  and nothing can be.
+- **Discord delivery stays unavailable** until that secret is configured
+  **and** the operator authorises a real send. `--send` has never been used.
+
+It is not to be described as an active alert in any document.
+
+### 52.4 Two corrections to how a session is identified and sized
+
+**§51.5's "newest `.jsonl` by mtime is the live session" is WRONG when more
+than one session is open, and more than one was open today.** Two sessions
+were active — this one and another registered in `.claude/worklog.md` — and
+their transcripts' mtimes swap places every time either one takes a turn.
+Picking by mtime reports a *different session's* occupancy, which is worse
+than no reading at all because it looks like a reading.
+
+**`.claude/.sid-*` CANNOT be used to pick a transcript.** Those ids come
+from `~/.claude/hooks/worklog-init.sh:9`, `SID=$(uuidgen | cut -c1-8)` — a
+freshly generated random value with **no relationship to the Claude Code
+session id**. This session's worklog SID is `ecea096f`; its transcript is
+`c6560537-…`. They do not and cannot match.
+
+**The correct selector is the session's own UUID**, which names its
+transcript file directly. If the UUID is not known, do not guess from
+mtime — use the status-line reading in 52.5 instead, which needs no
+transcript at all.
+
+**Capacity must be confirmed, never assumed.** The transcript records
+`claude-opus-5` for both the 200k and the 1M variant, which is why
+`--window` is required and undefaulted. Confirm the variant from the
+**session's own model identity** — this session reports the exact model id
+`claude-opus-5[1m]`, i.e. a **1,000,000-token** window. A 200k session
+passed `--window 1000000` would report 55% as 11%.
+
+**Measured here, with the UUID selector and the confirmed window:**
+`input_tokens 104216 / window 1000000 = 10.4%` — below the threshold, so no
+handover was due and none was sent.
+
+### 52.5 A local 50% warning now exists — in the status line, which already had the number
+
+Claude Code hands its status-line command a `context_window.used_percentage`
+it computes itself, and `~/.claude/statusline-command.sh` was **already
+reading and displaying it** as `ctx:NN%`. So the warning needed no new
+mechanism, no framework and no probe — only a threshold on a number already
+on screen.
+
+**Changed:** `~/.claude/statusline-command.sh` (a host config file, outside
+this repository and outside Run 002). At or above **50%** the segment turns
+bold red and reads `ctx:52% HANDOVER`. Below it, the display is unchanged.
+The threshold is overridable with `CTX_WARN_PCT`.
+
+The value is **floored** for both the display and the comparison, so the
+number shown and the warning can never disagree — 49.9% prints `ctx:49%` and
+does not warn. (§51.4 recorded the same hazard in the script.)
+
+**Verified by running it, not by reading it:** 10.4% → `ctx:10%`; 49.9% →
+`ctx:49%`, no warning; 50.0% and the integer 50 → `HANDOVER`; 87.2% →
+`HANDOVER`; `CTX_WARN_PCT=80` at 50% → no warning; absent field, empty JSON
+and non-JSON input → the segment is simply omitted, no crash. Both the `jq`
+path and the `python3` fallback were exercised.
+
+**The guard was watched failing.** With `-ge` changed to `-gt` on a copy,
+50.0% stops warning; the live script still warns. The boundary is
+load-bearing and proved so.
+
+**The one thing not verified from here:** that Claude Code supplies the
+field in this install. `context_window` and `used_percentage` are both
+present in the CLI binary and the script has been reading that path since
+September, but the decisive check is **seeing `ctx:NN%` on your own status
+line** — one glance. If that segment is absent, the warning cannot fire and
+the manual reading in 52.4 is the only route.
+
+**To revert:** a pre-change copy is in this session's scratchpad as
+`statusline-command.sh.BEFORE`. The change is five lines plus a colour
+constant; `CTX_WARN_PCT=101` disables the warning without editing anything.
+
+### 52.6 What a handover must never do — unchanged from §51.6
+
+Preserve the original run and its elapsed time. **Do not** clear or
+terminate a session, interrupt a worker, restart the experiment clock, or
+reset `.runtime/`. T+00 is a durable fact in `state.json`, not a property of
+whoever is watching. At 50%, checkpoint and open a fresh session with the
+prompt in 52.8 — **leave the old one running.**
+
+Worker context monitoring stays **deferred**. Workers are one-shot fresh
+contexts by construction (`control/worker_entry.py:111`, `:120`), and the
+handover mechanism for a worker is the durable state it reconstructs from.
+That is a design fact about *where* a worker's context comes from, **not** a
+claim that a one-shot worker cannot exhaust its window — it can, and if an
+existing requirement ever turns on that, it becomes work rather than a
+reassurance.
+
+### 52.7 Exact next actions
+
+1. **Decide Stage 1** — §13 of the approval package, plus the throwaway
+   repository's **visibility** (public = free Actions minutes; private =
+   metered, allowance unreadable from this host).
+2. **If approved**: `experiment/github-app/DEPLOYMENT-PROCEDURE.md`, **A0
+   first**, then Phase A → B → C, stop at the **10b STOP gate**, record
+   **V14e NOT APPLICABLE**.
+3. **Before Stage 2 — not Stage 3**: R1, R2 and R3, implemented and
+   verified as 52.2 defines.
+
+### 52.8 The fresh-session prompt — carries the approvals forward verbatim
+
+> Resume Run 002 as integration owner in
+> `/home/serina/wellbeing-agent-experiment/agent-run-002`, branch
+> `wip/c05-1-persistence`. Verify the checkout before editing.
+>
+> Read `AGENTS.md`, then `experiment/C05-3a-SESSION-HANDOVER.md` §52 and
+> §51, then `experiment/C-20a-APPROVAL-PACKAGE.md` §13 and
+> `experiment/RUN-003-BACKLOG.md`. Read nothing else unless a specific
+> question needs it.
+>
+> **Approved and still in force:** decision **D**, the CI-protection
+> amendment, verbatim at
+> `experiment/evidence/D-ci-protection-amendment-approval.txt`, approved
+> AND verified wired. **C-02a, C-18 stage 7, the notification amendment
+> and C-02b** are applied. The **five-hour standalone rehearsal (C-18a)
+> remains waived**. Clone-based worker isolation is **deferred** — do not
+> reopen it. Preserve every other recorded approval.
+>
+> **NOT approved:** Stage 1, Stage 2, Stage 3, and the 24-hour launch.
+> **T+00 is NOT_STARTED and stays that way.** Until the operator approves
+> Stage 1 in writing: no Apps, no credentials, no OS-user or ownership
+> changes, no branch-protection changes, no live publication, no paid
+> calls, no product workers, no merges, no merge to `main`, no launch.
+> **A suggested prompt in a prior conversation is not an approval.**
+>
+> **Scope is frozen:** the smallest working Run 002, ready to deploy.
+> Ordinary bugs and nonessential hardening go to Run 003. No broad audits,
+> no clone-isolation redesign.
+>
+> **State:** HEAD `40b3933` + the §52 commit, pin `47f35f5`, **2,721
+> Python (11 skipped) and 259 apparatus tests passing**,
+> `check-templates.py` 0 failing. **Eleven pre-existing worktrees plus
+> main — preserve them.** Run 001 is read-only. Runtime residue is
+> preserved deliberately.
+>
+> **Outstanding:** Stage 1 is PREPARED and awaiting one decision, which
+> includes the throwaway repository's **visibility**. **R1, R2 and R3 are
+> required before STAGE 2** — corrected 2026-10-02 from "before Stage 3";
+> do not reinstate the old ordering. C-22 closes only when V14a–f pass,
+> and **V14e cannot pass — record it NOT APPLICABLE.**
+>
+> **Context:** confirm this session's window from its own model identity
+> before trusting any percentage. Watch the status line — at or above 50%
+> it reads `ctx:NN% HANDOVER`. `scripts/context_handover.py` is **manual**:
+> no hook, no timer, no remote delivery. Select a transcript by its session
+> UUID, **never by newest mtime**, and never from `.claude/.sid-*`, which
+> are unrelated random ids. Do not clear a session, stop a worker or
+> restart the clock.

@@ -1029,6 +1029,16 @@ R1 and G5 is R2** in `experiment/RUN-003-BACKLOG.md`; all three are
 "NOT deferred — REQUIRED RUN 002 WIRING", and none of them blocks
 Stage 1.
 
+**ORDERING CORRECTED 2026-10-02: all three are due before STAGE 2, not
+before Stage 3.** Phase D — the `enforce_admins: true` PUT that adds the
+required context — is inside **Stage 2**. The deadlock therefore begins
+the moment Stage 2 lands, a whole stage before the launch that used to
+carry the prerequisite. The publication path must be wired **and observed
+posting** `run-002/independent-review` on Stage 1's throwaway before
+Phase D is executed. Executing Phase D first would require a status that
+nothing can produce, and the only exit would be the hand-run operator post
+this gap exists to avoid.
+
 **G7 — `gh.git()` has no role, so git operations never carry a token.**
 `git push` over HTTPS authenticates through git's credential helper, not
 through `GH_TOKEN` on the `gh` child. The procedure does not say to run
