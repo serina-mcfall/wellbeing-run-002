@@ -430,12 +430,27 @@ would fail to exist.
 
 **The pin must be confirmed or re-stated at approval time.**
 `check-templates.py` enforces the invariant that matters: the pin is
-reachable from HEAD (`F1`), and `apparatus/ control/ protocol/ prompts/
-config/ bin/ .github/` are unchanged since it (`F2` — the last two were
-added 2026-10-02: `bin/` was protected by §6 but outside the drift set,
-and `.github/` defines the `ci` check the gate matches by NAME alone). Documentation on top of a pin is
-harmless; one line of gate code is not, and `F2` goes red naming the file.
-Both halves have been watched failing.
+reachable from HEAD (`F1`), and everything the deployment EXECUTES is
+unchanged since it (`F2`):
+
+    apparatus/  control/  protocol/  prompts/  config/  bin/  .github/
+    experiment/github-app/status_transport.py
+    experiment/github-app/publication_path.py
+    apparatus/package.json  apparatus/package-lock.json
+
+The last five were added 2026-10-02. `bin/` was protected by §6 but outside
+the set; `.github/` defines the `ci` check the gate matches by name alone;
+and **the two `experiment/` modules are executable components, not
+documentation** — one builds the commit-status request, the other joins the
+gate to the publisher. The two `package` files decide what `npm ci`
+installs into the read-only export at action 7b, so they determine what
+code the gate actually loads. `check-templates.py` is deliberately OUTSIDE
+the set: it is a verification tool, not a deployed component.
+
+Documentation on top of a pin is harmless; one line of executed code is
+not, and `F2` goes red naming the file. Both halves have been watched
+failing — five times across two sessions, every one demanded by the check
+rather than noticed by a person.
 
 The export is created once, read-only — **and the dependency install in
 the middle is not optional; see action 7b**:
@@ -622,7 +637,7 @@ before 8–10 deadlocks every product PR permanently.
 | **The publisher**, written and **disabled**: no default transport, enabled only by an exact environment variable, nothing imports it | `control/publisher.py`, 23 tests |
 | **F5's resolution** in the gate, with the fail-open alternative demonstrated | `live-gate.js`, `live-gate.test.js` |
 | **C-04c**, the ledger cross-check that narrows C-22 without closing it | `control/routing.py`, `control/supervisor.py`, 26 tests |
-| The pin, and a check that fails when gate code moves under it | `check-templates.py` `F1`/`F2` — drift set now also covers `bin/` and `.github/` |
+| The pin, and a check that fails when EXECUTED code moves under it | `check-templates.py` `F1`/`F2` — drift set now also covers `bin/`, `.github/`, the two executable `experiment/github-app` modules and `apparatus/package*.json` |
 | **The worker environment allow-list** for action 6, written and tested, **deliberately not wired** — a test pins the unwired status so taking action 6 is a decision, not a drift | `control/worker_entry.py::worker_child_env`, `tests/test_c22_worker_env_allowlist.py` (10 tests) |
 | **The gate invoker** (action 8, Python half): required+undefaulted export path, the live repo root refused if it is the export, the export's actual revision compared to the pin, 11 finite fail-closed outcomes, never raises | `control/gate_invoker.py` |
 | **The publication path** (action 9, the join): gate invoker → publisher, same environment switch checked **before** any subprocess, no default transport. Placed in `experiment/github-app/` on purpose, so `control/` and `bin/` stay publisher-free and that guarantee survives literally | `experiment/github-app/publication_path.py` |
@@ -633,6 +648,8 @@ before 8–10 deadlocks every product PR permanently.
 | **The `ajv` packaging fix** for action 7b, with `npm ci --omit=dev` verified to install it and not playwright | `apparatus/package.json`, `package-lock.json` |
 | **The gate process's environment allow-list** — `NODE_PATH` and `NODE_OPTIONS` both choose what code Node runs, and the spawn passed neither through a filter | `control/gate_invoker.py::gate_child_env`, 7 tests |
 | **The commit-status transport**, contract derived from GitHub's published documentation, **with no client, no socket import, no importer and no request ever sent** | `experiment/github-app/status_transport.py`, 31 tests, 6 mutations, 4 mechanical checks (`E2`) |
+| **C-23 — two of the three ways a product PR could satisfy the required CI check without CI passing**, closed by bringing the Python path to the rule `ci-result.js` already applied. The third is open, §6 | `control/gh.py::checks_state`, `tests/test_c23_required_check_integrity.py` (11 tests, 3 mutations) |
+| **The pending-review flag's contract**, rewritten as publish-eligibility and TESTED both ways — publish then ask the merge authority, which refuses | `tests/test_c20c_publish_eligibility_is_not_merge_eligibility.py` (8 tests, 1 mutation) |
 
 ---
 
