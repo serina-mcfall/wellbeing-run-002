@@ -8863,3 +8863,172 @@ assuming a worker can create its own worktree.
 No work was reset, abandoned or reported as finished when it was not. The
 runtime residue is preserved unchanged, the eleven pre-existing worktrees
 were not touched, and no audit was re-run without a reason.
+
+---
+
+## 51. SESSION HANDOVER — the context arrangement, measured rather than assumed (2026-10-02)
+
+**Read this first. It supersedes §50 and everything before it.**
+
+### 51.1 Verified state
+
+| | |
+|---|---|
+| Branch | `wip/c05-1-persistence`, in sync with `origin` |
+| HEAD | `fc8d174` plus this section's own commit |
+| Verification | **2,721 Python OK (11 skipped) · 259 apparatus pass** — 2,701 + 20 for the context handover, re-run at handover |
+| Pin | `47f35f5`, unchanged. `scripts/` is **outside** the `F2` drift set, so overseer tooling cannot move the pin. `check-templates.py` 0 failing |
+| T+00 | **NOT_STARTED.** Nothing in this section starts, stops, clears or resets anything |
+| Agents / processes | **None running.** No workers, no daemons, no background tasks, no timers |
+| Stage 1 | **PREPARED, NOT APPROVED** |
+
+### 51.2 Is context usage observable? MEASURED, both answers
+
+**The overseeing session: YES, and it was read, not assumed.**
+Claude Code writes one transcript per session at
+`~/.claude/projects/<project-slug>/<session-id>.jsonl`, and every
+assistant record carries a `usage` object. The occupancy is the **last**
+assistant message's `input_tokens + cache_read_input_tokens +
+cache_creation_input_tokens` — every request re-sends the whole
+conversation, so that total is what the window holds.
+
+Measured for this session while writing this: **305,903 of 1,000,000 =
+30.6%.** Below the 50% threshold, so **no handover notification is due,
+and none was sent.**
+
+**Two real fragilities, both stated rather than papered over:**
+
+1. **The window size cannot be read from the transcript.** The model is
+   recorded as `claude-opus-5` whether the session is the 200k or the 1M
+   variant. `--window` is therefore **required and undefaulted** — a
+   default would report 30% as 150%, or the reverse.
+2. **The transcript schema is not a contract.** It is Claude Code's
+   internal file. If the `usage` shape changes, the reading returns
+   `UNREADABLE`, which is refused loudly — see 51.4.
+
+**The runtime agents: NO, not live, and the design is why.** Protocol v2
+specifies *"Builder: fresh context"*, *"Fixer: fresh context"*, *"fresh
+same-tier context"* and *"durable state must survive context loss"*.
+`control/worker_entry.py:111` runs each builder/fixer as a one-shot
+`claude --print --output-format stream-json`, and `:120` runs each
+reviewer as `codex exec`. **There is no long-lived agent context to
+monitor** — context is reset per task by construction, and the handover
+mechanism for a worker is the durable state it reconstructs from.
+
+Per-worker token usage is **plausibly** readable afterwards from the
+captured `stream-json` output, but **that is UNVERIFIED and is not
+claimed**: confirming it needs a real `claude` invocation, which is a
+paid provider call and is not authorised. No worker output file exists —
+T+00 is NOT_STARTED.
+
+### 51.3 Does a 50% notification already exist? NO
+
+Searched `control/`, `bin/`, `scripts/`, `apparatus/` and `protocol/`:
+no context-usage reading, no percentage threshold, no handover
+notification. The only `CONTEXT` constants in `control/` are
+`publisher.CONTEXT` (the commit-status name) and
+`debt.MISSING_MERGE_CONTEXT`. Protocol v2 names *"context risk"* once, in
+the Run 001 → Run 002 audit mapping, and its stated correction is *"fresh
+context reconstructs solely from durable state"* — not an alert.
+
+### 51.4 What was built, and what it deliberately is not
+
+`scripts/context_handover.py`, 20 tests in
+`tests/test_context_handover.py`.
+
+**It is not a monitoring framework.** No daemon, no timer, no hook, no
+background process. It runs when someone runs it. An unattended watcher
+that has never fired is a claim, not a control.
+
+- **Threshold is AT OR ABOVE 50%**, configurable. The boundary case is
+  pinned by a test, and **the guard was watched failing**: flipping `<`
+  to `<=` turns `test_exactly_at_the_threshold_it_fires` red.
+- **It sends through `control/notify.py`**, the mechanism the experiment
+  already uses. A test asserts the script imports no `urllib`,
+  `requests`, `httpx` or `socket` — there is no second transport.
+- **It fails closed.** A transcript with no usage record is `UNREADABLE`
+  and exits 2; it is never reported as 0%. The session whose occupancy
+  cannot be established is the one most likely to need a handover.
+- **It prints integers only.** A transcript is exactly the kind of file
+  the 2026-07-27 credential incident was about, so it is parsed with
+  `json` and no message content, tool output or non-`usage` field ever
+  reaches a stream. A test greps the source for `print(record`,
+  `print(message`, `print(raw`.
+- **Once per session** is a marker file, written **only on a delivered
+  send**. A dry run or a refusal leaves it unwritten, so a handover that
+  never reached anybody is retried rather than suppressed.
+- **The display is floored**, so 49.9999% prints `49.9` and never `50.0`
+  beside the line "below threshold 50.0".
+
+**NOTHING HAS BEEN SENT, AND NOTHING CAN BE SENT TODAY.**
+`DISCORD_WEBHOOK_URL` is **unset** (`experiment/github-app/env-var-names.md:21`)
+and is one of the eight **Stage 3** product secrets. A real send today
+returns `DISCORD_WEBHOOK_URL_NOT_SET` — **asserted by a test**, not
+assumed. The `--send` flag exists and **was not used**. The live path was
+exercised **dry** against this session's real transcript and wrote no
+marker.
+
+**So the alert is VERIFIED LOCALLY AND UNDELIVERABLE.** It must not be
+described as working until a Stage 3 webhook exists and the operator
+authorises a real send.
+
+### 51.5 The manual fallback, which is the one that works today
+
+```
+python3 scripts/context_handover.py \
+  ~/.claude/projects/-home-serina-wellbeing-agent-experiment-agent-run-002/<session-id>.jsonl \
+  --window 1000000
+```
+
+The newest `.jsonl` in that directory by mtime is the live session. It
+prints three numbers and a verdict. **Run it at the start of a working
+block.** At or above 50%, open a fresh session with the prompt in 51.7 —
+**do not clear this one.**
+
+### 51.6 What a handover must never do
+
+Preserve the original run and its elapsed time. **Do not** clear or
+terminate a session, interrupt a worker, restart the experiment clock, or
+reset `.runtime/`. T+00 is a durable fact in `state.json`, not a property
+of whoever is watching. A fresh session reads the durable state and
+continues; that is the whole design.
+
+### 51.7 The fresh-session prompt — carries the approvals forward verbatim
+
+> Resume Run 002 as integration owner in
+> `/home/serina/wellbeing-agent-experiment/agent-run-002`, branch
+> `wip/c05-1-persistence`.
+>
+> Read `AGENTS.md`, then `experiment/C05-3a-SESSION-HANDOVER.md` §51 and
+> §50, then `experiment/C-20a-APPROVAL-PACKAGE.md` §13 and
+> `experiment/RUN-003-BACKLOG.md`. Read nothing else unless a specific
+> question needs it.
+>
+> **Approved and still in force:** decision **D**, the CI-protection
+> amendment, verbatim at
+> `experiment/evidence/D-ci-protection-amendment-approval.txt`, approved
+> AND verified wired. **C-02a, C-18 stage 7, the notification amendment
+> and C-02b** are applied. The **five-hour standalone rehearsal (C-18a)
+> remains waived**. Clone-based worker isolation is **deferred** — do not
+> reopen it.
+>
+> **NOT approved:** Stage 1, Stage 2, Stage 3, and the 24-hour launch.
+> **T+00 is NOT_STARTED and stays that way.** Until the operator approves
+> Stage 1 in writing: no Apps, no credentials, no OS-user or ownership
+> changes, no branch-protection changes, no live publication, no paid
+> calls, no live workers, no merges, no merge to `main`, no launch.
+>
+> **State:** HEAD `fc8d174` + the §51 commit, pin `47f35f5`, 2,721 Python
+> and 259 apparatus tests passing, `check-templates.py` 0 failing. Eleven
+> pre-existing worktrees plus main — preserve them. Run 001 is read-only.
+> Runtime residue is preserved deliberately.
+>
+> **Outstanding:** Stage 1 is PREPARED and awaiting one decision, which
+> includes choosing the throwaway repository's **visibility** (public =
+> free Actions minutes; private = metered, allowance unreadable from this
+> host). R1, R2 and R3 are required before Stage 3. C-22 closes only when
+> V14a–f pass, and V14e cannot pass — record it NOT APPLICABLE.
+>
+> Check context occupancy with `scripts/context_handover.py` at the start
+> of the block. Do not clear a session, stop a worker or restart the
+> clock.
