@@ -44,27 +44,35 @@ are APPLIED - C-02a, C-18 stage 7, the notification amendment, and C-02b.
 > lands.** Every "PASS" below is a statement about a control plane whose
 > inputs are, today, forgeable by the workers it governs.
 
-**The two human actions, in order:**
+**THE FINITE REMAINING PATH — three approvals and one provisioning step.**
 
-1. **Provision the eight secrets** - `~/.config/run-002/secrets.env`, mode
-   600. Purely local, unblocks three gates, precondition for every
-   remaining gate. Names, purposes and steps:
-   `experiment/evidence/LAUNCH-READINESS-2026-10-02.txt` §3-4.
-2. **Decide C-20a(C)** - one complete decision document at
-   `experiment/C-20a-APPROVAL-PACKAGE.md`: identities, exact permissions,
-   protection before/after, provenance, SHA binding, the pinned trusted
-   revision, isolation, verification, rollback, **twenty** numbered
-   actions, and a separate list of what is already done locally. **It takes
-   `main` from "a human approved this" to "the gate approved this"** - that
-   is the hinge. Do not approve §41.7's permission set.
+Decision **D (the CI-protection amendment) is APPROVED** — recorded
+verbatim at `experiment/evidence/D-ci-protection-amendment-approval.txt`.
+It is a repository-level rule, not a deployment: no host, no credential,
+no GitHub setting. Implementation is in progress.
 
-   **It was twelve actions until 2026-10-02, and is now twenty.** An independent review, each
-   finding re-verified against the code before it was acted on, found that
-   the twelve carried out exactly as written would have left no process
-   authenticating as any of the three Apps, left workers unable to push at
-   all, installed production credentials before any falsification ran, and
-   overwritten live branch protection with a reconstruction. Eight actions
-   were added and two corrected.
+The deployment request is now **three staged approvals**, each gated on
+the previous stage's verification rather than on a date
+(`experiment/C-20a-APPROVAL-PACKAGE.md` §13):
+
+| Stage | What | Touches `main`? | Costs? | Status |
+|---|---|---|---|---|
+| **1** | Host isolation + throwaway repository — §9 rows 0–10b | **no** | no | **READY FOR APPROVAL.** Needs none of the eight secrets |
+| **2** | The Run 002 repository and its branch protection — §9 rows 10c–12 | **YES** | no | gated on Stage 1's V-steps passing at the 10b STOP |
+| **3** | Paid preflight, then T+00 | yes | **YES** | gated on Stage 2, on C-22 closed, and on the audit marked PASS |
+
+**Provision the eight secrets** — `~/.config/run-002/secrets.env`, mode
+600 — is a **Stage 3** prerequisite, not a Stage 1 one. Nothing in Stage 1
+reads them. Names, purposes and steps:
+`experiment/evidence/LAUNCH-READINESS-2026-10-02.txt` §3-4.
+
+**THE NEXT EXECUTABLE STEP IS STAGE 1.** It is the only stage whose
+prerequisites are complete, and it is what converts §8's unverified rows
+into measured answers — including the two that no local test can reach:
+**V13**, the gate running from a real read-only export, and **V14**, the
+corrected git ownership under the real OS identities. **C-22 cannot close
+before Stage 1**, and every "PASS" in this document is a statement about a
+control plane whose inputs remain forgeable until it does.
 
 **What changed this session, in one line each.**
 
