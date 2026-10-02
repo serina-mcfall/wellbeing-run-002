@@ -8741,3 +8741,125 @@ No work was reset, abandoned or reported as finished when it was not.
 `control/worker_git.py` and its 41 tests are **built, committed, and
 deliberately unwired** — that status is pinned by a test and stated in the
 backlog, not disguised. The runtime residue is preserved unchanged.
+
+---
+
+## 50. SESSION HANDOVER — the merge gets its SHA, and the backlog gets a third required item (2026-10-02)
+
+**Read this first. It supersedes §49 and everything before it.**
+
+### 50.1 Verified state — measured at handover, not copied
+
+| | |
+|---|---|
+| Branch | `wip/c05-1-persistence` |
+| HEAD | `47f35f5` (`47f35f50fd9ebaebf6eadbd2902d53123ef1ed44`) plus this section's own documentation commit |
+| Working tree | clean at the code commit; this section's edits are the documentation commit on top |
+| Verification | **2,701 Python OK (11 skipped) · 259 apparatus pass, 0 fail** — both re-run at handover, not inherited. 2,688 → 2,701 is the thirteen new merge-binding tests |
+| Pin | **re-pinned to `47f35f5`**, the eighth. `check-templates.py` **0 failing**, `F1`/`F2` both green |
+| T+00 | **NOT_STARTED** — re-read from `.runtime/state.json`: `started_at: None`, every task `QUEUED`, 0 PRs, one ledger line |
+| Run 001 | Untouched |
+| Worktrees | **12** — the 11 pre-existing plus main. None created, none removed |
+| Agents | **One dispatched, read-only, complete and accounted for.** None outstanding, none resumable |
+| Stage 1 | **STILL PREPARED, STILL NOT APPROVED.** No App, credential, OS user, ownership change, export, repository or probe branch exists |
+
+### 50.2 The merge is now bound to the head the gate judged
+
+§5 of the approval package and §4's SHA-binding table both specified
+`PUT /repos/{owner}/{repo}/pulls/{n}/merge` with `sha`. `control/gh.py::merge`
+ran `gh pr merge <n> --repo <r> --squash --delete-branch`, with no head
+anywhere in it. **Every link in the chain was bound to a commit except the
+merge itself, which was bound to a pull request NUMBER.**
+
+Fixed at `47f35f5`:
+
+- `expected_head` is a **required keyword**, so no call site can omit it,
+  and an empty one is refused locally rather than sent to GitHub as the
+  literal string `"None"`.
+- The supervisor passes `pr["headRefOid"]` — GitHub's observation under
+  the merge transaction's lock, the same value the ledger attestation and
+  the CI-path check were taken against — never `record["reviewed_head"]`,
+  which a worker can write while C-22 is open.
+- `--delete-branch` has no REST equivalent on that endpoint, so the ref
+  deletion is a second, **best-effort** call whose result is deliberately
+  not consulted: the merge is already durable, and failing it afterwards
+  would strand state exactly as C-14 describes.
+- Both calls are covered by the supervisor manifest's existing
+  `contents: write`. **No permission changed.**
+
+13 tests in `tests/test_expected_head_merge.py`. **Proved able to fail**:
+with the `gh pr merge` body restored, four go red.
+
+**THIS IS A COMPONENT TEST, NOT A DEPLOYED ONE.** That GitHub answers 409
+to a stale `sha` is documented behaviour and is asserted nowhere here. No
+network call has ever been made from this repository. Added to §8's
+unverified list rather than assumed.
+
+### 50.3 R3 — the required wiring that was hiding inside a deferral
+
+Backlog item 2 read "nothing in the control plane calls `live-gate.js`",
+impact **"None for operation"**. That was true of the merge DECISION and
+false of the other thing the JS gate does.
+
+**`control/gate_invoker.py` and `control/publisher.py` are built, tested
+and deliberately unwired**, and `check-templates.py` `E2` *asserts* that
+nothing in `control/`, `bin/`, `apparatus/` or `experiment/github-app/`
+imports the transport. Publication is a **hand-run operator step**
+(procedure C5–C6).
+
+**Stage 2 makes `run-002/independent-review` a required context on `main`
+with `enforce_admins: true`.** From that moment GitHub refuses every merge
+— including the Supervisor App's — until a human posts a status for that
+exact head. That is V10's F5 deadlock arriving as ordinary operation, and
+the frozen acceptance property is **"no human step"**.
+
+So item 2 is now narrowed to the merge-authority question, which stays
+deferred, and the publication half is **R3 — required Run 002 wiring,
+before Stage 3**. It is a **decision** first: wire the publication path
+and re-aim `E2` at a narrower claim, or accept a human status post per
+head and stop calling the run unattended. R1 (per-role call sites, gap
+G1) and R2 (`ensure_token` has no caller, gap G5) are unchanged.
+**None of the three blocks Stage 1.**
+
+### 50.4 Stage 1 — four corrections, all of them to what it CLAIMS
+
+| | |
+|---|---|
+| **Cost** | "No billable operation" was overstated. A1 creates the throwaway as **private**, V10 and V12 each require "let `ci` pass", and **Actions minutes are free on public repositories and metered on private ones**. The account's allowance **could not be read from this host** — `gh api /users/.../settings/billing/actions` 404s because the ambient token lacks the `user` scope, and refreshing it is itself an authorisation change outside this stage. Recorded as a bounded decision, not resolved by me |
+| **The push to `<PROD>`** | "What it does NOT touch" never mentioned that **V14a pushes a branch to the production repository**. It does. The step also said "a worker worktree of the real checkout", which would have put a probe commit on one of eleven unmerged branches. It is now a dedicated `probe/v14` branch and worktree, created by the step and deleted by its undo. `ci.yml` triggers on `push` only for `branches: [main]`, so the push starts no workflow run |
+| **The rollback had no pre-image** | D2 captures live branch protection before the PUT that overwrites it. The host side had nothing equivalent: A2 created two accounts without asking whether they existed, and A5 re-owned a whole workspace whose previous modes were recorded nowhere — then both undos asked for a restore from bytes nobody had taken. **New step A0** captures identities, ownership/modes of every path under `<WS>`, worktrees and refs to `~/run-002-stage1-rollback/` (outside `<WS>`, because A5 re-owns `<WS>`). Both undos now replay it |
+| **`userdel -r`** | The procedure said `userdel -r`; §13 said plain `userdel`. `-r` deletes a home directory, so against an account this stage did not create it destroys data the stage never owned. Both now say plain `userdel`, **for the identities A0 recorded as ABSENT and no others** |
+
+**Unchanged and still true:** Stage 1 **does** create three real App
+private keys and the tokens minted from them, and needs **none** of the
+eight product secrets. **C-22 closes on V14a–f PASSING, not on
+approval**, and **V14e cannot pass** under the single `run002-wrk`
+identity — record it NOT APPLICABLE; worker-to-worker reachability
+survives Stage 1 as a separate residual. The **10b STOP gate** is intact
+and nothing after it is automatic.
+
+### 50.5 One thing I did not resolve, and it is the operator's
+
+A0's capture and the V14 probe both run **after** A5's
+`chmod -R 0750 <WS>`, which leaves a worker worktree readable but not
+writable. `control/worker_git.py`'s "WHO MAKES THE CLONE" note records
+that the Supervisor cannot `chown` anything and that the deployment must
+choose **a root helper at dispatch** or **a setgid group-writable root**.
+Neither has been chosen, nothing in the code implements either, and
+**V14d is the step that forces the choice**. B7 now says so in place of
+assuming a worker can create its own worktree.
+
+### 50.6 Exact next actions
+
+1. **Decide Stage 1** — §13 of the approval package, plus the visibility
+   choice in 50.4's cost row.
+2. **If approved**: `experiment/github-app/DEPLOYMENT-PROCEDURE.md`,
+   **A0 first**, then Phase A → B → C, stop at the 10b STOP gate, record
+   V14e NOT APPLICABLE.
+3. **Before Stage 3**: R1, R2 and **R3**.
+
+### 50.7 Nothing was discarded
+
+No work was reset, abandoned or reported as finished when it was not. The
+runtime residue is preserved unchanged, the eleven pre-existing worktrees
+were not touched, and no audit was re-run without a reason.

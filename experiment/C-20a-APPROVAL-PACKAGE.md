@@ -288,6 +288,28 @@ local hook on this host refuses all `gh pr` invocations including
 and specifying an unverified flag would be worse than specifying the API
 that is documented.
 
+> **IMPLEMENTED 2026-10-02, at `47f35f5`. Until then this section
+> described a protection the code did not have.** `control/gh.py::merge`
+> ran `gh pr merge <n> --repo <r> --squash --delete-branch`, with no head
+> anywhere in it: every other link in §4's table was bound to a commit and
+> the merge alone was bound to a pull request NUMBER. A push landing
+> between the gate's verdict and the call merged a head nothing had
+> judged, caught only by `HEAD_SHA_CHANGED` on the NEXT tick — after the
+> merge, and a merge is irreversible.
+>
+> It now sends exactly the call above, with `expected_head` a **required
+> keyword** so no call site can omit it, and the supervisor passes
+> `pr["headRefOid"]` — GitHub's observation under the merge transaction's
+> lock, never the forgeable `record["reviewed_head"]`. `--delete-branch`
+> has no REST equivalent on that endpoint, so the ref deletion is a
+> second, best-effort call; both are covered by the supervisor manifest's
+> existing `contents: write`, and no permission changed.
+>
+> **This is a COMPONENT test, not a deployed one.** 13 tests, proved able
+> to fail. That GitHub answers 409 to a stale `sha` is documented
+> behaviour and is **not** asserted anywhere here — no network call has
+> ever been made from this repository. The first real exercise is Stage 1.
+
 ---
 
 ## 6. Worker isolation — what is enforced, and what is not yet
@@ -524,11 +546,12 @@ that is documented.
 ## 7. The trusted revision
 
 > **TRUSTED APPARATUS REVISION:
-> `8be6a97867cb21c62830af9f8b02a34a7af0fcb5`**, on
+> `47f35f50fd9ebaebf6eadbd2902d53123ef1ed44`**, on
 > `wip/c05-1-persistence`. Full 40 hex, never a branch name.
 
 **`main` is disqualified, and this was checked rather than assumed.**
-`main` is `4eeaa7c`, 61 commits behind, and contains **no**
+`main` is `4eeaa7c`, **86 commits behind** (re-counted at the 2026-10-02
+re-pin; it was 61 at `8be6a97`), and contains **no**
 `live-gate.js`, **no** `ci-result.js`, **no** `reviewer-identity.js`,
 **no** `requirement-registry.js`, **no** `gate_evidence.py`, **no**
 `accessibility_services.py`. Exporting `main` would not fail closed — it
@@ -619,7 +642,8 @@ never `config.REPO_ROOT`, which is a mutable tree.
 | `Issues: write` is needed for `gh pr comment` | needs the App creation screen |
 | whether `Contents: write` is needed alongside `Pull requests: write` for merge | same |
 | whether bare `gh pr view` needs `Checks` | needs a token; added as verification step V11 |
-| which `gh pr merge` flag carries the expected head | a local hook refuses all `gh pr` invocations, including `--help`. REST specified instead |
+| ~~which `gh pr merge` flag carries the expected head~~ | **MOOT 2026-10-02.** The hook still refuses all `gh pr` invocations including `--help`, so the flag is still unverified — but nothing depends on it: §5 is now implemented with the REST call it always specified |
+| **whether GitHub's 409 on a stale `sha` behaves as documented** | **ADDED with the §5 implementation.** No network call has ever been made from this repository. First exercise is Stage 1 |
 | whether an App is already installed | needs App authentication |
 | live branch-protection state on 2026-10-02 | deliberately not re-queried; §3's BEFORE is the 2026-10-01 GET |
 | whether `Contents: write` is needed for the supervisor alongside `Pull requests: write` | **ADDED.** Flagged in the supervisor manifest's own `unverified` list and in §8, but §2's table marked only `Issues: write` |
@@ -870,14 +894,14 @@ part of any deployment stage.
 
 | | |
 |---|---|
-| **Actions** | §9 rows **0, 1, 2, 3a, 4, 5, 6, 6b, 6c, 7, 7b, 7c, 10, 10b** |
-| **What it changes** | creates a NEW throwaway GitHub repository; creates OS users `run002-sup` and `run002-wrk` and group `run002`; creates three GitHub Apps installed **on the throwaway only**; writes three private keys at `0400`; changes ownership/modes of `.runtime/`, the checkout and `.git/` per §6; creates a read-only export at `/opt/run-002/gate-<pin>`; flips `worker_entry`'s env pass-through to the built allow-list; changes `gh.py` to pass a per-role token |
-| **What it does NOT touch** | `main`; its branch protection; the Run 002 repository's settings; any product PR; any provider that charges |
+| **Actions** | §9 rows **0, 1, 2, 3a, 4, 5, 6, 6b, 6c, 7, 7b, 7c, 10, 10b**, preceded by **A0**, the pre-change capture added 2026-10-02 |
+| **What it changes** | writes a pre-change capture to `~/run-002-stage1-rollback/` (A0); creates a NEW throwaway GitHub repository; creates OS users `run002-sup` and `run002-wrk` and group `run002`; creates three GitHub Apps installed **on the throwaway only**; writes three private keys at `0400`; changes ownership/modes of `.runtime/`, the checkout and `.git/` per §6; creates a read-only export at `/opt/run-002/gate-<pin>`; creates **one probe branch and worktree** for V14 and pushes that branch to the Run 002 repository; flips `worker_entry`'s env pass-through to the built allow-list; changes `gh.py` to pass a per-role token — **the mechanism only**, see R1 |
+| **What it does NOT touch** | `main`; its branch protection; the Run 002 repository's **settings**; any product PR; any provider that charges. **CORRECTED 2026-10-02: it does write ONE branch to the Run 002 repository.** V14a commits a probe and pushes it, and the step used to say "a worker worktree of the real checkout" — which would have put that commit on whichever unmerged branch the worktree held. It is now a dedicated `probe/v14` branch and worktree created by the step and deleted by its undo. `ci.yml` triggers on `push` only for `branches: [main]`, so the push starts no workflow run. Leaving a write to `<PROD>` unmentioned in this row was the inaccuracy, not the write itself |
 | **Credentials — IT DOES CREATE THEM** | **CORRECTED.** Stage 1 creates **three real GitHub App private keys** and the installation tokens minted from them. What it does NOT need is the **eight product secrets** (`~/.config/run-002/secrets.env`) — those are Stage 3. "No secrets needed" earlier in this document meant the eight, and must not be read as "no credentials created". The keys are live credentials from the moment they exist: `0400`, owner `run002-sup`, outside the repository, and **revoked before replacement** if ever suspected |
-| **Cost** | **No paid provider call and no billable operation.** GitHub Apps, a repository and installation tokens are free. The cost is operator time and the keys above, not money |
+| **Cost — AND ONE UNVERIFIED ASSUMPTION** | **No paid provider call.** GitHub Apps, a repository and installation tokens are free; the cost is operator time and the keys above. **BUT "no billable operation" was overstated.** The procedure's A1 creates the throwaway as a **private** repository carrying a workflow that produces a check run named `ci`, and **V10 and V12 each require "let `ci` pass"** — so Stage 1 does run GitHub Actions there. Actions minutes are **free on public repositories and metered on private ones**. The account's remaining allowance **could not be read from this host**: `gh api /users/serina-mcfall/settings/billing/actions` returns 404 because the ambient token lacks the `user` scope, and refreshing that scope is itself an authorisation change outside this stage. **The bounded decision, yours:** create the throwaway **public** and the question disappears (one commit, a trivial workflow, no product code, no secret, no credential), or keep it **private** and accept a bound of **under ten runs of a workflow that must be trivial** — a single `ubuntu-latest` step that exits 0, explicitly **not** a copy of this repository's `.github/workflows/ci.yml`, which installs Playwright Chromium under `timeout-minutes: 25`. The V-steps need a check run *named* `ci` with a conclusion; they need nothing it does |
 | **Verification** | **V1–V14f on the throwaway**, ending at the 10b STOP gate. The four that matter most: **V3/V3b/V8** prove the permission split in both directions (the worker is refused a status, the gate can post one, the publisher is refused a merge); **V10** reproduces the F5 deadlock deliberately; **V13** runs the gate from the real read-only export — the step that would have caught both `WORKSPACE_MISMATCH` and the missing `ajv`; **V14a–f** confirm the git ownership under the real identities, including **V14d, which must SUCCEED** (objects and refs stay writable or no worker can commit) and **V14e, which CANNOT PASS and must be recorded not-applicable** |
 | **How to stop it** | it is a sequence of operator actions with a STOP gate at 10b. Stop at any step; nothing downstream is automatic |
-| **Rollback, in order** | revoke the three App private keys **before** issuing any replacement (a fresh key does not invalidate the old one); uninstall and delete the three Apps; delete the throwaway repository; `rm -rf /opt/run-002/gate-<pin>`; restore `.runtime/`, the checkout and `.git/` to `serina` ownership; `userdel run002-wrk run002-sup` and `groupdel run002`; revert the two code changes (actions 6 and 6b) with `git revert`. **No product data exists at any point, and nothing in Run 001 is touched** |
+| **Rollback, in order — EVERY ITEM NAMES SOMETHING THIS STAGE CREATED** | **REWRITTEN 2026-10-02 against A0's capture.** 1. Revoke the three App private keys **before** issuing any replacement (a fresh key does not invalidate the old one). 2. Uninstall and delete the three Apps. 3. Delete the throwaway repository. 4. `rm -rf /opt/run-002/gate-<pin>`. 5. Delete the V14 probe: `git push origin --delete probe/v14`, `git worktree remove --force <WS>/.probe-v14`, `git branch -D probe/v14` — and nothing else under `refs/heads`, checked against A0's `refs-BEFORE.txt`. 6. Restore ownership and modes **by replaying `~/run-002-stage1-rollback/ownership-BEFORE.txt`**, not by `chown -R serina:serina` — `chmod -R 0750` over a workspace is not invertible from the after-state, and not every path under `<WS>` was `serina:serina` to begin with. 7. `userdel run002-wrk run002-sup` and `groupdel run002` **only for the identities A0 recorded as ABSENT**, and **without `-r`**: the procedure said `userdel -r` while this row said plain `userdel`, and `-r` against a pre-existing account deletes a home directory this stage never created. 8. Revert the two code changes (actions 6 and 6b) with `git revert`. **No product data exists at any point, and nothing in Run 001 is touched** |
 | **What it buys** | it converts every unverified row in §8 into a measured answer on a repository that can be deleted, and it is what **closes C-22** |
 | **C-22 closure — PRECISELY** | **CORRECTED.** C-22 closes when `.runtime/` is `0700` owned by a user the workers are not, **and V14a–f have been run and passed**. Approval does not close it; the verified ownership change does. **V14e cannot pass** under the single `run002-wrk` identity this section specifies — record it NOT APPLICABLE. So worker-to-worker reachability survives Stage 1 as a separate unresolved residual, and C-22's closure must be claimed only for what it covers: the records, evidence and credentials that decide a worker's own merge |
 
@@ -888,6 +912,7 @@ part of any deployment stage.
 | **Actions** | §9 rows **10c, 11a, 11, 12** |
 | **Affected resources** | the three Apps installed on `serina-mcfall/wellbeing-run-002`; **branch protection on `main`** |
 | **The change that matters** | `required_approving_review_count` **1 → 0**, plus a new required context `run-002/independent-review` and `enforce_admins` false → true. **This is the hinge: `main` moves from "a human approved this" to "the gate approved this"** |
+| **WHAT IT CREATES THE MOMENT IT LANDS — ADDED 2026-10-02** | **Nothing in the running system posts that context.** `control/gate_invoker.py` and `control/publisher.py` are built and deliberately unwired — `check-templates.py` `E2` asserts nothing in `control/`, `bin/`, `apparatus/` or `experiment/github-app/` imports the transport — so publication is a hand-run operator step (procedure C5–C6). From the moment this PUT lands, GitHub refuses **every** merge, including the Supervisor App's, until a human posts a status for that exact head. That is V10's F5 deadlock arriving as ordinary operation. It is tracked as **R3** in `experiment/RUN-003-BACKLOG.md` and is **required before Stage 3** |
 | **Verification** | 11a captures live protection to a file BEFORE the PUT — that file, not the 2026-10-01 `branch-protection-BEFORE.json`, is the rollback artefact. Then `ctl preflight`, then a separate `gh api .../protection` read confirming by eye that the context is present and the count is 0, because the gate checks neither |
 | **Rollback** | `PUT` the bytes captured at 11a. Uninstall the three Apps. `enforce_admins` returning to `false` restores your ability to merge by hand |
 | **Prerequisite** | **Stage 1 complete, with every V-step passed at the 10b STOP gate** |
@@ -903,7 +928,7 @@ part of any deployment stage.
 | **Costs money** | yes — this is the first stage that does |
 | **Verification** | all 24 governed gates green in a real `preflight.json`; the eleven Protocol v2 §"Preflight" conditions no gate checks (Phase 3), **including the contradiction-audit PASS, which is the binding one**; a final clean preflight on a quiet host immediately before start |
 | **Rollback** | the preflight is re-runnable. **The 24-hour run is not reversible** — Protocol v2's clock never pauses, and an early stop must never be reported as a completed run |
-| **Prerequisite** | Stage 2 complete; **C-22 closed by Stage 1's UID split, verified under the real identities**; the audit marked PASS |
+| **Prerequisite** | Stage 2 complete; **C-22 closed by Stage 1's UID split, verified under the real identities**; the audit marked PASS; and **R1, R2 and R3 resolved** — per-role `gh` call sites, a caller for `ensure_token`, and a decision on who invokes the gate and publisher. Without R2 every token dies one hour into a twenty-four-hour run; without R3 nothing posts the required status and no merge succeeds at all. All three are in `experiment/RUN-003-BACKLOG.md` under "NOT deferred" |
 
 ---
 

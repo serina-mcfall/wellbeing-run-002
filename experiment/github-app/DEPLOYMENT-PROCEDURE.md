@@ -66,8 +66,10 @@ harm, not merely inconvenience.
       Every V-step's "who runs it" column is `human`.
 - [ ] The trusted revision confirmed or re-stated **at approval time**,
       not inherited from the document:
-      `b2df44fb82a4b83fd5a3a4277cd6a69863e0019f`. Below it is written
-      `<PIN>`.
+      `47f35f50fd9ebaebf6eadbd2902d53123ef1ed44`. Below it is written
+      `<PIN>`. **This line was two re-pins stale on 2026-10-02** — it
+      still named `b2df44f` after the proposal's §9.5 had moved twice.
+      Read the pin out of §9.5, never out of this line.
 
 **Notation.** `<PIN>` the 40-hex trusted revision · `<THROW>` the
 throwaway repository `owner/name` · `<PROD>`
@@ -85,13 +87,82 @@ exit code instead.
 
 ## 2. Phase A — local, reversible, no GitHub object exists yet
 
+### A0. Capture what this stage is about to change — **do this first** *(GATE)*
+
+**ADDED 2026-10-02. Nothing else in Phase A may run before it.**
+
+D2 captures live branch protection *before* the PUT that overwrites it,
+and those bytes are what makes Stage 2 reversible. The host side had no
+equivalent, and the two undos below asked for a restore from bytes nobody
+had taken: A2 created two accounts without first asking whether they
+already existed, and A5 re-owned a whole workspace whose previous modes
+were recorded nowhere. **A rollback that cannot name the prior state is
+not a rollback.**
+
+The capture lives **outside `<WS>`**, because A5 re-owns `<WS>`.
+
+```
+mkdir -p ~/run-002-stage1-rollback
+R=~/run-002-stage1-rollback
+
+# 1. Do the identities already exist? Answered BEFORE anything creates them.
+{ getent group  run002     || echo 'ABSENT group run002'
+  getent passwd run002-sup || echo 'ABSENT user run002-sup'
+  getent passwd run002-wrk || echo 'ABSENT user run002-wrk'
+} > $R/identities-BEFORE.txt
+
+# 2. Mode, owner and group of every path A5's `-R` reaches (~6,900 lines).
+find <WS> -printf '%m %u %g %p\n' > $R/ownership-BEFORE.txt
+
+# 3. The refs and worktrees V14a is about to commit on and push.
+git -C <WS> worktree list > $R/worktrees-BEFORE.txt
+git -C <WS> for-each-ref --format='%(objectname) %(refname)' refs/heads \
+  > $R/refs-BEFORE.txt
+```
+
+→ **Verify:** all four files exist and are non-empty;
+`wc -l $R/ownership-BEFORE.txt` is within a few of `find <WS> | wc -l`.
+→ **If `identities-BEFORE.txt` does NOT say ABSENT for all three:** the
+account or group is **not this stage's to create or delete**. Do not
+create it, and strike it from the rollback — `userdel` on a pre-existing
+account destroys someone else's home directory.
+→ **This file is how A2's and A5's undos are executed.** They are no
+longer "restore the previous modes"; they are a loop over these bytes.
+→ **Known limit:** the restore loop below splits on whitespace, so a path
+containing a newline would not round-trip. None exists in `<WS>`.
+
 ### A1. Create the throwaway repository *(action 0, DEPLOY)*
 
-Create a private repository under the operator's own account, e.g.
+Create a repository under the operator's own account, e.g.
 `serina-mcfall/run-002-isolation-probe`. Give it a `main` with one
 commit and a workflow that produces a check run named `ci`.
 
-→ **Verify:** `gh repo view <THROW> --json name` returns the name.
+**VISIBILITY IS A COST DECISION, NOT A DETAIL.** This step used to say
+"private" with no further comment, and §13's cost row said Stage 1 has
+"no billable operation". Those two cannot both be relied on: **GitHub
+Actions minutes are free on public repositories and metered on private
+ones**, and V10 and V12 each require "let `ci` pass" on this repository,
+so Stage 1 *does* run Actions here. The account's remaining quota could
+not be read from this host — `gh api /users/<owner>/settings/billing/actions`
+returns 404 because the ambient token lacks the `user` scope, and
+refreshing that scope is itself an authorisation change outside this
+stage. So the quota is **unverified**, and the choice is the operator's:
+
+| | |
+|---|---|
+| **Public** | Actions minutes are free. Nothing but one commit and a trivial workflow is ever in this repository — no product code, no secrets, no credential. Removes the question rather than bounding it |
+| **Private** | metered against the account's monthly allowance, which this host cannot read. Bounded by the workflow being trivial and by the run count below |
+
+**Whichever is chosen, the `ci` workflow here must be TRIVIAL** — a
+single `ubuntu-latest` step that exits 0 — and must **not** be a copy of
+`<WS>/.github/workflows/ci.yml`, which installs Playwright Chromium and
+carries `timeout-minutes: 25`. The V-steps need a check run *named* `ci`
+with a conclusion; they need nothing it does. Expect **under ten runs**
+across V3c, V7, V8, V9, V10 and V12 — minutes, not hours.
+
+→ **Verify:** `gh repo view <THROW> --json name,visibility` returns the
+name and the visibility you chose. Then `gh run list --repo <THROW>
+--limit 1` after the first PR, to see what a run actually costs in time.
 → **If failed:** nothing else has happened. Fix and retry.
 → **Undo:** `gh repo delete <THROW>`.
 
@@ -104,11 +175,18 @@ sudo useradd -m -g run002 run002-wrk
 ```
 
 → **Verify:** `id run002-sup` and `id run002-wrk` both resolve, both in
-group `run002`.
+group `run002`. **`id` run after creation cannot tell "I made this" from
+"this was already here"** — that is what A0's `identities-BEFORE.txt`
+answers, and it must say ABSENT for all three before this step runs.
 → **If failed:** DO NOT PROCEED to action 5. Every ownership claim below
 depends on these two identities existing and being distinct.
-→ **Undo:** `sudo userdel -r run002-wrk; sudo userdel -r run002-sup;
-sudo groupdel run002`.
+→ **Undo, for the identities A0 recorded as ABSENT and no others:**
+`sudo userdel run002-wrk; sudo userdel run002-sup; sudo groupdel run002`.
+**Without `-r`, deliberately.** This document used to say `userdel -r`
+while §13's rollback said plain `userdel`; `-r` deletes the home
+directory, so against an account this stage did not create it destroys
+data the stage never owned. Remove the home directories by hand
+afterwards if A0 shows the accounts were absent and you want them gone.
 
 ### A3. Create the three Apps *(action 2, DEPLOY — UI)*
 
@@ -174,8 +252,20 @@ paths git must write, **not** how `run002-wrk` behaves against files
 owned by `run002-sup`.
 → **If failed:** DO NOT PROCEED to GitHub. Fix the OS boundary first;
 this is runbook step 4's gate.
-→ **Undo:** `sudo chown -R serina:serina <WS>` and restore the previous
-modes.
+→ **Undo — from A0's capture, not from memory:**
+
+```
+while read -r mode owner group path; do
+  sudo chown "$owner:$group" "$path" && sudo chmod "$mode" "$path"
+done < ~/run-002-stage1-rollback/ownership-BEFORE.txt
+```
+
+This replaces "`sudo chown -R serina:serina <WS>` and restore the
+previous modes", which named a restore nobody had the bytes for —
+`chmod -R 0750` over a workspace is not invertible from the after-state,
+and not every path under `<WS>` was `serina:serina` to begin with.
+→ **Verify the undo:** re-run A0's `find` and diff it against
+`ownership-BEFORE.txt`; expect no output.
 
 ### A6. Decide `origin` SSH → HTTPS *(action 6c, DECISION)*
 
@@ -361,18 +451,52 @@ call the low-level `resolveTrustedHeadSha(identity, { repoRoot })` and
 
 ### B7. The corrected git row, under the REAL identities — V14
 
-As `run002-wrk`, in a worker worktree of the real checkout, after A5:
+As `run002-wrk`, after A5, in a worktree **created for this probe**:
+
+**ON A DEDICATED BRANCH, NOT AN EXISTING ONE. CORRECTED 2026-10-02.** This
+step used to say "in a worker worktree of the real checkout", and `add -A`
++ `commit` + `push origin HEAD` there would put a probe commit on whichever
+real branch that worktree held — eleven of them carry unmerged apparatus
+work — and push it to `<PROD>`. A probe must not leave a commit on a branch
+somebody is still using, and the rollback must be able to name exactly what
+it created.
 
 ```
-sudo -u run002-wrk git -C <worktree> add -A
-sudo -u run002-wrk git -C <worktree> commit -m 'v14 probe'
-sudo -u run002-wrk git -C <worktree> push origin HEAD
+# Created by run002-sup, because that is who creates a worker's worktree
+# in the shipping arrangement - then handed over by whichever mechanism
+# the deployment chose for real worktrees. `control/worker_git.py`'s "WHO
+# MAKES THE CLONE" note records that the code takes no position and cannot
+# chown anything itself: it is either a root helper at dispatch, or a
+# setgid group-writable root. IF NO MECHANISM HAS BEEN CHOSEN, THIS IS THE
+# STEP THAT FORCES THE CHOICE - and V14d is what proves it works.
+sudo -u run002-sup git -C <WS> worktree add -b probe/v14 <WS>/.probe-v14
+sudo chown -R run002-wrk:run002 <WS>/.probe-v14 <WS>/.git/worktrees/.probe-v14
+sudo chmod -R 0700 <WS>/.probe-v14
+sudo -u run002-wrk sh -c 'echo probe > <WS>/.probe-v14/V14-PROBE'
+sudo -u run002-wrk git -C <WS>/.probe-v14 add V14-PROBE
+sudo -u run002-wrk git -C <WS>/.probe-v14 commit -m 'v14 probe'
+sudo -u run002-wrk git -C <WS>/.probe-v14 push -u origin probe/v14
 sudo -u run002-wrk sh -c 'echo x > <WS>/.git/hooks/pre-commit'
 sudo -u run002-wrk cat <WS>/.git/worktrees/gate-<PIN>/HEAD
 ```
 
+**This pushes one branch to `<PROD>`, the production repository.** It is
+the only write Stage 1 makes there. It does not touch `main`, its
+protection, or any pull request, and `ci.yml` triggers on `push` only for
+`branches: [main]`, so it starts no workflow run. §13's "what it does NOT
+touch" row says so explicitly rather than leaving the push unmentioned.
+
 → **Verify:** the three worker operations **succeed**; both attempts on
 the protected paths **fail** with `Permission denied`.
+→ **Undo, and it is exactly four things this stage created:**
+`git push origin --delete probe/v14` · `git -C <WS> worktree remove
+--force <WS>/.probe-v14` · `git -C <WS> branch -D probe/v14` ·
+`rm -f <WS>/.git/hooks/pre-commit` **only if A0's capture shows none was
+there** — the write above is expected to be refused, but if the mode was
+looser than §6 assumes it will have succeeded. Then diff
+`git -C <WS> worktree list` and `git -C <WS> for-each-ref refs/heads`
+against A0's `worktrees-BEFORE.txt` and `refs-BEFORE.txt` — expect no
+difference. **No pre-existing branch, worktree or ref is touched.**
 → **Why the last two:** `hooks/` is code the Supervisor's own git runs,
 and the export's gitdir `HEAD` is the proof
 `gate_invoker.export_revision()` reads to establish the export is at the
@@ -896,6 +1020,15 @@ something the Supervisor can do. **Decide deliberately** whether to keep
 it that way for the run, or to re-aim `E2` at a narrower claim — the same
 way `E` was re-aimed rather than relaxed.
 
+**TRACKED AS R3 FROM 2026-10-02, and it is not optional.** Phase D makes
+`run-002/independent-review` a required context on `main` with
+`enforce_admins: true`. From that moment GitHub refuses every merge —
+including the Supervisor App's — until a human posts a status for that
+exact head. The frozen acceptance property is "no human step". **G1 is
+R1 and G5 is R2** in `experiment/RUN-003-BACKLOG.md`; all three are
+"NOT deferred — REQUIRED RUN 002 WIRING", and none of them blocks
+Stage 1.
+
 **G7 — `gh.git()` has no role, so git operations never carry a token.**
 `git push` over HTTPS authenticates through git's credential helper, not
 through `GH_TOKEN` on the `gh` child. The procedure does not say to run
@@ -967,7 +1100,7 @@ governance acts. **Run V11 before anything depends on either answer.**
 | **a credential is suspected** | revoke the App's private key in GitHub settings **BEFORE** issuing a new one — a fresh key does not invalidate the old one. Then re-mint every installation token, because the old ones stay valid for their full hour |
 | **a token leaked into a transcript** | say so immediately and lead with it; state what leaked and how long it stays valid; revoke server-side **before** re-authenticating, because a global sign-out also kills any token just issued |
 | **a worker cannot commit after A5** | the git row is too tight. `.git/objects/` and `.git/refs/heads/` must be writable by `run002-wrk`; only `hooks/`, `config` and the export's gitdir may be withheld. Measured, not reasoned |
-| **the whole arrangement is wrong** | uninstall all three Apps, apply D2's bytes, delete the export, restore the previous ownership of `.runtime/` and the checkout. No product data is involved at any point |
+| **the whole arrangement is wrong** | uninstall all three Apps, apply D2's bytes, delete the export, restore ownership and modes **from A0's `ownership-BEFORE.txt`** (not from memory), remove the V14 probe branch and worktree, and delete only the identities A0 recorded as ABSENT. No product data is involved at any point |
 
 **No step in this procedure is irreversible**, and nothing here touches
 Run 001.

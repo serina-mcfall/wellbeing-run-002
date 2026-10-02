@@ -611,7 +611,7 @@ created on GitHub, and so the F5 deadlock is resolved before it can bite.
 
 | # | Step | Who | Authorisation | Rollback |
 |---|---|---|---|---|
-| 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `8be6a97867cb21c62830af9f8b02a34a7af0fcb5`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
+| 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `47f35f50fd9ebaebf6eadbd2902d53123ef1ed44`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
 | **0b** | ~~**Push `wip/c05-1-persistence`** so the pinned revision exists on `origin`.~~ **DONE 2026-10-02** — the branch is pushed, and each re-pin is pushed with it; `44e1eb5` is reachable from `origin/wip/c05-1-persistence` and the pin is independently fetchable. **Re-check this after any re-pin** — a pin that only exists locally cannot be exported by anyone else. | done | repo write | n/a — pushing an existing local commit |
 | 1 | Create OS users `run002-sup`, `run002-wrk` and group `run002`. Set ownership and modes per §3.3 and §9.4. | human | root | `userdel run002-sup run002-wrk; groupdel run002`; restore ownership to `serina` |
 | 2 | Create the throwaway probe repository. | human | GitHub account | delete the repository |
@@ -971,7 +971,7 @@ Four things make this enforceable rather than aspirational:
 ### 9.5 THE TRUSTED APPARATUS REVISION
 
 > **TRUSTED APPARATUS REVISION:
-> `8be6a97867cb21c62830af9f8b02a34a7af0fcb5`**
+> `47f35f50fd9ebaebf6eadbd2902d53123ef1ed44`**
 > on `wip/c05-1-persistence`. Full 40 hex, never a branch name.
 
 **This supersedes §41.7's `4ae1488`, which is 16 commits stale.** It also
@@ -985,18 +985,18 @@ then re-checked independently by the integration owner at the final pin:
 
 ```
 $ git rev-parse HEAD
-8be6a97867cb21c62830af9f8b02a34a7af0fcb5
+47f35f50fd9ebaebf6eadbd2902d53123ef1ed44
 $ git rev-parse main origin/main
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
 $ git merge-base main HEAD
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
 $ git rev-list --count HEAD..main     ->  0      # main is a strict ancestor
-$ git rev-list --count main..HEAD     -> 61      # 61 commits of apparatus
+$ git rev-list --count main..HEAD     -> 86      # 86 commits of apparatus
 $ git diff --shortstat main..HEAD
-  154 files changed, 51645 insertions(+), 444 deletions(-)
+  183 files changed, 64707 insertions(+), 494 deletions(-)
 $ git ls-tree -r --name-only main -- apparatus control | wc -l  -> 50
-$ git ls-tree -r --name-only HEAD -- apparatus control | wc -l  -> 88
+$ git ls-tree -r --name-only HEAD -- apparatus control | wc -l  -> 94
 ```
 
 Per-file, `git cat-file -e <ref>:<path>`:
@@ -1047,6 +1047,15 @@ of them demanded by the check rather than noticed by a person**, which is
 the argument for the check. The drift set itself was widened in the same
 session to include `bin/` and `.github/`, so the figure it compares is now
 larger than it was for either earlier pin.
+
+**RE-PINNED ONCE MORE 2026-10-02, to
+`47f35f50fd9ebaebf6eadbd2902d53123ef1ed44`.** One commit moved code inside
+the drift set: the expected-head merge binding (`control/gh.py`,
+`control/supervisor.py`) that §5 had specified and the code had not
+implemented. `F2` went red naming `control/gh.py`. Again the check noticed,
+not a person. `main` is still a strict ancestor — `git rev-list --count
+HEAD..main` is 0, `main` and `origin/main` are both `4eeaa7c`, and
+`main..HEAD` is now 86 commits, 183 files, +64,707/-494.
 
 That is not an embarrassment, it is the thing the check exists to catch,
 and it exposed a real defect in the FIRST version of the check, which
