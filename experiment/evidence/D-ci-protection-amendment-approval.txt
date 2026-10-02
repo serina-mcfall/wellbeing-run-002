@@ -1,0 +1,94 @@
+RUN 002 — APPROVED DECISION D: THE CI-PROTECTION AMENDMENT
+==========================================================
+Recorded 2026-10-02 by the integration owner.
+Branch wip/c05-1-persistence. Approved at HEAD 60a6acb, pin b2df44f.
+
+WHY THIS FILE EXISTS
+--------------------
+Authorisations in Run 002 are recorded VERBATIM, because the wording is
+the ceiling on scope. An approval paraphrased into a plan is an approval
+nobody can check afterwards. This is the operator's text, unedited.
+
+
+THE AUTHORISATION, VERBATIM
+---------------------------
+> This explicitly approves D: record and implement the Run-002
+> CI-protection amendment described in the previous prompt. Ordinary
+> product PRs cannot change trusted CI or its validation machinery; those
+> changes require a separately reviewed apparatus amendment.
+
+
+WHAT "THE PREVIOUS PROMPT" REFERS TO
+------------------------------------
+Decision D as written in experiment/C-20a-APPROVAL-PACKAGE.md §9, "THE
+EXACT APPROVAL REQUEST":
+
+> **D** | **The trusted-CI protected path set** (§6) — wire
+> `ci_protected_paths.py` into the merge gate, so a product PR touching
+> what CI executes needs a separately reviewed apparatus amendment.
+> Recommended yes | the modified-workflow gap stays open and UNRESOLVED
+
+
+WHAT THIS APPROVES
+------------------
+1. RECORDING the amendment as a governed Run 002 rule.
+2. IMPLEMENTING it: connecting control/ci_protected_paths.py to the
+   actual merge path so the rule has force.
+3. The rule itself: a product pull request may not change the trusted CI
+   workflow or its validation machinery. Such a change is permitted
+   through a SEPARATELY REVIEWED APPARATUS AMENDMENT.
+
+THE PROTECTED SET, derived from what .github/workflows/ci.yml actually
+executes, with the derivation checked against the workflow by test:
+
+    .github/workflows/   the definition itself
+    apparatus/           npm test, and node apparatus/pr-evidence/validate.js
+    control/             python -m unittest discover -s tests imports it
+    tests/               the suite IS the assertions CI makes
+    scripts/             python scripts/check_no_secrets.py
+    protocol/            validate.js reads PR-EVIDENCE-V2.schema.json
+
+evidence/ is deliberately NOT protected: it holds submitted packages, the
+thing CI judges rather than part of what judges.
+
+
+WHAT THIS DOES NOT APPROVE — THE CEILING
+----------------------------------------
+This is a REPOSITORY-LEVEL RULE enforced by Run 002's own merge path. It
+is NOT:
+
+  * a branch-protection change. Nothing about GitHub's settings changes.
+  * a deployment. No App, credential, host user or ownership change.
+  * a permanent ban on changing CI. The amendment route exists precisely
+    so CI can change, under separate review.
+  * approval of decisions A, B or C in §9. Those remain open.
+
+The operator's own framing is explicit that the amendment route exists:
+"those changes require a separately reviewed apparatus amendment" — not
+"those changes are forbidden".
+
+
+THE GAP IT CLOSES, AND THE ONE IT DOES NOT
+------------------------------------------
+C-23 reproduced three ways a product pull request could satisfy the
+required `ci` check without CI passing. Two were closed in code (a SKIPPED
+or NEUTRAL conclusion accepted as green; a commit STATUS standing in for a
+check run). The third - a workflow MODIFIED in the pull request's own
+branch, still emitting a green run named `ci` - could not be closed
+locally and is what this amendment addresses.
+
+Expected-App pinning does NOT address it and was wrongly offered as a
+remedy once: a modified workflow runs THROUGH GitHub Actions, so its check
+run carries app_id 15368 legitimately and pinning accepts it. The two
+mechanisms address different threats and neither substitutes for the
+other.
+
+
+STATUS AT RECORDING
+-------------------
+control/ci_protected_paths.py exists with 12 tests and 4 detected
+mutations, and was NOT wired - a test pinned that unwired status while the
+rule was a proposal. Implementation of the wiring begins with this
+approval.
+
+T+00 remains NOT_STARTED. C-22 remains open.

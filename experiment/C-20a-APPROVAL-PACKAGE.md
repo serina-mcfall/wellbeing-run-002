@@ -799,3 +799,92 @@ requires otherwise.
 The first is settled as the proposal's design and is listed here for
 visibility, not as an open question. The second is a required action with a
 recommended answer — decision C in §9.
+
+---
+
+## 13. THE STAGED DEPLOYMENT REQUEST — three stages, approved separately
+
+**ADDED 2026-10-02.** §9 is one list of twenty actions. That is the right
+shape for *what must happen*; it is the wrong shape for *what to approve*,
+because it bundles reversible work on a throwaway repository with a
+protection change on `main` and with the paid run. **These are three
+different risks and they are now three different approvals.**
+
+**DECISION D IS ALREADY APPROVED** and is recorded verbatim at
+`experiment/evidence/D-ci-protection-amendment-approval.txt`. It is a
+repository-level rule enforced by Run 002's own merge path. It is **not**
+part of any stage below: it touches no host, no credential and no GitHub
+setting.
+
+| Stage | What it is | Touches `main`? | Costs money? | Reversible? |
+|---|---|---|---|---|
+| **1** | Host isolation + throwaway repository | **no** | no | yes, entirely |
+| **2** | The Run 002 repository and its branch protection | **YES** | no | yes, via the 11a capture |
+| **3** | Paid preflight, then the 24-hour launch | yes | **YES** | the run is not |
+
+**Stage 2 cannot be approved before Stage 1's verification passes**, and
+Stage 3 cannot be approved before Stage 2's. That is not ceremony: V13 and
+V14 only exist inside Stage 1, and they are what establish that the gate
+can run at all and that the git ownership permits a worker to commit.
+
+---
+
+### STAGE 1 — host isolation and the throwaway repository
+
+**This is the stage to approve now.** Nothing in it touches
+`serina-mcfall/wellbeing-run-002`, changes any protection, publishes any
+status, or spends anything.
+
+| | |
+|---|---|
+| **Actions** | §9 rows **0, 1, 2, 3a, 4, 5, 6, 6b, 6c, 7, 7b, 7c, 8, 9, 10, 10b** |
+| **Affected resources** | a NEW throwaway GitHub repository; two NEW OS users `run002-sup` and `run002-wrk` and group `run002`; three NEW GitHub Apps installed **on the throwaway only**; three private keys at `0400`; ownership and modes of `.runtime/`, the checkout, and `.git/` per §6's corrected table; a read-only export at `/opt/run-002/gate-<pin>` |
+| **NOT touched** | `main`, its branch protection, the Run 002 repository's settings, any product PR, any provider that charges |
+| **Verification** | **V1–V14 on the throwaway**, ending at the 10b STOP gate. V10 reproduces the F5 deadlock deliberately. **V13** runs the gate from a real read-only export — the step that would have caught the `WORKSPACE_MISMATCH` and `ajv` traps. **V14** confirms the corrected git ownership under the REAL identities, which no local test can do |
+| **Rollback** | delete the throwaway repository; uninstall and delete the three Apps; revoke the keys **before** issuing any replacement; `userdel` the two users; restore `.runtime/` and checkout ownership to `serina`; `rm -rf` the export. **No product data exists at any point in this stage** |
+| **Prerequisites** | the eight secrets are NOT required for Stage 1. Nothing here reads them |
+
+**What Stage 1 buys you.** It converts every "unverified" row in §8 into a
+measured answer, on a repository that can be deleted — including whether
+GitHub honours `app_id` pinning (V3c), whether the worker App can be
+refused a status write (V3), whether the publisher can be refused a merge
+(V8), and whether the export can run the gate at all (V13).
+
+---
+
+### STAGE 2 — the Run 002 repository and its branch protection
+
+| | |
+|---|---|
+| **Actions** | §9 rows **10c, 11a, 11, 12** |
+| **Affected resources** | the three Apps installed on `serina-mcfall/wellbeing-run-002`; **branch protection on `main`** |
+| **The change that matters** | `required_approving_review_count` **1 → 0**, plus a new required context `run-002/independent-review` and `enforce_admins` false → true. **This is the hinge: `main` moves from "a human approved this" to "the gate approved this"** |
+| **Verification** | 11a captures live protection to a file BEFORE the PUT — that file, not the 2026-10-01 `branch-protection-BEFORE.json`, is the rollback artefact. Then `ctl preflight`, then a separate `gh api .../protection` read confirming by eye that the context is present and the count is 0, because the gate checks neither |
+| **Rollback** | `PUT` the bytes captured at 11a. Uninstall the three Apps. `enforce_admins` returning to `false` restores your ability to merge by hand |
+| **Prerequisite** | **Stage 1 complete, with every V-step passed at the 10b STOP gate** |
+
+---
+
+### STAGE 3 — paid preflight, then the 24-hour launch
+
+| | |
+|---|---|
+| **Actions** | provision the eight secrets; run the complete real `ctl preflight`; the remaining Phase 3 conditions; then T+00 |
+| **Affected resources** | paid provider calls (Claude, Codex, Grok heartbeats); a REAL Discord notification to a phone; durable ledger writes; live product workers; real merges to `main` |
+| **Costs money** | yes — this is the first stage that does |
+| **Verification** | all 24 governed gates green in a real `preflight.json`; the eleven Protocol v2 §"Preflight" conditions no gate checks (Phase 3), **including the contradiction-audit PASS, which is the binding one**; a final clean preflight on a quiet host immediately before start |
+| **Rollback** | the preflight is re-runnable. **The 24-hour run is not reversible** — Protocol v2's clock never pauses, and an early stop must never be reported as a completed run |
+| **Prerequisite** | Stage 2 complete; **C-22 closed by Stage 1's UID split, verified under the real identities**; the audit marked PASS |
+
+---
+
+### WHAT IS STILL TRUE OF ALL THREE
+
+**C-22 is open until Stage 1's isolation is deployed AND verified under
+the real OS identities.** Everything built locally is tamper evidence, not
+prevention: the ledger has no hash chain and the same UID can append to
+it. Stage 1 is what closes it; nothing before Stage 1 can.
+
+**The five-hour standalone rehearsal remains waived** (C-18a). Every
+functional and deployed integration check it did not cover remains
+required — V1–V14, the C-04a multi-cycle verification, and Phase 3.
