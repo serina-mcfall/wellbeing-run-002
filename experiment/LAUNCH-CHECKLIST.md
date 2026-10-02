@@ -9,8 +9,8 @@ document, **they win**. This checklist orders and enumerates; it decides nothing
 T+00 remains **NOT_STARTED** (`experiment/TIMELINE.md`). Nothing in this
 document authorises launch, and no partial completion of it does either.
 
-**Session state as of 2026-10-02: `C05-3a-SESSION-HANDOVER.md` §48**, which
-supersedes §47, §46, §45, §44, §43 and §42. §41 and §16 are stale. Branch
+**Session state as of 2026-10-02: `C05-3a-SESSION-HANDOVER.md` §49**, which
+supersedes §48, §47, §46, §45, §44, §43 and §42. §41 and §16 are stale. Branch
 `wip/c05-1-persistence`, HEAD **`8be6a97`** plus documentation commits.
 Verification: **2,688 Python tests, 259 apparatus tests**, both exit 0.
 **Trusted pin re-pinned to `8be6a97867cb21c62830af9f8b02a34a7af0fcb5`** —

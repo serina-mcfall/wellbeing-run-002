@@ -9,7 +9,7 @@ the decision.
 |---|---|
 | Date | 2026-10-02 |
 | Branch | `wip/c05-1-persistence` |
-| State | **NOTHING CREATED. NOTHING CHANGED. NOTHING PUBLISHED.** |
+| State | **NOTHING CREATED. NOTHING CHANGED. NOTHING PUBLISHED.** Stage 1 is PREPARED, **not approved** |
 | Supersedes | handover §41.7's permission set, entirely |
 | Also supersedes | the proposal's §7 R2 and runbook step 11, both of which say the publisher "does not exist". It exists — `control/publisher.py` — and so does its transport (`status_transport.py`). **F7 is closed.** What replaces it is narrower and still true: no request has ever been sent |
 | Revised | 2026-10-02, across three passes: an independent review of this document, an adversarial review of the code it describes, and an attempt to actually RUN the export. Every change is marked **CORRECTED**, **ADDED** or **UPDATED** in place. Four change the deployment sequence: throwaway-first installation (3a/10c), the protection capture (11a), the dependency install (7b), and `gh.py`'s token (6b) |
@@ -859,18 +859,27 @@ can run at all and that the git ownership permits a worker to commit.
 
 ### STAGE 1 — host isolation and the throwaway repository
 
-**READY FOR APPROVAL. Its prerequisites are complete.**
+> **STATUS: PREPARED, NOT APPROVED. NOTHING IN IT HAS BEEN DONE.**
+> Its prerequisites are complete, so it is ready to be *decided*. No App,
+> credential, OS user, ownership change, export or repository exists.
+
+**Only decision D has been approved so far** — the CI-protection amendment,
+recorded verbatim at `experiment/evidence/D-ci-protection-amendment-approval.txt`.
+D is a repository-level rule, is wired into the merge path, and is **not**
+part of any deployment stage.
 
 | | |
 |---|---|
 | **Actions** | §9 rows **0, 1, 2, 3a, 4, 5, 6, 6b, 6c, 7, 7b, 7c, 10, 10b** |
 | **What it changes** | creates a NEW throwaway GitHub repository; creates OS users `run002-sup` and `run002-wrk` and group `run002`; creates three GitHub Apps installed **on the throwaway only**; writes three private keys at `0400`; changes ownership/modes of `.runtime/`, the checkout and `.git/` per §6; creates a read-only export at `/opt/run-002/gate-<pin>`; flips `worker_entry`'s env pass-through to the built allow-list; changes `gh.py` to pass a per-role token |
-| **What it does NOT touch** | `main`; its branch protection; the Run 002 repository's settings; any product PR; any provider that charges. **No secrets needed — those are Stage 3** |
-| **Cost** | **nothing.** No paid call, no provider, no billable operation |
+| **What it does NOT touch** | `main`; its branch protection; the Run 002 repository's settings; any product PR; any provider that charges |
+| **Credentials — IT DOES CREATE THEM** | **CORRECTED.** Stage 1 creates **three real GitHub App private keys** and the installation tokens minted from them. What it does NOT need is the **eight product secrets** (`~/.config/run-002/secrets.env`) — those are Stage 3. "No secrets needed" earlier in this document meant the eight, and must not be read as "no credentials created". The keys are live credentials from the moment they exist: `0400`, owner `run002-sup`, outside the repository, and **revoked before replacement** if ever suspected |
+| **Cost** | **No paid provider call and no billable operation.** GitHub Apps, a repository and installation tokens are free. The cost is operator time and the keys above, not money |
 | **Verification** | **V1–V14f on the throwaway**, ending at the 10b STOP gate. The four that matter most: **V3/V3b/V8** prove the permission split in both directions (the worker is refused a status, the gate can post one, the publisher is refused a merge); **V10** reproduces the F5 deadlock deliberately; **V13** runs the gate from the real read-only export — the step that would have caught both `WORKSPACE_MISMATCH` and the missing `ajv`; **V14a–f** confirm the git ownership under the real identities, including **V14d, which must SUCCEED** (objects and refs stay writable or no worker can commit) and **V14e, which CANNOT PASS and must be recorded not-applicable** |
 | **How to stop it** | it is a sequence of operator actions with a STOP gate at 10b. Stop at any step; nothing downstream is automatic |
 | **Rollback, in order** | revoke the three App private keys **before** issuing any replacement (a fresh key does not invalidate the old one); uninstall and delete the three Apps; delete the throwaway repository; `rm -rf /opt/run-002/gate-<pin>`; restore `.runtime/`, the checkout and `.git/` to `serina` ownership; `userdel run002-wrk run002-sup` and `groupdel run002`; revert the two code changes (actions 6 and 6b) with `git revert`. **No product data exists at any point, and nothing in Run 001 is touched** |
-| **What it buys** | it closes **C-22**, the only remaining structural launch blocker, and converts every unverified row in §8 into a measured answer on a repository that can be deleted |
+| **What it buys** | it converts every unverified row in §8 into a measured answer on a repository that can be deleted, and it is what **closes C-22** |
+| **C-22 closure — PRECISELY** | **CORRECTED.** C-22 closes when `.runtime/` is `0700` owned by a user the workers are not, **and V14a–f have been run and passed**. Approval does not close it; the verified ownership change does. **V14e cannot pass** under the single `run002-wrk` identity this section specifies — record it NOT APPLICABLE. So worker-to-worker reachability survives Stage 1 as a separate unresolved residual, and C-22's closure must be claimed only for what it covers: the records, evidence and credentials that decide a worker's own merge |
 
 ### STAGE 2 — the Run 002 repository and its branch protection
 

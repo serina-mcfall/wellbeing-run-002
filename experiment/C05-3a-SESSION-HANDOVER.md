@@ -8604,3 +8604,140 @@ structural blocker. Stages 2 and 3 are gated on its V-steps.
 
 Backlog items 3 (per-role `gh` call sites) and 4 (token renewal caller) are
 **required before Stage 3**, not before Stage 1.
+
+## 49. SESSION HANDOVER — clean stop, Stage 1 prepared and NOT approved (2026-10-02)
+
+**Read this first. It supersedes §48 and everything before it.**
+
+### 49.1 Verified state — measured at handover, not copied
+
+| | |
+|---|---|
+| Branch | `wip/c05-1-persistence` |
+| HEAD | `3602414` (`36024148862c3f264f680f0f8d4aa4cde34e18ae`) plus this section's own documentation commit |
+| Push | **in sync**, `0 0` against `@{u}` |
+| Working tree | **clean** (`git status --porcelain` empty) |
+| Verification | **2,688 Python OK (11 skipped) · 259 apparatus pass, 0 fail** — both re-run at handover, not inherited |
+| Pin | `8be6a97`; `check-templates.py` **0 failing**, `F1`/`F2` both green |
+| T+00 | **NOT_STARTED** — `started_at: None`, nine tasks QUEUED, no PRs, no workers, one ledger line |
+| Run 001 | Untouched |
+| Worktrees | **12** — the 11 pre-existing plus main. Every worktree this session created was removed |
+| Agents | **Six dispatched across the session, all six complete and integrated. None resumable, none outstanding** |
+| Session processes | None. The one idle wait loop created earlier was stopped by task id and verified gone |
+
+### 49.2 Frozen scope
+
+Run 002 is a **bounded experiment**: smallest working apparatus, ordinary
+bugs and non-essential hardening deferred. An issue is a launch blocker
+only if it prevents a startup or core lifecycle operation, risks
+uncontrolled spend / exposed credentials / unauthorised actions /
+unreviewed merges, or violates an explicit governing requirement.
+
+Deferred items live in **`experiment/RUN-003-BACKLOG.md`**, nine of them,
+each with its practical impact.
+
+**The acceptance scenario passes** against the production composition:
+draft → ready → independent review at the actual head → checks → eligible
+merge → confirm → dependents unblocked, **no human step**, **≥2 cycles at
+two heads**, **cycle-1 evidence refused at the new head**. 18/18 in
+`apparatus/fixture-preflight/production-lifecycle.test.js`; 76/76 across
+the Python connected-lifecycle suites.
+
+### 49.3 Decision D — approved AND verified wired
+
+Approved verbatim at
+`experiment/evidence/D-ci-protection-amendment-approval.txt`.
+
+**Wiring verified at handover rather than taken on report.** In
+`control/supervisor.py::attempt_merge` (line 4623) the order is:
+`ledger_attests_merge` (+33) → `ci_paths_clear_for_merge` (+75) →
+`evaluate_merge` (+123). The protected-path refusal is reached **before**
+the gate, as required.
+
+A first probe of mine reported "NOT BEFORE"; it had sliced the wrong
+region. The ordering above is read from the function body directly.
+
+### 49.4 Stage 1 — PREPARED, NOT APPROVED
+
+`experiment/C-20a-APPROVAL-PACKAGE.md` §13. **Nothing in it has been
+done**: no App, credential, OS user, ownership change, export or
+throwaway repository exists.
+
+Three wordings were corrected this session because they would have
+misled the decision:
+
+- **It DOES create credentials.** Three real App private keys plus the
+  tokens minted from them. What it does *not* need is the eight **product
+  secrets** — those are Stage 3. "No secrets needed" must never be read as
+  "no credentials created".
+- **Cost**: no paid provider call and no billable operation. Apps, a
+  repository and installation tokens are free. The cost is operator time
+  and those keys, not money.
+- **C-22 closure is conditional.** C-22 closes when `.runtime/` is `0700`
+  owned by a user the workers are not **and V14a–f have passed** —
+  approval does not close it, the verified ownership change does. **V14e
+  cannot pass** under the single `run002-wrk` identity §6 specifies;
+  record it NOT APPLICABLE. Worker-to-worker reachability survives Stage 1
+  as a separate unresolved residual.
+
+### 49.5 The outstanding expected-head merge check
+
+**`control/gh.py::merge` sends no expected head.** Verified: it runs
+`gh pr merge <n> --repo <r> --<method> --delete-branch`, with no `sha`.
+
+§5 of the approval package and §4's SHA-binding table both state the merge
+is executed by `PUT /repos/{owner}/{repo}/pulls/{n}/merge` with the `sha`
+parameter. **The document specifies a protection the code does not
+implement.** The practical effect is narrower, not absent: a head that
+moves between verdict and merge is caught by `HEAD_SHA_CHANGED` on the
+next tick rather than refused by GitHub at the point of merge.
+
+Recorded as backlog item 3. **If it is to be closed for Run 002 it is a
+small, well-specified change** — swap `gh pr merge` for the REST call §5
+already writes out.
+
+### 49.6 Required Run 002 wiring — was miscategorised
+
+Two items were wrongly filed as Run 003 deferrals. They are **Run 002
+work**, now under "NOT deferred — REQUIRED RUN 002 WIRING" in the backlog:
+
+- **R1 — per-role `gh` authentication has no call site.** `role=` exists
+  on every wrapper; nothing in `control/` passes it. Until one does, every
+  `gh` call uses ambient host auth and the three-principal separation is a
+  property of the manifests, not of the running system. Ambient holds
+  `statuses: write` **and** merge rights. **Required before Stage 2/3.**
+- **R2 — token renewal has no caller.** `gh.ensure_token` is built; no
+  daemon or tick hook invokes it. An installation token lasts one hour; a
+  24-hour run outlives it many times. **Required before Stage 3.**
+
+Neither blocks Stage 1.
+
+### 49.7 Exact next actions
+
+1. **Decide Stage 1** — §13 of the approval package. It is the only stage
+   whose prerequisites are complete, needs none of the eight secrets, and
+   is what closes C-22.
+2. **If Stage 1 is approved**: follow
+   `experiment/github-app/DEPLOYMENT-PROCEDURE.md` (Phase A → B → C), stop
+   at the 10b STOP gate, and record V14e as NOT APPLICABLE.
+3. **Before Stage 3**: close R1 and R2 above.
+4. **Optionally before launch**: backlog item 3, the expected-head merge.
+
+### 49.8 File locations
+
+| What | Where |
+|---|---|
+| The decision | `experiment/C-20a-APPROVAL-PACKAGE.md` (§13 stages, §9 actions) |
+| Deployment steps | `experiment/github-app/DEPLOYMENT-PROCEDURE.md` |
+| Falsification plan | `experiment/GITHUB-APP-WORKER-ISOLATION-PROPOSAL.md` §5 (V1–V14f) |
+| Deferred + required wiring | `experiment/RUN-003-BACKLOG.md` |
+| D's approval, verbatim | `experiment/evidence/D-ci-protection-amendment-approval.txt` |
+| Open items by C-number | `experiment/CONTRADICTION-AUDIT.md` |
+| Phase order and gates | `experiment/LAUNCH-CHECKLIST.md` |
+
+### 49.9 Nothing was discarded
+
+No work was reset, abandoned or reported as finished when it was not.
+`control/worker_git.py` and its 41 tests are **built, committed, and
+deliberately unwired** — that status is pinned by a test and stated in the
+backlog, not disguised. The runtime residue is preserved unchanged.
