@@ -1,0 +1,97 @@
+RUN 002 — APPROVED: STAGE 1, HOST ISOLATION AND THE THROWAWAY REPOSITORY
+========================================================================
+Recorded 2026-10-02 by the integration owner.
+Branch wip/c05-1-persistence. Approved at HEAD d33d4a8, pin ab1ceee.
+
+WHY THIS FILE EXISTS
+--------------------
+Authorisations in Run 002 are recorded VERBATIM, because the wording is
+the ceiling on scope. An approval paraphrased into a plan is an approval
+nobody can check afterwards. This is the operator's text, unedited.
+
+
+THE AUTHORISATION, VERBATIM
+---------------------------
+> Stage 1 is APPROVED, using a PUBLIC throwaway repository containing only
+> the minimal test fixture and trivial workflow. Do not upload Run 002
+> product code, repository history, runtime evidence or credentials.
+>
+> Execute the prepared Stage 1 procedure, including:
+> - A0 rollback capture.
+> - The specified OS identities, group and permissions.
+> - Three Apps installed on the throwaway only, with protected keys.
+> - The selected shared-worktree arrangement and HTTPS authentication.
+> - The trusted export and required local wiring.
+> - The deployed verification and throwaway push probe.
+>
+> Correct execution ordering without reopening the design: create and
+> prepare the trusted export before V13 and V14g-export. Reach the final
+> 10b STOP gate only after all applicable Stage 1 verification is complete.
+>
+> Use at most ten trivial workflow runs on standard GitHub-hosted runners.
+> No paid provider calls or paid runner upgrades.
+>
+> Proceed through routine authorized steps without asking me to confirm
+> each one. If an interactive login, sudo action or tool approval genuinely
+> requires me, give me the exact action needed and continue independent
+> work where possible. Respect access controls.
+>
+> Stop on a failed isolation check. Close C-22 only after verification
+> under the actual identities proves the protected boundary. Record V14e as
+> NOT APPLICABLE and retain the shared-worker limitation explicitly.
+>
+> Use the A0 capture for rollback; preserve pre-existing resources,
+> worktrees and unrelated processes.
+>
+> No Apps installed on the production repository, production probe pushes,
+> production branch-protection changes, product PRs or merges, merge to
+> main, paid preflight or 24-hour launch.
+>
+> R1-R3 remain required before Stage 2 protection changes. Preserve Run 001
+> and runtime residue. T+00 remains NOT_STARTED.
+>
+> Finish Stage 1, stop at its gate, and report the results and next
+> approval needed. Do not begin another broad audit.
+
+
+WHAT THIS AUTHORISES, READ NARROWLY
+-----------------------------------
+Stage 1 as written in experiment/C-20a-APPROVAL-PACKAGE.md section 13 and
+executed by experiment/github-app/DEPLOYMENT-PROCEDURE.md: section 9 rows
+0, 1, 2, 3a, 4, 5, 6, 6b, 6c, 7, 7b, 7c, 10 and 10b, preceded by A0.
+
+THREE THINGS THE WORDING ADDS OR NARROWS, AND THEY BIND
+-------------------------------------------------------
+1. VISIBILITY IS PUBLIC, and the contents are bounded by the same
+   sentence: "only the minimal test fixture and trivial workflow", with
+   product code, repository history, runtime evidence and credentials
+   excluded by name. The V14 probe is an ORPHAN branch for exactly this
+   reason - it carries its own single commit and no history.
+2. AT MOST TEN trivial workflow runs, on standard GitHub-hosted runners.
+   No paid runner upgrade, no paid provider call.
+3. ORDERING CORRECTED BY THE OPERATOR: the trusted export is created and
+   prepared BEFORE V13 and V14g-export, and the 10b STOP gate is reached
+   only after all applicable verification is complete. This reorders
+   execution; it reopens no design decision.
+
+WHAT IT DOES NOT AUTHORISE
+--------------------------
+No App installed on the production repository. No probe push to the
+production repository. No production branch-protection change. No product
+PR, no merge, no merge to main. No paid preflight. No 24-hour launch.
+T+00 remains NOT_STARTED. R1, R2 and R3 remain required before Stage 2.
+
+C-22 CLOSURE IS CONDITIONAL, IN THE OPERATOR'S OWN WORDS
+--------------------------------------------------------
+"Close C-22 only after verification under the actual identities proves the
+protected boundary." Approval does not close it; V14b/V14c/V14d/V14g
+passing under run002-sup and run002-wrk do. V14e CANNOT pass under the
+single run002-wrk identity and is recorded NOT APPLICABLE, so the
+worker-to-worker reachability limitation is RETAINED EXPLICITLY and
+survives Stage 1 as a separate unresolved residual.
+
+DECISION C
+----------
+Resolved to HTTPS before this approval was given, and recorded as
+overrulable in it. The operator did not overrule it, and the approval
+names "HTTPS authentication" among the things to execute. It stands.

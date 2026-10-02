@@ -420,6 +420,7 @@ that is documented.
 > | 1 | `git config core.sharedRepository group` on the checkout | New object fan-out directories are `0755`; the worker cannot add an object the Supervisor's git created a directory for |
 > | 2 | A one-time `chmod -R g+ws` of `.git/objects`, `.git/refs`, `.git/logs` | Part 1 is **not retroactive** — these exist at `0755` from `git init` and every commit touches them |
 > | 3 | `umask 0002` in `bin/supervisor.sh` | The checked-out files come out `0644` and the worktree gitdir `2755`; the worker cannot write its own worktree |
+> | 4 | `safe.directory` for `run002-wrk` — **added 2026-10-02, during execution** | Git refuses to parse a repository owned by another user, so **every** worker git command aborts with "detected dubious ownership" and the run stops at the first dispatch. Not a permission boundary; a configuration gap. `safe.directory` takes exact paths and no glob but `*`, and worker worktrees are named per task — so the value is `*`, written into **`run002-wrk`'s own global config and nowhere else**. It grants no access: part 4's claw-back of `.git/hooks` and `.git/config` is what blocks the attack the guard exists for, and V14g measures it. The alternative is a per-dispatch exact entry, which is a code change and R-class work |
 >
 > **Do not substitute `git init --shared=group`.** On an existing
 > repository it repairs no existing mode and rewrites the config value to

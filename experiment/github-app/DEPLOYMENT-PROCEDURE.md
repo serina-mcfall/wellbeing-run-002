@@ -303,7 +303,40 @@ sudo install -d -o run002-sup -g run002 -m 2770 <WS>__worktrees
 sudo chmod 0700 <WS>/.runtime
 sudo chmod -R 0750 <WS>/.git/hooks
 sudo chmod 0640 <WS>/.git/config
+
+# 5. GIT'S OWNERSHIP GUARD. ADDED 2026-10-02 WHILE EXECUTING STAGE 1 — the
+#    arrangement was incomplete without it and the run would have stopped
+#    at the first dispatch. See the box below.
+sudo -H -u run002-wrk git config --global --add safe.directory '*'
+sudo -H -u run002-sup git config --global --add safe.directory <WS>
 ```
+
+> **PART 5 — WHY A WORKER'S GIT ABORTS WITHOUT IT, AND WHY `*` IS THE
+> NARROW CHOICE HERE. Found 2026-10-02, during execution.**
+>
+> Since git 2.35.2 git **refuses to parse the config of a repository owned
+> by another user**. Every worker worktree is created by `run002-sup` and
+> run by `run002-wrk`, so **every worker git command aborts with "detected
+> dubious ownership"**. That is not a permission boundary doing its job —
+> it is a configuration gap, and it stops the run dead at the first
+> dispatch. Parts 1–3 are all necessary and none of them addresses it.
+>
+> **`safe.directory` takes exact paths only.** `git help config` documents
+> interpolation of `~` and `%(prefix)` and **no glob except the single
+> value `*`**. Worker worktrees are named per task, so exact entries cannot
+> be pre-seeded without a per-dispatch code change.
+>
+> **The `*` is written into `run002-wrk`'s OWN global config and nowhere
+> else** — not system-wide, not for `run002-sup`, which gets the one exact
+> path it needs. What the guard prevents is executing another user's hooks
+> and config; here that other user is `run002-sup`, the **trusted
+> dispatcher**, and part 4 has already denied the worker write on both
+> `.git/hooks` and `.git/config`. **It grants the worker no access it did
+> not have** — file modes decide that, and V14g measures them.
+>
+> **The alternative, if the operator prefers it:** the Supervisor adds an
+> exact `safe.directory` entry per worktree at dispatch. That is a code
+> change at the `acquire_worktree` call sites and is R-class work.
 
 > **THE WORKTREE ROOT IS OUTSIDE `<WS>`, AND THE SUPERVISOR CANNOT CREATE
 > IT. Measured 2026-10-02, not assumed.**
