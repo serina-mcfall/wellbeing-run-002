@@ -118,10 +118,30 @@ find <WS> -printf '%m %u %g %p\n' > $R/ownership-BEFORE.txt
 git -C <WS> worktree list > $R/worktrees-BEFORE.txt
 git -C <WS> for-each-ref --format='%(objectname) %(refname)' refs/heads \
   > $R/refs-BEFORE.txt
+
+# 4. The worker worktree ROOT, which is a SIBLING of <WS> and therefore
+#    outside step 2's `find`. A5 creates it; the undo deletes it only if
+#    this file records it ABSENT. ADDED 2026-10-02.
+{ stat -c '%a %U %G %n' <WS>__worktrees 2>/dev/null \
+    || echo "ABSENT <WS>__worktrees"
+  stat -c '%a %U %G %n' "$(dirname <WS>)"
+} > $R/worktree-root-BEFORE.txt
+
+# 5. The repository-sharing config A5 is about to set, so the undo can
+#    restore it rather than guess. `|| echo` because unset is the expected
+#    answer today and `git config` exits 1 on a missing key.
+{ git -C <WS> config core.sharedRepository \
+    || echo 'ABSENT core.sharedRepository'; } \
+  > $R/sharedrepo-BEFORE.txt
 ```
 
-→ **Verify:** all four files exist and are non-empty;
+→ **Verify:** all six files exist and are non-empty;
 `wc -l $R/ownership-BEFORE.txt` is within a few of `find <WS> | wc -l`.
+→ **Expected today, measured 2026-10-02:** `worktree-root-BEFORE.txt`
+says **ABSENT** (the sibling does not exist) and its second line shows the
+parent as `755 serina serina`; `sharedrepo-BEFORE.txt` says **ABSENT**.
+If either differs, A5 is modifying something it did not create — stop and
+reconcile before proceeding.
 → **If `identities-BEFORE.txt` does NOT say ABSENT for all three:** the
 account or group is **not this stage's to create or delete**. Do not
 create it, and strike it from the rollback — `userdel` on a pre-existing
@@ -235,15 +255,88 @@ Apply §6's asset table, **including the corrected git row**. The row as
 originally written (`.git/` read-only for workers) was measured to stop
 every worker commit; the corrected row is narrower.
 
+**THE DISPATCH-TIME WRITABILITY MECHANISM IS CHOSEN — 2026-10-02.** This
+step used to leave it open. The Supervisor creates each worker's worktree
+and **cannot `chown`**, so something has to make the result writable by
+`run002-wrk`. **No root helper runs at dispatch.** The arrangement is
+group-write through the `run002` group, and it has **exactly three parts**
+— miss any one and the failure is late and confusing rather than
+immediate. Measured in `tests/test_c22_shared_dispatch_modes.py` (8 tests,
+both load-bearing parts watched failing):
+
 ```
+# 1. Git creates group-writable, setgid objects, refs and worktree gitdirs
+#    FROM THIS POINT ON. Do NOT use `git init --shared=group` instead: on
+#    an existing repository it repairs nothing and rewrites the value to
+#    the numeric form. Both measured.
+sudo -u run002-sup git -C <WS> config core.sharedRepository group
+
+# 2. The config is NOT retroactive. These three already exist at 0755 and
+#    every commit touches them, so fix them once, by hand. g+s so new
+#    children keep the group.
 sudo chown -R run002-sup:run002 <WS>
 sudo chmod -R 0750 <WS>
+sudo chmod -R g+ws <WS>/.git/objects <WS>/.git/refs <WS>/.git/logs
+
+# 3. The worker worktree root, setgid and group-writable, so worktrees the
+#    Supervisor creates land in group run002 with the write bit. The third
+#    part, `umask 0002`, is in bin/supervisor.sh — without it the checked-out
+#    files and the worktree gitdir come out mode 644/2755 and the worker
+#    cannot write them even with 1 and 2 applied.
+#
+#    READ THE NEXT PARAGRAPH BEFORE RUNNING THIS. The root is a SIBLING of
+#    <WS>, it does not exist yet, and root must create it — the Supervisor
+#    cannot.
+sudo install -d -o run002-sup -g run002 -m 2770 <WS>__worktrees
+
+# 4. Claw back what §6 withholds — AFTER the above, never before. Measured
+#    to survive later `git config` writes and later commits.
 sudo chmod 0700 <WS>/.runtime
 sudo chmod -R 0750 <WS>/.git/hooks
 sudo chmod 0640 <WS>/.git/config
-# writable by run002-wrk, because a commit cannot happen otherwise:
-sudo chmod -R 0770 <WS>/.git/objects <WS>/.git/refs/heads
 ```
+
+> **THE WORKTREE ROOT IS OUTSIDE `<WS>`, AND THE SUPERVISOR CANNOT CREATE
+> IT. Measured 2026-10-02, not assumed.**
+>
+> Worker worktrees are made by `workmux add` (`control/workers.py:117`).
+> workmux's `worktree_dir` default is **"Sibling directory
+> `<project>__worktrees`"** — confirmed from `workmux config reference` on
+> this host (workmux 0.1.231). There is **no global config file** at
+> `~/.config/workmux/config.yaml` and **no repository-local config**, so the
+> default applies. The real path is therefore
+> **`/home/serina/wellbeing-agent-experiment/agent-run-002__worktrees`**,
+> and it **does not exist yet**.
+>
+> Two consequences, both of which would otherwise bite at the first
+> dispatch:
+>
+> 1. **`chown -R`/`chmod -R <WS>` never touches it.** It is not under
+>    `<WS>`. Neither is A0's capture unless A0 is told to walk it — see A0.
+> 2. **Its parent `/home/serina/wellbeing-agent-experiment` is
+>    `drwxr-xr-x serina:serina`.** `run002-sup` has no write bit there, so
+>    the Supervisor's first `workmux add` would fail with permission
+>    denied — **a launch-time failure, not a degradation**. Root
+>    pre-creates the root once; nothing after that needs privilege.
+>
+> **Do not use `control/config.py`'s `WORKTREE_ROOT`.** It resolves to
+> `<parent>/worktrees`, which is **not** where workmux puts anything. That
+> disagreement is Run 003 backlog item 8, recorded as cosmetic because the
+> gate uses branch identities — it is **not** cosmetic here, and preparing
+> that path instead would leave the real root unprepared.
+
+**What part 2 costs, stated rather than buried:** `g+w` on `.git/objects`,
+`.git/refs` and `.git/logs` is group-wide, so **every** member of `run002`
+can write them. Under the single `run002-wrk` identity §6 deploys, that
+changes nothing — peers already share a uid. It is the same residual §6
+records as UNRESOLVED, not a new one, and it is why **V14e is NOT
+APPLICABLE** rather than passed. **No privilege beyond the `run002` group
+is granted, and no `sudo` rule is added.**
+
+**`umask 0002` does not widen `.runtime/`.** That directory is `0700`
+owned by `run002-sup`; nothing inside it is reachable by the worker
+whatever mode its files carry. V1/V4b are what confirm it under the real
+identities.
 
 → **Verify:** V1, V1b, V4b, V5, V5b, V14 (§3 below). Do not proceed on
 inspection alone — the measurement that produced this table was taken as
@@ -258,6 +351,12 @@ this is runbook step 4's gate.
 while read -r mode owner group path; do
   sudo chown "$owner:$group" "$path" && sudo chmod "$mode" "$path"
 done < ~/run-002-stage1-rollback/ownership-BEFORE.txt
+
+# The three things A5 adds that the loop above cannot reach, because they
+# are not paths inside <WS>. ADDED 2026-10-02.
+sudo -u run002-sup git -C <WS> config --unset core.sharedRepository   # if A0 said ABSENT
+sudo rm -rf <WS>__worktrees                                           # if A0 said ABSENT
+# bin/supervisor.sh's `umask 0002` is reverted with the code changes (A7/A8).
 ```
 
 This replaces "`sudo chown -R serina:serina <WS>` and restore the
@@ -451,7 +550,8 @@ call the low-level `resolveTrustedHeadSha(identity, { repoRoot })` and
 
 ### B7. The corrected git row, under the REAL identities — V14
 
-As `run002-wrk`, after A5, in a worktree **created for this probe**:
+As `run002-wrk`, after A5, in a worktree **created for this probe by
+`run002-sup`, the way dispatch creates one**:
 
 **ON A DEDICATED BRANCH, NOT AN EXISTING ONE. CORRECTED 2026-10-02.** This
 step used to say "in a worker worktree of the real checkout", and `add -A`
@@ -461,42 +561,100 @@ work — and push it to `<PROD>`. A probe must not leave a commit on a branch
 somebody is still using, and the rollback must be able to name exactly what
 it created.
 
+**THE PROBE NOW REPRODUCES DISPATCH, AND NO ROOT STEP RESCUES IT —
+CORRECTED 2026-10-02.** This block used to `sudo chown -R run002-wrk` the
+probe worktree immediately after creating it. That made V14 pass by hand
+while saying **nothing** about the unattended run, where no root helper
+exists: the one step meant to force the dispatch-time choice was quietly
+performing it. The chown is gone. If a worker cannot commit without it,
+**the arrangement is wrong and the run cannot dispatch** — which is
+exactly what this step is for.
+
+**And it no longer writes to `<PROD>`.** The push goes to the
+**throwaway**, on an **orphan** branch, so the production repository is
+untouched and no Run 002 history leaves this host.
+
 ```
-# Created by run002-sup, because that is who creates a worker's worktree
-# in the shipping arrangement - then handed over by whichever mechanism
-# the deployment chose for real worktrees. `control/worker_git.py`'s "WHO
-# MAKES THE CLONE" note records that the code takes no position and cannot
-# chown anything itself: it is either a root helper at dispatch, or a
-# setgid group-writable root. IF NO MECHANISM HAS BEEN CHOSEN, THIS IS THE
-# STEP THAT FORCES THE CHOICE - and V14d is what proves it works.
-sudo -u run002-sup git -C <WS> worktree add -b probe/v14 <WS>/.probe-v14
-sudo chown -R run002-wrk:run002 <WS>/.probe-v14 <WS>/.git/worktrees/.probe-v14
-sudo chmod -R 0700 <WS>/.probe-v14
-sudo -u run002-wrk sh -c 'echo probe > <WS>/.probe-v14/V14-PROBE'
-sudo -u run002-wrk git -C <WS>/.probe-v14 add V14-PROBE
-sudo -u run002-wrk git -C <WS>/.probe-v14 commit -m 'v14 probe'
-sudo -u run002-wrk git -C <WS>/.probe-v14 push -u origin probe/v14
+# V14a. Created by run002-sup — who creates every worker worktree — under
+# the Supervisor's own umask, in the REAL worktree root, with NO chown
+# after it. --orphan so the probe starts from no history: nothing of this
+# repository is pushed, and no existing branch is involved.
+sudo -u run002-sup sh -c 'umask 0002; git -C <WS> worktree add -q --orphan \
+  -b probe/v14 <WS>__worktrees/probe-v14'
+
+# V14b. The modes, BEFORE any worker touches them. This is the assertion
+# that the three-part arrangement actually took.
+stat -c '%a %U %G %n' <WS>__worktrees/probe-v14 <WS>/.git/worktrees/probe-v14
+grep -n 'umask 0002' <WS>/bin/supervisor.sh
+sudo -u run002-sup git -C <WS> config core.sharedRepository
+
+# V14c/V14d. The worker writes, stages and commits — as run002-wrk, with
+# no privilege and no help. V14d is this commit SUCCEEDING.
+sudo -u run002-wrk sh -c 'umask 0002; echo probe > <WS>__worktrees/probe-v14/V14-PROBE'
+sudo -u run002-wrk git -C <WS>__worktrees/probe-v14 add V14-PROBE
+sudo -u run002-wrk git -C <WS>__worktrees/probe-v14 commit -m 'v14 probe'
+
+# V14f. The push — TO THE THROWAWAY, not <PROD>. Read the push URL first:
+# ~/.gitconfig's url.insteadOf rewrite is what action 5 exists to take away,
+# and this is where it shows itself before a worker pushes as serina.
+sudo -u run002-wrk git -C <WS>__worktrees/probe-v14 remote add probe <THROWAWAY-URL>
+sudo -u run002-wrk git -C <WS>__worktrees/probe-v14 remote get-url --push probe
+sudo -u run002-wrk git -C <WS>__worktrees/probe-v14 push -u probe probe/v14
+
+# V14g. The protected paths — every one of these MUST be refused.
 sudo -u run002-wrk sh -c 'echo x > <WS>/.git/hooks/pre-commit'
-sudo -u run002-wrk cat <WS>/.git/worktrees/gate-<PIN>/HEAD
+sudo -u run002-wrk sh -c 'echo x >> <WS>/.git/config'
+sudo -u run002-wrk ls <WS>/.runtime
+
+# V14g-export. RUN THIS AT C1, NOT HERE — the export does not exist until
+# Phase C, so running it now returns "No such file", which is not the same
+# answer as "Permission denied" and must not be recorded as if it were.
+sudo -u run002-wrk cat <WS>/.git/worktrees/$(basename <EXPORT>)/HEAD
 ```
 
-**This pushes one branch to `<PROD>`, the production repository.** It is
-the only write Stage 1 makes there. It does not touch `main`, its
-protection, or any pull request, and `ci.yml` triggers on `push` only for
-`branches: [main]`, so it starts no workflow run. §13's "what it does NOT
-touch" row says so explicitly rather than leaving the push unmentioned.
+**`<THROWAWAY-URL>` is A1's repository.** Nothing in V14 touches `<PROD>`,
+`main`, its protection, or any pull request. §13's "what it does NOT
+touch" row is therefore true again as originally written, and the
+2026-10-02 correction that admitted a production write is **withdrawn in
+favour of removing the write**.
 
-→ **Verify:** the three worker operations **succeed**; both attempts on
-the protected paths **fail** with `Permission denied`.
-→ **Undo, and it is exactly four things this stage created:**
-`git push origin --delete probe/v14` · `git -C <WS> worktree remove
---force <WS>/.probe-v14` · `git -C <WS> branch -D probe/v14` ·
+**No requirement was found that needs `<PROD>`.** What V14 establishes is
+*local* — whether `run002-wrk` can write the real checkout's objects, refs
+and worktree gitdir — plus *which URL a push resolves to*, which any GitHub
+remote exercises equally. The remote's identity is irrelevant to both.
+
+→ **Verify:**
+  - **V14b** — both paths show group `run002` **and** the group write bit
+    (`2775`/`2770`, not `2755`); `supervisor.sh` matches; the config reads
+    `group`. If any of the three is missing, **STOP** — A5 did not take,
+    and the commit below may pass only because the operator's shell is
+    privileged.
+  - **V14c/V14d** — the three worker operations **succeed**, with **no
+    chown, no sudo to root, and no mode change** between creation and
+    commit.
+  - **V14e** — **NOT APPLICABLE.** A single `run002-wrk` identity cannot
+    demonstrate worker-to-worker separation. Record it as not applicable;
+    do not record it as passed.
+  - **V14f** — the push succeeds to the **throwaway**, and `get-url
+    --push` is read and recorded whichever form it returns.
+  - **V14g** — the **three** run here fail with `Permission denied`. A
+    "No such file" is **not** a pass: `.git/hooks/pre-commit` may legitimately
+    not exist, so the refusal must come from the directory's mode — check
+    `stat -c '%a' <WS>/.git/hooks` reads `750` as well.
+  - **V14g-export** — deferred to **C1**, because the export does not
+    exist during Phase B. Recorded there, against the clawed-back gitdir.
+→ **Undo — five things, all created here:**
+`git -C <WS>__worktrees/probe-v14 push probe --delete probe/v14` ·
+`git -C <WS> worktree remove --force <WS>__worktrees/probe-v14` ·
+`git -C <WS> branch -D probe/v14` ·
 `rm -f <WS>/.git/hooks/pre-commit` **only if A0's capture shows none was
 there** — the write above is expected to be refused, but if the mode was
-looser than §6 assumes it will have succeeded. Then diff
-`git -C <WS> worktree list` and `git -C <WS> for-each-ref refs/heads`
-against A0's `worktrees-BEFORE.txt` and `refs-BEFORE.txt` — expect no
-difference. **No pre-existing branch, worktree or ref is touched.**
+looser than §6 assumes it will have succeeded ·
+and the worktree root itself goes with **A5's** undo, not this one.
+Then diff `git -C <WS> worktree list` and
+`git -C <WS> for-each-ref refs/heads` against A0's `worktrees-BEFORE.txt`
+and `refs-BEFORE.txt` — expect no difference. **No pre-existing branch,
+worktree or ref is touched, and `<PROD>` has nothing to roll back.**
 → **Why the last two:** `hooks/` is code the Supervisor's own git runs,
 and the export's gitdir `HEAD` is the proof
 `gate_invoker.export_revision()` reads to establish the export is at the
@@ -667,11 +825,21 @@ call**, in each of the three processes, with that process's own role.
 ```
 sudo install -d -m 0755 -o run002-sup -g run002 /opt/run-002
 sudo -u run002-sup git -C <WS> worktree add --detach <EXPORT> <PIN>
+
+# CLAW BACK THE EXPORT'S GITDIR — ADDED 2026-10-02, and it is required.
+# A5 set core.sharedRepository=group, so git created this gitdir
+# group-writable like every other. §6 withholds it from the worker for a
+# reason: `gate_invoker.export_revision()` reads its HEAD to prove the
+# export is at the pin, and a worker that could write it could claim any
+# revision. The claw-back is measured to survive later commits.
+sudo chmod 0700 <WS>/.git/worktrees/$(basename <EXPORT>)
 ```
 
 → **Verify:** `cat <EXPORT>/.git` is a single `gitdir:` line, and the
 file it points at has a `HEAD` holding `<PIN>` as 40 hex — **not** a
-`ref:` line. `gate_invoker.export_revision()` refuses a symbolic `HEAD`
+`ref:` line. Then
+`stat -c '%a' <WS>/.git/worktrees/$(basename <EXPORT>)` reads **`700`**,
+and V14g's `cat` of that `HEAD` as `run002-wrk` is refused. `gate_invoker.export_revision()` refuses a symbolic `HEAD`
 outright: a branch moves, and an export pinned to a branch is not pinned.
 → **If `HEAD` is symbolic:** you omitted `--detach`. Remove and redo.
 → **Undo:** `sudo -u run002-sup git -C <WS> worktree remove --force <EXPORT>`.

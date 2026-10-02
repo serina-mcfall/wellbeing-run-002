@@ -433,6 +433,19 @@ def ownership_plan(worker: str, worker_identity: str = "run002-wrk",
     This module takes no position between them and implements neither.
     V14a is what shows the chosen one actually lets a worker commit.
 
+    THE SHIPPING ARRANGEMENT HAS CHOSEN, 2026-10-02 - and it is the SECOND
+    shape, applied to LINKED WORKTREES rather than to clones, because linked
+    worktrees are what Run 002 ships. No root helper runs at dispatch. The
+    three parts are `core.sharedRepository=group`, a one-time chmod of the
+    directories that already exist, and `umask 0002` on the Supervisor;
+    they are measured in `tests/test_c22_shared_dispatch_modes.py` and
+    applied by A5. The peer-separation cost named above is REAL and is
+    unchanged by the choice: under the single `run002-wrk` identity §6
+    deploys, peers reach each other's files regardless, which is why V14e
+    is recorded NOT APPLICABLE rather than passed. If this module is ever
+    wired, re-read this paragraph - a clone root wants the same three parts
+    and the same claw-backs.
+
     `worker_identity` IS A PARAMETER FOR ONE REASON. §6 deploys a single
     `run002-wrk`, and under it two workers share a uid and can reach each
     other's clones — the residual §6 already records as UNRESOLVED. If the

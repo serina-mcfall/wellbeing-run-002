@@ -402,6 +402,50 @@ that is documented.
 > repository. They establish which paths git must write. They do **not**
 > establish how `run002-wrk` behaves against files owned by `run002-sup` —
 > group membership, umask and any root-owned process can all differ.
+
+> ### HOW A SUPERVISOR-CREATED WORKTREE BECOMES WORKER-WRITABLE — DECIDED 2026-10-02
+>
+> The table above says what the worker must be able to write. It did not
+> say **how**, and `control/worker_git.py`'s "WHO MAKES THE CLONE" note left
+> the choice open between a root helper at dispatch and a setgid
+> group-writable root. **The second is chosen, applied to linked worktrees.
+> No root helper runs at dispatch and no `sudo` rule is added.**
+>
+> **Three parts, and all three are required.** Measured in
+> `tests/test_c22_shared_dispatch_modes.py` (8 tests; the two load-bearing
+> parts were watched failing):
+>
+> | Part | What | Without it |
+> |---|---|---|
+> | 1 | `git config core.sharedRepository group` on the checkout | New object fan-out directories are `0755`; the worker cannot add an object the Supervisor's git created a directory for |
+> | 2 | A one-time `chmod -R g+ws` of `.git/objects`, `.git/refs`, `.git/logs` | Part 1 is **not retroactive** — these exist at `0755` from `git init` and every commit touches them |
+> | 3 | `umask 0002` in `bin/supervisor.sh` | The checked-out files come out `0644` and the worktree gitdir `2755`; the worker cannot write its own worktree |
+>
+> **Do not substitute `git init --shared=group`.** On an existing
+> repository it repairs no existing mode and rewrites the config value to
+> the numeric form. Both measured.
+>
+> **THE WORKER WORKTREE ROOT IS OUTSIDE `<WS>`.** Worker worktrees are
+> created by `workmux add`; workmux 0.1.231's default `worktree_dir` is the
+> **sibling** `<project>__worktrees`, and this host has no global and no
+> repository-local override. So the root is
+> `/home/serina/wellbeing-agent-experiment/agent-run-002__worktrees`, it
+> does not exist yet, and its parent is `drwxr-xr-x serina:serina` — which
+> means **`run002-sup` cannot create it** and the first dispatch would fail
+> outright. A5 pre-creates it `2770 run002-sup:run002`. `control/config.py`'s
+> `WORKTREE_ROOT` points somewhere else entirely and must not be used here.
+>
+> **WHAT THIS COSTS, AND IT IS NOT NEW.** Group-writable `objects`, `refs`
+> and `logs` are writable by every member of `run002`. Under the single
+> `run002-wrk` identity this section deploys, peers already share a uid, so
+> the arrangement **adds no reachability that did not already exist**. It is
+> the same residual recorded above as UNRESOLVED, and it is why **V14e is
+> NOT APPLICABLE** rather than passed.
+>
+> **STILL A SIMULATION.** Everything above was measured as one user, on a
+> disposable repository. **V14b/V14c/V14d under the real identities are what
+> establish it**, and V14 no longer performs a `chown` that would have
+> masked the question.
 > **Confirming it under the real identities is V-step work after action 1**,
 > and is listed as V14 below. Nothing here creates a user or changes an
 > owner.
@@ -895,13 +939,13 @@ part of any deployment stage.
 | | |
 |---|---|
 | **Actions** | §9 rows **0, 1, 2, 3a, 4, 5, 6, 6b, 6c, 7, 7b, 7c, 10, 10b**, preceded by **A0**, the pre-change capture added 2026-10-02 |
-| **What it changes** | writes a pre-change capture to `~/run-002-stage1-rollback/` (A0); creates a NEW throwaway GitHub repository; creates OS users `run002-sup` and `run002-wrk` and group `run002`; creates three GitHub Apps installed **on the throwaway only**; writes three private keys at `0400`; changes ownership/modes of `.runtime/`, the checkout and `.git/` per §6; creates a read-only export at `/opt/run-002/gate-<pin>`; creates **one probe branch and worktree** for V14 and pushes that branch to the Run 002 repository; flips `worker_entry`'s env pass-through to the built allow-list; changes `gh.py` to pass a per-role token — **the mechanism only**, see R1 |
-| **What it does NOT touch** | `main`; its branch protection; the Run 002 repository's **settings**; any product PR; any provider that charges. **CORRECTED 2026-10-02: it does write ONE branch to the Run 002 repository.** V14a commits a probe and pushes it, and the step used to say "a worker worktree of the real checkout" — which would have put that commit on whichever unmerged branch the worktree held. It is now a dedicated `probe/v14` branch and worktree created by the step and deleted by its undo. `ci.yml` triggers on `push` only for `branches: [main]`, so the push starts no workflow run. Leaving a write to `<PROD>` unmentioned in this row was the inaccuracy, not the write itself |
+| **What it changes** | writes a pre-change capture to `~/run-002-stage1-rollback/` (A0); creates a NEW throwaway GitHub repository; creates OS users `run002-sup` and `run002-wrk` and group `run002`; creates three GitHub Apps installed **on the throwaway only**; writes three private keys at `0400`; changes ownership/modes of `.runtime/`, the checkout and `.git/` per §6; **sets `core.sharedRepository=group` and pre-creates the worker worktree root `<WS>__worktrees` at `2770` — the dispatch-writability arrangement, decided 2026-10-02**; creates a read-only export at `/opt/run-002/gate-<pin>`; creates **one orphan probe branch and worktree** for V14 and pushes it **to the throwaway**; flips `worker_entry`'s env pass-through to the built allow-list; changes `gh.py` to pass a per-role token — **the mechanism only**, see R1 |
+| **What it does NOT touch** | `main`; its branch protection; the Run 002 repository's **settings**; any product PR; any provider that charges — **and, from 2026-10-02, the Run 002 repository at all.** The 2026-10-02 correction that admitted "it does write ONE branch to `<PROD>`" is **withdrawn in favour of removing the write**: V14's probe now pushes to the **throwaway**, on an **orphan** branch, so no Run 002 history leaves this host and `<PROD>` has nothing to roll back. No requirement was found that needs `<PROD>` — V14 establishes a *local* property (can `run002-wrk` write the real checkout's objects, refs and worktree gitdir) plus *which URL a push resolves to*, and any GitHub remote exercises the second equally. The probe is still a dedicated `probe/v14` branch and worktree, created by the step and deleted by its undo |
 | **Credentials — IT DOES CREATE THEM** | **CORRECTED.** Stage 1 creates **three real GitHub App private keys** and the installation tokens minted from them. What it does NOT need is the **eight product secrets** (`~/.config/run-002/secrets.env`) — those are Stage 3. "No secrets needed" earlier in this document meant the eight, and must not be read as "no credentials created". The keys are live credentials from the moment they exist: `0400`, owner `run002-sup`, outside the repository, and **revoked before replacement** if ever suspected |
 | **Cost — AND ONE UNVERIFIED ASSUMPTION** | **No paid provider call.** GitHub Apps, a repository and installation tokens are free; the cost is operator time and the keys above. **BUT "no billable operation" was overstated.** The procedure's A1 creates the throwaway as a **private** repository carrying a workflow that produces a check run named `ci`, and **V10 and V12 each require "let `ci` pass"** — so Stage 1 does run GitHub Actions there. Actions minutes are **free on public repositories and metered on private ones**. The account's remaining allowance **could not be read from this host**: `gh api /users/serina-mcfall/settings/billing/actions` returns 404 because the ambient token lacks the `user` scope, and refreshing that scope is itself an authorisation change outside this stage. **The bounded decision, yours:** create the throwaway **public** and the question disappears (one commit, a trivial workflow, no product code, no secret, no credential), or keep it **private** and accept a bound of **under ten runs of a workflow that must be trivial** — a single `ubuntu-latest` step that exits 0, explicitly **not** a copy of this repository's `.github/workflows/ci.yml`, which installs Playwright Chromium under `timeout-minutes: 25`. The V-steps need a check run *named* `ci` with a conclusion; they need nothing it does |
 | **Verification** | **V1–V14f on the throwaway**, ending at the 10b STOP gate. The four that matter most: **V3/V3b/V8** prove the permission split in both directions (the worker is refused a status, the gate can post one, the publisher is refused a merge); **V10** reproduces the F5 deadlock deliberately; **V13** runs the gate from the real read-only export — the step that would have caught both `WORKSPACE_MISMATCH` and the missing `ajv`; **V14a–f** confirm the git ownership under the real identities, including **V14d, which must SUCCEED** (objects and refs stay writable or no worker can commit) and **V14e, which CANNOT PASS and must be recorded not-applicable** |
 | **How to stop it** | it is a sequence of operator actions with a STOP gate at 10b. Stop at any step; nothing downstream is automatic |
-| **Rollback, in order — EVERY ITEM NAMES SOMETHING THIS STAGE CREATED** | **REWRITTEN 2026-10-02 against A0's capture.** 1. Revoke the three App private keys **before** issuing any replacement (a fresh key does not invalidate the old one). 2. Uninstall and delete the three Apps. 3. Delete the throwaway repository. 4. `rm -rf /opt/run-002/gate-<pin>`. 5. Delete the V14 probe: `git push origin --delete probe/v14`, `git worktree remove --force <WS>/.probe-v14`, `git branch -D probe/v14` — and nothing else under `refs/heads`, checked against A0's `refs-BEFORE.txt`. 6. Restore ownership and modes **by replaying `~/run-002-stage1-rollback/ownership-BEFORE.txt`**, not by `chown -R serina:serina` — `chmod -R 0750` over a workspace is not invertible from the after-state, and not every path under `<WS>` was `serina:serina` to begin with. 7. `userdel run002-wrk run002-sup` and `groupdel run002` **only for the identities A0 recorded as ABSENT**, and **without `-r`**: the procedure said `userdel -r` while this row said plain `userdel`, and `-r` against a pre-existing account deletes a home directory this stage never created. 8. Revert the two code changes (actions 6 and 6b) with `git revert`. **No product data exists at any point, and nothing in Run 001 is touched** |
+| **Rollback, in order — EVERY ITEM NAMES SOMETHING THIS STAGE CREATED** | **REWRITTEN 2026-10-02 against A0's capture.** 1. Revoke the three App private keys **before** issuing any replacement (a fresh key does not invalidate the old one). 2. Uninstall and delete the three Apps. 3. Delete the throwaway repository. 4. `rm -rf /opt/run-002/gate-<pin>`. 5. Delete the V14 probe: `git push probe --delete probe/v14` **on the throwaway**, `git worktree remove --force <WS>__worktrees/probe-v14`, `git branch -D probe/v14` — and nothing else under `refs/heads`, checked against A0's `refs-BEFORE.txt`. **5b. Undo the dispatch arrangement:** `git config --unset core.sharedRepository` and `rm -rf <WS>__worktrees`, each **only if A0's capture recorded it ABSENT**; `bin/supervisor.sh`'s `umask 0002` reverts with item 8's `git revert`. 6. Restore ownership and modes **by replaying `~/run-002-stage1-rollback/ownership-BEFORE.txt`**, not by `chown -R serina:serina` — `chmod -R 0750` over a workspace is not invertible from the after-state, and not every path under `<WS>` was `serina:serina` to begin with. 7. `userdel run002-wrk run002-sup` and `groupdel run002` **only for the identities A0 recorded as ABSENT**, and **without `-r`**: the procedure said `userdel -r` while this row said plain `userdel`, and `-r` against a pre-existing account deletes a home directory this stage never created. 8. Revert the two code changes (actions 6 and 6b) with `git revert`. **No product data exists at any point, and nothing in Run 001 is touched** |
 | **What it buys** | it converts every unverified row in §8 into a measured answer on a repository that can be deleted, and it is what **closes C-22** |
 | **C-22 closure — PRECISELY** | **CORRECTED.** C-22 closes when `.runtime/` is `0700` owned by a user the workers are not, **and V14a–f have been run and passed**. Approval does not close it; the verified ownership change does. **V14e cannot pass** under the single `run002-wrk` identity this section specifies — record it NOT APPLICABLE. So worker-to-worker reachability survives Stage 1 as a separate unresolved residual, and C-22's closure must be claimed only for what it covers: the records, evidence and credentials that decide a worker's own merge |
 
