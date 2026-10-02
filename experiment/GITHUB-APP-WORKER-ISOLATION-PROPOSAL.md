@@ -590,7 +590,13 @@ and the rollout stops there.
 | V10 | On the throwaway, with the protection payload applied: open a PR, let `ci` pass, do **not** post the independent-review status, and observe `mergeStateStatus` | **`BLOCKED`** — this is the direct, cheap reproduction of the F5 deadlock, and it must be reproduced *before* any code is written to resolve it | human | throwaway repo |
 | **V12** | **ADDED 2026-10-02.** On the throwaway, add a SECOND required context that nothing will ever satisfy, alongside `ci` and `run-002/independent-review`. Let `ci` pass, leave both other contexts unposted, and run the gate | the gate reports `blockedOnlyByPendingIndependentReview` **true** — and the merge **stays blocked**. Both halves must be observed. GitHub collapses every unsatisfied protection rule into one `BLOCKED`, and `live-gate.js:516-523` raises ONE reason code for it, so the flag cannot tell its own missing context from a second rule. This step makes that visible instead of leaving it as an argument, and confirms the thing that actually matters: **a true flag never produces a merge** | human | throwaway repo |
 | **V13** | **ADDED 2026-10-02, and it is the one that would have caught a launch-day failure.** Create the read-only export exactly as action 7 specifies (`git worktree add --detach`, `chown`, `chmod -R a-w`), then run the gate invoker against it for a real commit | **a real 40-hex SHA comes back, and the decision is not `HEAD_SHA_UNVERIFIED` or `REVIEWER_UNVERIFIED`.** `git-head.js:163` and `reviewer-identity.js:252` both derive their root from `__dirname`; from the export the first fails `WORKSPACE_MISMATCH` and the second finds no `.runtime/` (it is gitignored, so a worktree export has none). Either one denies every pull request forever, and `chmod -R a-w` means neither can be fixed in place. **Run this BEFORE action 11** — applying protection first turns a broken gate into a permanent deadlock | human | the export; no GitHub call needed for the head half |
-| **V14** | **ADDED 2026-10-02.** As `run002-wrk`, in a worker worktree of the real checkout after action 5's ownership is applied: `git add`, `git commit`, `git push` on a `run-002/` branch. Then, still as `run002-wrk`: attempt to write `<main>/.git/hooks/pre-commit`, and attempt to read `<main>/.git/worktrees/gate-<SHA>/HEAD` | the three worker operations **SUCCEED**; both attempts on the protected paths **FAIL**. §6's git row was proposed as `.git/` read-only, which measurement showed would stop every worker commit; the corrected row is narrower, and this is the step that confirms it under the REAL identities rather than under one user with `chmod` | human | sudo; after action 5 |
+| **V14** | **SUPERSEDED 2026-10-02 by V14a-f.** It assumed a worker commits inside a LINKED WORKTREE of the real checkout and expected only `hooks/` to be unwritable. The arrangement changed to a separate clone per worker, because under a linked worktree a worker MUST write the shared object store and the shared refs directory, so protecting one worker's refs took away another's commit. V14 as written would have confirmed the wrong thing | — | — | superseded |
+| **V14a** | As run002-wrk, in the worker clone created by action 5's dispatch: git add; git commit; git push -u origin <run-002 branch> | all three SUCCEED - the clone is the worker's own and its origin is the worker App's HTTPS remote | human | sudo; after action 5 |
+| **V14b** | As run002-wrk: write to <main>/.git/objects, <main>/.git/refs/heads, <main>/.git/config and <main>/.git/hooks/pre-commit | ALL FOUR FAIL. This is the check V14 could not make: with a linked worktree the first two HAD to succeed, and now none may | human | sudo; after action 5 |
+| **V14c** | As run002-wrk: read <main>/.git/worktrees/gate-<SHA>/HEAD | FAILS. gate_invoker.export_revision reads that file to prove the export is at the pin; a worker must reach neither it nor its directory | human | sudo; after action 5 |
+| **V14d** | As run002-sup, in the real checkout: run supervisor_fetch_argv for the branch V14a pushed, then git worktree add --detach <that sha> | both SUCCEED - this is how the Supervisor obtains worker commits once the shared object store is gone, and the second is exactly what accessibility_services.isolated_checkout does | human | sudo; after action 5 |
+| **V14e** | ONLY IF the deployment gives each worker its own uid: as worker A, write worker B's <clone>/.git/refs/heads/run-002/<B's task> | FAILS. Under the single run002-wrk identity §6 specifies this check CANNOT PASS and must not be claimed - two workers sharing a uid reach each other's files whatever the layout. Record it as not applicable, never as passed | human | sudo; after action 5 |
+| **V14f** | As run002-wrk, in that identity's OWN HOME: git config --get-regexp '^url\.' | EMPTY, or no entry whose insteadOf/pushInsteadOf value is a prefix of https://github.com/. This host's serina gitconfig carries url.git@github.com:.insteadOf=https://github.com/, which silently turns the worker's HTTPS origin back into SSH and sends it to the key action 5 took away. prepare_clone refuses with CLONE_ORIGIN_REWRITTEN if it is still there, so the failure is a refused dispatch - this check is how the operator finds out first | human | sudo; after action 5 |
 
 **A guard nobody has watched fail is not a guard.** V3b, V2b and V3c exist
 precisely so that the suite proves the boundary *admits* what it should as
@@ -606,7 +612,7 @@ created on GitHub, and so the F5 deadlock is resolved before it can bite.
 
 | # | Step | Who | Authorisation | Rollback |
 |---|---|---|---|---|
-| 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `b2df44fb82a4b83fd5a3a4277cd6a69863e0019f`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
+| 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `8be6a97867cb21c62830af9f8b02a34a7af0fcb5`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
 | **0b** | ~~**Push `wip/c05-1-persistence`** so the pinned revision exists on `origin`.~~ **DONE 2026-10-02** — the branch is pushed, and each re-pin is pushed with it; `44e1eb5` is reachable from `origin/wip/c05-1-persistence` and the pin is independently fetchable. **Re-check this after any re-pin** — a pin that only exists locally cannot be exported by anyone else. | done | repo write | n/a — pushing an existing local commit |
 | 1 | Create OS users `run002-sup`, `run002-wrk` and group `run002`. Set ownership and modes per §3.3 and §9.4. | human | root | `userdel run002-sup run002-wrk; groupdel run002`; restore ownership to `serina` |
 | 2 | Create the throwaway probe repository. | human | GitHub account | delete the repository |
@@ -966,7 +972,7 @@ Four things make this enforceable rather than aspirational:
 ### 9.5 THE TRUSTED APPARATUS REVISION
 
 > **TRUSTED APPARATUS REVISION:
-> `b2df44fb82a4b83fd5a3a4277cd6a69863e0019f`**
+> `8be6a97867cb21c62830af9f8b02a34a7af0fcb5`**
 > on `wip/c05-1-persistence`. Full 40 hex, never a branch name.
 
 **This supersedes §41.7's `4ae1488`, which is 16 commits stale.** It also
@@ -980,7 +986,7 @@ then re-checked independently by the integration owner at the final pin:
 
 ```
 $ git rev-parse HEAD
-b2df44fb82a4b83fd5a3a4277cd6a69863e0019f
+8be6a97867cb21c62830af9f8b02a34a7af0fcb5
 $ git rev-parse main origin/main
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
@@ -1031,7 +1037,7 @@ It named `b66944a`; two further commits landed — `f2129c5` (C-04b, which
 changes `control/routing.py`, code the gate's decisions depend on) and
 `6c53540` (a test-isolation fix), so it became `6c53540`.
 
-**RE-PINNED AGAIN 2026-10-02, to `b2df44fb82a4b83fd5a3a4277cd6a69863e0019f`.**
+**RE-PINNED AGAIN 2026-10-02, to `8be6a97867cb21c62830af9f8b02a34a7af0fcb5`.**
 Three further commits moved code inside the drift set: the C-22 worker
 environment allow-list (`control/worker_entry.py`), the gate invoker
 (`control/gate_invoker.py`), and the sixth provenance condition

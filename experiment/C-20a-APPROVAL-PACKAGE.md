@@ -302,15 +302,63 @@ that is documented.
 | `.runtime/` — ledger, state, evidence, locks | read+write | **no** | `.runtime/` `0700`, owner `run002-sup` |
 | Its own worktree | read+write | read+write | `0700`, owner `run002-wrk` |
 | Another worker's worktree | — | **reachable** | nothing — **UNRESOLVED**, recorded. No operator acceptance exists |
-| `.git/objects/` — the shared object store | read+write | **read+write** | **CORRECTED 2026-10-02 — see the box below.** A worker cannot commit without it |
-| `.git/worktrees/<its own>/` | read+write | **read+write** (its own only) | `0700`, owner `run002-wrk`; holds that worktree's HEAD and index |
-| `.git/refs/heads/run-002/` | read+write | **read+write** | a worker creates and advances its own task branch here. POSIX cannot scope this per-ref — see the box |
-| `.git/worktrees/gate-<SHA>/` — the export's gitdir | read+write | **no** | `0700`, owner `run002-sup`. `gate_invoker.export_revision()` reads its `HEAD` to prove the export is at the pin; a worker that could write it could claim any revision |
-| `.git/hooks/`, `.git/config` | read+write | **no** | `0750`, owner `run002-sup`. A hook is code the Supervisor's own git runs. **Verified a worker does not need it:** a commit succeeds with `hooks/` read-only |
+| `<main>/.git/**` — objects, refs, config, hooks, the gate export's gitdir | read+write | **NO WRITE AT ALL** | **REVISED 2026-10-02 — a worker now has its OWN CLONE and needs no write anywhere under `<main>/.git`.** §6's original row becomes implementable exactly as first written |
+| `<repo>__worker-clones/<worker>/` — the worker's own clone | read | read+write | `0750`, owner `run002-wrk`. Where the worker commits |
+| another worker's clone | read | **reachable under a single `run002-wrk`** | **UNRESOLVED.** Two workers sharing one uid reach each other's files whatever the layout. What changed is WHAT is reachable: a peer's scratch clone, which nothing the Supervisor trusts reads — no longer the Supervisor's authoritative refs or shared object store. Full separation needs per-worker uids; **with** them this layout enforces it and a linked worktree still could not |
 | `.github/workflows/` | read+write | **read, not write** in the main checkout | **ADDED 2026-10-02 — AND NOT CLOSED BY THE UID SPLIT.** See the box below |
 | `bin/` | read+write | read, not write | listed in this table but missing from the pin's drift set; now added to `F2` |
 
-> ### §6's GIT ROW WAS UNIMPLEMENTABLE, AND THE FIX IS NARROWER — ADDED 2026-10-02
+> ### WHY SEPARATE CLONES, AND THE TWO THINGS MEASUREMENT CHANGED — 2026-10-02
+>
+> The corrected linked-worktree row published earlier in this document was
+> implementable but could not deliver one of the three properties asked
+> for. **Under a linked worktree, protecting worker B's ref requires
+> taking away worker A's commit** — every worker branch lives in one
+> `<main>/.git/refs/heads/run-002/` and every commit must write one shared
+> object store. That is not a tuning problem; it is the layout.
+>
+> **Under a clone a worker needs no write anywhere under `<main>/.git`**,
+> which makes this section's ORIGINAL git row — `.git/` read, not write —
+> true as first written rather than something to correct.
+>
+> **The price, measured on a clone of this repository:** 18MB and 0.11s per
+> worker; ~165MB at the configured concurrency of nine, against a working
+> tree already at 314MB. Cost is not an argument against it.
+>
+> **Two things measurement changed, both of which would have caused a real
+> incident:**
+>
+> 1. **`--no-hardlinks` is forced.** A default local `git clone` shares the
+>    object file's INODE with the source. Verified: `chmod 600` on the
+>    clone's object changed the **source's** mode to `600`. A deployment
+>    that chowned such a clone to `run002-wrk` would re-own the
+>    Supervisor's object store. `--shared` is refused for a different
+>    reason — it leaves the worker's history depending on a store the
+>    Supervisor may `gc`.
+> 2. **Approved action 6c has a defect on this host.** `~/.gitconfig`
+>    carries `url.git@github.com:.insteadOf = https://github.com/`.
+>    Verified: after `git remote set-url origin https://…`,
+>    `git config remote.origin.url` reads **HTTPS** while
+>    `git remote get-url origin` and `--push` both resolve to **SSH**. The
+>    URL git actually uses is SSH — the key action 5 exists to take away.
+>    `worker_git.prepare_clone` reads the effective URL back out of git and
+>    refuses `CLONE_ORIGIN_REWRITTEN`, so this is a refused dispatch rather
+>    than a worker quietly pushing as `serina`. **V14f is how you find out
+>    before that happens.**
+>
+> **How the Supervisor obtains worker commits** once the shared store is
+> gone: one fetch over a local filesystem path — no network, no credential
+> — into `refs/run-002/workers/<worker>/<branch>`, deliberately not
+> `refs/heads/` and deliberately not forced, so a rewritten worker branch
+> fails the fetch instead of silently moving a ref the Supervisor trusts.
+>
+> **Still a permission simulation.** All of the above was verified under
+> ONE uid with `chmod`. **V14a–f replace V14** and are the deployed-identity
+> confirmation; V14e is explicitly marked as one that CANNOT PASS under the
+> single `run002-wrk` identity §6 specifies, and must be recorded not
+> applicable rather than passed.
+
+> ### §6's GIT ROW WAS UNIMPLEMENTABLE AS A LINKED WORKTREE — ADDED 2026-10-02
 >
 > This section proposed `.git/` as **read, not write** for `run002-wrk`.
 > **Applied as written, no worker could make a single commit** and the
@@ -496,7 +544,7 @@ that is documented.
 ## 7. The trusted revision
 
 > **TRUSTED APPARATUS REVISION:
-> `b2df44fb82a4b83fd5a3a4277cd6a69863e0019f`**, on
+> `8be6a97867cb21c62830af9f8b02a34a7af0fcb5`**, on
 > `wip/c05-1-persistence`. Full 40 hex, never a branch name.
 
 **`main` is disqualified, and this was checked rather than assumed.**
