@@ -301,10 +301,60 @@ that is documented.
 | `apparatus/`, `control/`, `bin/`, `config/`, `prompts/`, `protocol/` | read | **read, not write** | owner `run002-sup`, group `run002`, `0750`/`0640` |
 | `.runtime/` — ledger, state, evidence, locks | read+write | **no** | `.runtime/` `0700`, owner `run002-sup` |
 | Its own worktree | read+write | read+write | `0700`, owner `run002-wrk` |
-| Another worker's worktree | — | **reachable** | nothing — accepted, recorded |
-| `.git/` — refs and objects | read+write | **read, not write** | **ADDED 2026-10-02.** `git-head.js` resolves the trusted head from here, so a worker that can write refs can move the fact the gate calls trusted. Same owner/mode treatment as the source directories |
+| Another worker's worktree | — | **reachable** | nothing — **UNRESOLVED**, recorded. No operator acceptance exists |
+| `.git/objects/` — the shared object store | read+write | **read+write** | **CORRECTED 2026-10-02 — see the box below.** A worker cannot commit without it |
+| `.git/worktrees/<its own>/` | read+write | **read+write** (its own only) | `0700`, owner `run002-wrk`; holds that worktree's HEAD and index |
+| `.git/refs/heads/run-002/` | read+write | **read+write** | a worker creates and advances its own task branch here. POSIX cannot scope this per-ref — see the box |
+| `.git/worktrees/gate-<SHA>/` — the export's gitdir | read+write | **no** | `0700`, owner `run002-sup`. `gate_invoker.export_revision()` reads its `HEAD` to prove the export is at the pin; a worker that could write it could claim any revision |
+| `.git/hooks/`, `.git/config` | read+write | **no** | `0750`, owner `run002-sup`. A hook is code the Supervisor's own git runs. **Verified a worker does not need it:** a commit succeeds with `hooks/` read-only |
 | `.github/workflows/` | read+write | **read, not write** in the main checkout | **ADDED 2026-10-02 — AND NOT CLOSED BY THE UID SPLIT.** See the box below |
 | `bin/` | read+write | read, not write | listed in this table but missing from the pin's drift set; now added to `F2` |
+
+> ### §6's GIT ROW WAS UNIMPLEMENTABLE, AND THE FIX IS NARROWER — ADDED 2026-10-02
+>
+> This section proposed `.git/` as **read, not write** for `run002-wrk`.
+> **Applied as written, no worker could make a single commit** and the
+> factory would not run at all. Measured on a disposable repository, not
+> reasoned about — `tests/test_c22_worker_git_writes.py`:
+>
+> | What was made read-only | What the worker got |
+> |---|---|
+> | `.git/objects/` | `git add` → *"error: insufficient permission for adding an object to repository database"* |
+> | `.git/refs/` | `git commit` → *"fatal: cannot lock ref 'HEAD': Permission denied"* |
+> | `.git/hooks/` | **commit succeeds** — this one CAN be withheld |
+>
+> **Where a worker's git writes actually land.** A linked worktree's
+> `.git` is a FILE containing `gitdir: <main>/.git/worktrees/<name>`. So a
+> commit made inside a worker's worktree writes **into the main
+> repository**: objects to the shared store, HEAD and index to that
+> worktree's gitdir, and the branch ref under `.git/refs/heads/run-002/`.
+> There is no such thing as a worker that commits without writing to
+> `<main>/.git`.
+>
+> **What this means for the arrangement.** The directories a worker must
+> write are narrower than `.git/`, so the two that matter to the gate can
+> still be withheld: the **gate export's gitdir** (the pin proof) and
+> **`hooks/`/`config`** (code the Supervisor's git executes). That is the
+> corrected table above, and it permits every operation the factory needs.
+>
+> **ONE RESIDUAL, AND IT IS UNRESOLVED RATHER THAN ACCEPTED.** POSIX modes
+> cannot scope write access per ref. A worker that can create its own
+> `run-002/<task>` branch can also move another task's branch in the same
+> directory. It is **narrowed, not closed**, by the gate anchoring on the
+> head GitHub reports and cross-checking it against git: a locally moved
+> ref that disagrees with GitHub produces `HEAD_SHA_UNVERIFIED` or
+> `PR_HEAD_MOVED` and denies. Per-ref isolation would need a different
+> mechanism — separate clones per worker, or a git wrapper — and neither is
+> in this proposal. **No operator acceptance exists for this residual.**
+>
+> **THIS IS A PERMISSION SIMULATION, NOT AN IDENTITY VERIFICATION.** The
+> measurements above ran as ONE user, using `chmod` on a throwaway
+> repository. They establish which paths git must write. They do **not**
+> establish how `run002-wrk` behaves against files owned by `run002-sup` —
+> group membership, umask and any root-owned process can all differ.
+> **Confirming it under the real identities is V-step work after action 1**,
+> and is listed as V14 below. Nothing here creates a user or changes an
+> owner.
 
 > ### C-22 — AN OPEN LAUNCH BLOCKER, AND THE REASON THIS SECTION MATTERS
 >
@@ -377,25 +427,53 @@ that is documented.
 > revision's CI definition cannot move without the pin going red — but that
 > governs *this* checkout, not what a pull request branch carries.
 >
-> **THE TWO REMEDIES, AND BOTH NEED YOUR DECISION:**
+> **CORRECTED 2026-10-02 — THE PREVIOUS VERSION OF THIS BOX OFFERED APP
+> PINNING AS A REMEDY FOR A MODIFIED WORKFLOW. IT IS NOT ONE.** The two
+> mechanisms address different threats and neither substitutes for the
+> other:
 >
-> 1. **GitHub-side, and probably already half-done.**
->    `branch-protection-AFTER.json` pins the required `ci` context to
->    `app_id 15368` (GitHub Actions), so GitHub's own merge-blocking should
->    only count a `ci` run from that app. **Whether GitHub honours `app_id`
->    pinning this way is in §8's unverified list**, and V3c exists to test
->    it. If it holds, GitHub already refuses the forged-producer case and
->    only the modified-workflow case remains.
-> 2. **Workflow-content integrity.** Compare `.github/workflows/` at the
->    pull request head against the pinned revision and deny on any
->    difference. This is a governance decision as much as a technical one:
->    it means **no product task may ever change CI**, which is almost
->    certainly right for a 24-hour run but is a rule, not a bug fix. It also
->    needs a git read inside the merge path, which C-04b deliberately kept
->    out of the merge transaction.
+> | Mechanism | The threat it addresses | Does it stop a MODIFIED workflow? |
+> |---|---|---|
+> | **Expected-App pinning** — `branch-protection-AFTER.json` pins `ci` to `app_id 15368` | a check run named `ci` produced by something that is **not GitHub Actions** | **NO.** A modified workflow runs THROUGH GitHub Actions, so its check run carries `app_id 15368` legitimately and pinning accepts it |
+> | **Workflow integrity** | the workflow definition itself being changed by the branch under judgement | **YES — it is the only one of the two that does** |
 >
-> **Recorded as an open, accepted risk for the operator to rule on, not as
-> something this arrangement currently solves.**
+> App pinning is still worth having, and V3c still tests whether GitHub
+> honours it. It simply does not touch this gap.
+>
+> **THE PROPOSED AMENDMENT, AND IT IS NOT A BAN ON CHANGING CI.** A product
+> pull request may not modify the paths the trusted CI workflow executes.
+> Such a change is permitted — through a **separately reviewed apparatus
+> amendment**, the same shape as the governed decisions already recorded in
+> the contradiction audit. The rule is *"a product task may not change the
+> thing that judges it in the same breath"*, not *"this may never change"*.
+>
+> **The protected set is derived from execution, not taste**, and the
+> derivation is CHECKED: the test re-reads `ci.yml` and fails if a step
+> references a path no prefix covers.
+>
+> | Prefix | The `ci.yml` step that makes it load-bearing |
+> |---|---|
+> | `.github/workflows/` | the definition itself — it decides what every other step is |
+> | `apparatus/` | `npm test` (`node --test`) and `node apparatus/pr-evidence/validate.js`, which also requires `severity-floor.js` and `requirement-registry.js` |
+> | `control/` | `python -m unittest discover -s tests` — the suite imports the control plane it tests |
+> | `tests/` | the same step; the suite IS the assertions CI makes |
+> | `scripts/` | `python scripts/check_no_secrets.py`, the committed-secret guardrail |
+> | `protocol/` | `validate.js` reads `protocol/PR-EVIDENCE-V2.schema.json` |
+>
+> `evidence/` is deliberately NOT protected: it holds submitted packages —
+> the thing CI judges, not part of what judges. A product PR adding one
+> there is the normal case, and a test asserts ordinary product work
+> (`src/`, `package.json`, `public/`, an evidence package) is not refused.
+>
+> **BUILT AND PENDING APPROVAL:** `control/ci_protected_paths.py`, 12
+> tests. **Nothing calls it**, and a test pins that — wiring it into the
+> merge gate is the governance change, and it is yours. Enforcement also
+> needs the PR's changed-file list, which the merge path does not fetch
+> today.
+>
+> **Recorded as an UNRESOLVED RISK.** No operator acceptance exists for
+> it, and this document must not imply one. It is for you to rule on; it
+> is not something this arrangement currently solves.
 
 > **One change the GitHub side cannot substitute for:**
 > `control/worker_entry.py:180` is `env = dict(os.environ)` with no scrub
@@ -525,46 +603,81 @@ never `config.REPO_ROOT`, which is a mutable tree.
 
 ## 9. What needs YOUR approval — the twenty actions, in order
 
-**It was twelve until 2026-10-02.** An independent review found that the
-twelve, carried out exactly as written, would have left no process
-authenticating as any of the three Apps, left workers unable to push at
-all, installed production credentials before any falsification ran, and
-overwritten live branch protection with a reconstruction. Then an attempt
-to actually RUN the export found it could not load the gate at all.
+**It was twelve until 2026-10-02.** Three passes changed it: an
+independent review of this document, an adversarial review of the code,
+and an attempt to actually RUN the export. The twelve as written would
+have left no process authenticating as any of the three Apps, left workers
+unable to push, installed production credentials before any falsification
+ran, overwritten live protection with a reconstruction — and produced an
+export that could not load the gate.
 
-**Eight rows are new** — `0`, `6b`, `6c`, `7b`, `7c`, `10b`, `10c`, `11a`
-— and `3a` is the old row 3, moved to the throwaway. **Two of the eight
-are things without which the arrangement does not function at all**, not
-refinements: `6b` (nothing authenticates as any App, and workers cannot
-push) and `7b` (the export cannot load the gate).
+**THE COLUMN THAT MATTERS IS "BUILT?".** Several actions are now mostly
+done: the code exists, is tested against simulated services, and is
+waiting for a credential or a host. Those are **not** new approvals — they
+are the same action with less work left in it. The actions that need a
+decision from you are marked **DECISION**; the rest are execution.
 
-**None of these has been done. Each is yours.**
+| Marker | Meaning |
+|---|---|
+| **BUILT** | code exists locally, tested, nothing deployed. No approval needed for what exists |
+| **DEPLOY** | an action on the host or on GitHub. Needs your authorisation |
+| **DECISION** | a choice only you can make; the work cannot start without it |
+| **GATE** | a verification that must pass before the next step. **These are not optional and none has been removed** |
 
-| # | Action | Reversible? |
-|---|---|---|
-| 0 | **ADDED. Create the throwaway repository** that actions 3a and 10 use | yes — delete |
-| 1 | Create OS users `run002-sup` and `run002-wrk`, group `run002` | yes |
-| 2 | Create the three GitHub Apps with §2's permissions, zero events | yes — delete |
-| 3a | **CORRECTED. Install all three on the THROWAWAY repository first** | yes — uninstall |
-| 4 | Generate private keys; place `0400` owned by `run002-sup` | yes — revoke. **Revoke the old key BEFORE issuing a new one** — a fresh key does not invalidate its predecessor |
-| 5 | Re-own `.runtime/` and the checkout per §6; `chmod 0700 .runtime/` | yes |
-| 6 | Replace `worker_entry.py`'s environment pass-through with an allow-list. **The derivation is already written and tested** — `worker_entry.worker_child_env`, 10 tests. This action is the one line at the call site, plus confirming a real worker still starts | yes — code |
-| 6b | **ADDED, AND THE ORIGINAL TWELVE DID NOT WORK WITHOUT IT.** Change `control/gh.py:33` to pass an explicit per-role `GH_TOKEN`. See the box below | yes — code |
-| 6c | **ADDED.** Decide `origin` SSH → HTTPS for the worker's worktrees. Promoted out of §12, because after action 5 this is not optional | yes |
-| 7 | Create the gate export at the §7 pin — `git worktree add --detach` | yes — delete |
-| **7b** | **ADDED 2026-10-02, AND WITHOUT IT THE GATE CANNOT RUN AT ALL.** `cd <export>/apparatus && npm ci --omit=dev`, **before** the `chown`/`chmod`. See the box below | yes — delete the export |
-| 7c | **Only now** `chown -R run002-sup:run002` and `chmod -R a-w` the export | yes |
-| 8 | Build the gate invoker that runs `live-gate.js` from that export. **Read the §7 box on `WORKSPACE_MISMATCH` first** — the obvious implementation denies every pull request | yes — code |
-| 9 | Wire the publisher to the gate invoker and the gate credential. **The transport itself is now BUILT** (`status_transport.py`, 31 tests, 6 mutations) — this action is the wiring and the credential, not the request | yes — code |
-| 10 | Run the falsification plan on the THROWAWAY repository — **V1–V13**, including deliberately reproducing the F5 deadlock (V10). **V12 and V13 were added 2026-10-02**: V12 is the second-required-context check behind §4's box, and **V13 runs the gate from the read-only export, which is the step that would have caught the §7 trap.** V13 must pass before action 11 | n/a |
-| 10b | **STOP GATE.** Do not proceed unless every V-step passed. The proposal had two such gates; compressing to twelve actions lost both | n/a |
-| 10c | **CORRECTED. Only now install the three Apps on `serina-mcfall/wellbeing-run-002`** | yes — uninstall |
-| 11a | **ADDED. GET `/repos/{owner}/{repo}/branches/main/protection` and save the bytes.** THAT file is the rollback artefact, not `branch-protection-BEFORE.json` | n/a |
-| 11 | **Apply `branch-protection-AFTER.json` to `main`** | yes — the bytes from 11a |
-| 12 | Re-run `ctl preflight`; confirm `github_main_protection` still PASSes. **Then separately** `gh api .../protection` and confirm by eye that `run-002/independent-review` is in `contexts` and the review count is 0 — the gate checks neither | n/a |
+**None of the DEPLOY or DECISION rows has been done. Each is yours.**
+
+| # | Kind | Action | Reversible? |
+|---|---|---|---|
+| 0 | DEPLOY | Create the throwaway repository that actions 3a and 10 use | yes — delete |
+| 1 | DEPLOY | Create OS users `run002-sup` and `run002-wrk`, group `run002` | yes |
+| 2 | DEPLOY | Create the three GitHub Apps with §2's permissions, zero events | yes — delete |
+| 3a | DEPLOY | **Install all three on the THROWAWAY repository first** | yes — uninstall |
+| 4 | DEPLOY | Generate private keys; place `0400` owned by `run002-sup` | yes — revoke. **Revoke the old key BEFORE issuing a new one** — a fresh key does not invalidate its predecessor |
+| 5 | DEPLOY | Re-own `.runtime/` and the checkout per §6 — **including the corrected git row**; `chmod 0700 .runtime/` | yes |
+| 6 | **BUILT** + DEPLOY | The allow-list derivation exists and is tested (`worker_child_env`, 10 tests). What remains: one line at the call site, **plus** the UID split that gives the worker its own `GH_TOKEN` — the filter alone is not sufficient | yes — code |
+| 6b | DEPLOY | **WITHOUT THIS THE REST DOES NOT WORK.** Change `control/gh.py:33` to pass an explicit per-role `GH_TOKEN`. See the box below | yes — code |
+| 6c | **DECISION** | `origin` SSH → HTTPS for the worker's worktrees. After action 5 a worker cannot read `serina`'s SSH key, so declining needs another answer to how it pushes | yes |
+| 7 | DEPLOY | Create the gate export at the §7 pin — `git worktree add --detach` | yes — delete |
+| 7b | **BUILT** + DEPLOY | **WITHOUT THIS THE GATE CANNOT RUN AT ALL.** The packaging fix is done (`ajv` → `dependencies`, lockfile regenerated, `npm ci --omit=dev` verified). What remains: run it inside the export, **before** the `chown`/`chmod` | yes — delete the export |
+| 7c | DEPLOY | **Only now** `chown -R run002-sup:run002` and `chmod -R a-w` the export | yes |
+| 8 | **BUILT** | The invoker (`gate_invoker.py`) and the gate program (`gate-cli.js`, 29 tests) both exist and are built around all three `__dirname` traps. Nothing remains for this action but to point it at a real export | yes — code |
+| 9 | **BUILT** + DEPLOY | The transport (`status_transport.py`, 31 tests) and the join (`publication_path.py`) both exist. What remains: supply the gate credential and set the enable variable. **The request itself is written** | yes — code |
+| 10 | **GATE** | Run the falsification plan on the THROWAWAY repository — **V1–V14**. V10 reproduces the F5 deadlock; V12 is the second-required-context check (§4); **V13 runs the gate from a real read-only export** — the step that would have caught the §7 trap; **V14 confirms the corrected git ownership under the REAL identities**, which no local test can. V13 must pass before action 11 | n/a |
+| 10b | **GATE** | **STOP.** Do not proceed unless every V-step passed | n/a |
+| 10c | DEPLOY | **Only now** install the three Apps on `serina-mcfall/wellbeing-run-002` | yes — uninstall |
+| 11a | **GATE** | GET `/repos/{owner}/{repo}/branches/main/protection` and save the bytes. **THAT file is the rollback artefact**, not `branch-protection-BEFORE.json` | n/a |
+| 11 | **DECISION** + DEPLOY | **Apply `branch-protection-AFTER.json` to `main`.** This is the protection change, including `required_approving_review_count` 1 → 0 | yes — the bytes from 11a |
+| 12 | **GATE** | Re-run `ctl preflight`; confirm `github_main_protection` still PASSes. **Then separately** `gh api .../protection` and confirm by eye that `run-002/independent-review` is in `contexts` and the review count is 0 — the gate checks neither | n/a |
 
 **Step 11 is last, and that ordering is not a preference.** Applying it
 before 8–10 deadlocks every product PR permanently.
+
+### THE EXACT APPROVAL REQUEST
+
+Everything above is either already built or mechanical once authorised.
+**Four things actually need a decision from you**, and nothing starts
+without the first:
+
+| | Decision | If you say no |
+|---|---|---|
+| **A** | **Authorise the DEPLOY actions in §9, in order.** Identities, Apps, keys, ownership, export, credential, falsification | nothing proceeds; the apparatus stays as it is, fully built and inert |
+| **B** | **Apply `branch-protection-AFTER.json`** — action 11, which includes `required_approving_review_count` **1 → 0**. This is the hinge: `main` moves from "a human approved this" to "the gate approved this" | reject the arrangement rather than trimming it. Every other part exists to make this one substitution safe |
+| **C** | **`origin` SSH → HTTPS for the worker's worktrees** — action 6c. Recommended yes | you must supply another answer to how a worker pushes after action 5 |
+| **D** | **The trusted-CI protected path set** (§6) — wire `ci_protected_paths.py` into the merge gate, so a product PR touching what CI executes needs a separately reviewed apparatus amendment. Recommended yes | the modified-workflow gap stays open and UNRESOLVED |
+
+**B and D are governance; A and C are operational.** D can be taken
+independently of A — it is local code and needs no App, no host user and
+no protection change.
+
+**The three-principal design (§1) is the recommendation and is not
+reopened here.** It is what A authorises. The alternative — widening the
+gate App — costs the property that makes V8 falsifiable, and §12 records
+why.
+
+**What is NOT being asked.** Nothing about the already-built components
+needs approval: they exist, they are tested against simulated services,
+and none of them can act. Approving A does not approve D, and approving
+the local implementation has never approved the protection change in B.
 
 > ### ACTION 7b — THE EXPORT AS SPECIFIED COULD NOT RUN THE GATE. REPRODUCED.
 >
@@ -650,6 +763,8 @@ before 8–10 deadlocks every product PR permanently.
 | **The commit-status transport**, contract derived from GitHub's published documentation, **with no client, no socket import, no importer and no request ever sent** | `experiment/github-app/status_transport.py`, 31 tests, 6 mutations, 4 mechanical checks (`E2`) |
 | **C-23 — two of the three ways a product PR could satisfy the required CI check without CI passing**, closed by bringing the Python path to the rule `ci-result.js` already applied. The third is open, §6 | `control/gh.py::checks_state`, `tests/test_c23_required_check_integrity.py` (11 tests, 3 mutations) |
 | **The pending-review flag's contract**, rewritten as publish-eligibility and TESTED both ways — publish then ask the merge authority, which refuses | `tests/test_c20c_publish_eligibility_is_not_merge_eligibility.py` (8 tests, 1 mutation) |
+| **The trusted-CI protected path set** (decision D), derived from what `ci.yml` executes, with the derivation CHECKED against the workflow. **Not wired** — a test pins that | `control/ci_protected_paths.py`, `tests/test_c23_ci_protected_paths.py` (12 tests) |
+| **The measurement that §6's git row was unimplementable**, on a disposable repository: read-only objects or refs make a worker commit impossible; `hooks/` can be withheld | `tests/test_c22_worker_git_writes.py` (7 tests) |
 
 ---
 
@@ -678,8 +793,9 @@ requires otherwise.
 
 | Question | Recommendation | Why |
 |---|---|---|
-| Third principal, or widen the gate App? | **Third principal** | Widening the gate App costs the property that makes V8 falsifiable: that the publisher cannot act on what it blessed |
+| Third principal, or widen the gate App? | **Third principal — this is the recommendation and §1 is written to it. Not reopened.** | Widening the gate App costs the property that makes V8 falsifiable: that the publisher cannot act on what it blessed |
 | Move `origin` from SSH to HTTPS? | **Yes, for the worker's worktrees only** — leave your own checkout on SSH | Today the strongest write credential in the system is a personal SSH key sitting entirely outside the scheme. That is a larger hole than the one the App closes. **AND, as of 2026-10-02, it is no longer optional:** after action 5 re-owns the checkout, a worker cannot read `serina`'s SSH key or `gh` config, so declining this requires some other answer to how a worker pushes a branch. Promoted to action 6c |
 
-The first remains yours to settle. The second is now a required action with
-a recommended answer, not a free choice.
+The first is settled as the proposal's design and is listed here for
+visibility, not as an open question. The second is a required action with a
+recommended answer — decision C in §9.
