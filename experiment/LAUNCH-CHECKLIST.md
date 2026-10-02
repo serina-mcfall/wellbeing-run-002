@@ -9,11 +9,11 @@ document, **they win**. This checklist orders and enumerates; it decides nothing
 T+00 remains **NOT_STARTED** (`experiment/TIMELINE.md`). Nothing in this
 document authorises launch, and no partial completion of it does either.
 
-**Session state as of 2026-10-02: `C05-3a-SESSION-HANDOVER.md` §52**, which
-supersedes §51, §50, §49, §48, §47, §46, §45, §44, §43 and §42. §41 and §16
-are stale. Branch `wip/c05-1-persistence`, code HEAD `40b3933`, trusted pin
-**`47f35f5`**, plus documentation commits.
-Verification re-measured 2026-10-02: **2,721 Python tests (11 skipped), 259
+**Session state as of 2026-10-02: `C05-3a-SESSION-HANDOVER.md` §53**, which
+supersedes §52, §51, §50, §49, §48, §47, §46, §45, §44, §43 and §42. §41 and §16
+are stale. Branch `wip/c05-1-persistence`, HEAD and trusted pin both
+**`ab1ceee`**, plus documentation commits.
+Verification re-measured 2026-10-02: **2,729 Python tests (11 skipped), 259
 apparatus tests**, both exit 0; `check-templates.py` 0 failing.
 **Context handover arrangement: §51, corrected by §52.** The overseeing
 session's occupancy IS readable; the runtime agents' is not, because each
@@ -26,11 +26,12 @@ it.
 **What actually warns today is local and passive:** the status line turns
 `ctx:NN%` bold red and appends `HANDOVER` at or above 50%, from Claude
 Code's own `context_window.used_percentage`. See §52.
-**Trusted pin re-pinned to `47f35f50fd9ebaebf6eadbd2902d53123ef1ed44`** —
-the eighth re-pin in two sessions, every one demanded by `check-templates.py`
-`F2` rather than noticed by a person. The thirteen new tests are the
-expected-head merge binding: §5 of the approval package specified a `sha`
-on the merge call and `control/gh.py` did not send one. Fixed.
+**Trusted pin re-pinned to `ab1ceee8b2d8ac88663c51a36ccf99b240f4c061`** —
+the ninth re-pin, every one demanded by `check-templates.py` `F2` rather
+than noticed by a person. This one is the dispatch writability arrangement:
+`bin/supervisor.sh` gained `umask 0002` and `control/worker_git.py` records
+the choice, both inside the drift set. The eight new tests are
+`tests/test_c22_shared_dispatch_modes.py`.
 
 **Stage 1 is PREPARED and NOT APPROVED. No deployment stage has been
 approved.** Three items are now recorded as **required Run 002 wiring, not

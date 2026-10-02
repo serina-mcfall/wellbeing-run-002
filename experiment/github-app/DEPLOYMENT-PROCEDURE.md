@@ -66,7 +66,7 @@ harm, not merely inconvenience.
       Every V-step's "who runs it" column is `human`.
 - [ ] The trusted revision confirmed or re-stated **at approval time**,
       not inherited from the document:
-      `47f35f50fd9ebaebf6eadbd2902d53123ef1ed44`. Below it is written
+      `ab1ceee8b2d8ac88663c51a36ccf99b240f4c061`. Below it is written
       `<PIN>`. **This line was two re-pins stale on 2026-10-02** — it
       still named `b2df44f` after the proposal's §9.5 had moved twice.
       Read the pin out of §9.5, never out of this line.

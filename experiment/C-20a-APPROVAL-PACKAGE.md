@@ -590,7 +590,7 @@ that is documented.
 ## 7. The trusted revision
 
 > **TRUSTED APPARATUS REVISION:
-> `47f35f50fd9ebaebf6eadbd2902d53123ef1ed44`**, on
+> `ab1ceee8b2d8ac88663c51a36ccf99b240f4c061`**, on
 > `wip/c05-1-persistence`. Full 40 hex, never a branch name.
 
 **`main` is disqualified, and this was checked rather than assumed.**

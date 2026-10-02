@@ -9253,3 +9253,98 @@ reassurance.
 > UUID, **never by newest mtime**, and never from `.claude/.sid-*`, which
 > are unrelated random ids. Do not clear a session, stop a worker or
 > restart the clock.
+
+---
+
+## 53. SESSION HANDOVER — the dispatch arrangement, chosen and measured (2026-10-02)
+
+**Read this first. It supersedes §52 and everything before it.**
+
+### 53.1 Verified state
+
+| | |
+|---|---|
+| Branch | `wip/c05-1-persistence`, in sync with `origin` |
+| HEAD | `ab1ceee`, plus this section's own commit |
+| Pin | **re-pinned to `ab1ceee`**, the ninth, demanded by `F2` naming `bin/supervisor.sh`. `check-templates.py` **0 failing**, `F1`/`F2` green |
+| Verification | **2,729 Python OK (11 skipped) · 259 apparatus pass, 0 fail** — 2,721 + 8 for the dispatch arrangement |
+| T+00 | **NOT_STARTED** |
+| Agents / processes | **None running** |
+| Worktrees | **12** — the 11 pre-existing plus main |
+| Stage 1 | **PREPARED, NOT APPROVED** |
+
+### 53.2 The dispatch writability question is answered
+
+§50.5 left it open and §13 called it "the operator's". It was an
+implementation decision, and it is made: **group-write through the `run002`
+group, applied to linked worktrees. No root helper at dispatch, no new
+`sudo` rule, no clone redesign.**
+
+**Three parts, all required** — `tests/test_c22_shared_dispatch_modes.py`,
+8 tests, two mutations watched failing:
+
+1. `core.sharedRepository=group` — git creates new object directories,
+   refs and worktree gitdirs group-writable and setgid.
+2. A one-time `chmod -R g+ws` of `.git/objects`, `.git/refs`, `.git/logs`
+   — part 1 is **not retroactive**; these exist at `0755` from `git init`.
+3. `umask 0002` in `bin/supervisor.sh` — without it the checked-out files
+   are `0644` and the worktree gitdir `2755`, and the worker cannot write
+   its own worktree.
+
+Miss any one and the failure is **latent**, not immediate. That is why
+each has a test.
+
+**Two traps found by measuring rather than reasoning:**
+
+- **`git init --shared=group` is not the fix it looks like.** On an
+  existing repository it repairs no existing mode and rewrites the config
+  value to the numeric form.
+- **The worker worktree root is a SIBLING of `<WS>`, and the Supervisor
+  cannot create it.** workmux 0.1.231's default `worktree_dir` is
+  `<project>__worktrees`; this host has no global config file and no
+  repository-local one, so the default applies. Its parent is
+  `drwxr-xr-x serina:serina`, so `run002-sup` has no write bit and the
+  **first dispatch would have failed outright**. A5 pre-creates it `2770`;
+  A0 captures it, because `find <WS>` never reaches it. **Do not use
+  `control/config.py`'s `WORKTREE_ROOT`** — it names a different path.
+
+**What it costs, unchanged from §6's existing residual:** group-writable
+`objects`/`refs`/`logs` are writable by every member of `run002`. Under
+the single `run002-wrk` identity, peers already share a uid, so **no
+reachability is added**. V14e stays NOT APPLICABLE.
+
+### 53.3 V14 was proving the wrong thing, and no longer writes to `<PROD>`
+
+**The probe used to `sudo chown -R run002-wrk` its own worktree straight
+after creating it.** The one step meant to force the dispatch-time choice
+was performing it by hand. The chown is gone: the worktree is created by
+`run002-sup` under the Supervisor's umask, in the real root, and **nothing
+rescues it**. V14b asserts the modes before any worker touches them.
+
+**The push moved to the throwaway, on an orphan branch.** `<PROD>` is
+untouched and no Run 002 history leaves the host. §13's "what it does NOT
+touch" row is true again as originally written, and the correction that
+admitted a production write is **withdrawn in favour of removing the
+write**. No requirement needs `<PROD>`: V14 establishes a *local* property
+plus *which URL a push resolves to*, and any GitHub remote exercises the
+second equally.
+
+**V14g's export check moved to C1**, where the export exists. Run in
+Phase B it returns "No such file", which is not the same answer as
+"Permission denied" and must not be recorded as one. **C1 also claws the
+export's gitdir back to `0700`** — part 1 would otherwise leave it
+group-writable, and that `HEAD` is the pin proof `export_revision()` reads.
+
+### 53.4 Unchanged, and not reopened
+
+The local status-line warning (§52.5) stands and **remote notification
+stays deferred**. **R1, R2 and R3 remain required before STAGE 2.** Scope
+stays frozen; clone isolation stays deferred. T+00 stays `NOT_STARTED`.
+
+### 53.5 Exact next actions
+
+1. **Decide Stage 1**, including the throwaway's **visibility**.
+2. **If approved**: `experiment/github-app/DEPLOYMENT-PROCEDURE.md`, **A0
+   first**, then A → B → C, stop at **10b**, record **V14e NOT
+   APPLICABLE**.
+3. **Before Stage 2**: R1, R2, R3 implemented and verified.

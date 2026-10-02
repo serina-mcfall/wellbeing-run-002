@@ -611,7 +611,7 @@ created on GitHub, and so the F5 deadlock is resolved before it can bite.
 
 | # | Step | Who | Authorisation | Rollback |
 |---|---|---|---|---|
-| 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `47f35f50fd9ebaebf6eadbd2902d53123ef1ed44`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
+| 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `ab1ceee8b2d8ac88663c51a36ccf99b240f4c061`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
 | **0b** | ~~**Push `wip/c05-1-persistence`** so the pinned revision exists on `origin`.~~ **DONE 2026-10-02** — the branch is pushed, and each re-pin is pushed with it; `44e1eb5` is reachable from `origin/wip/c05-1-persistence` and the pin is independently fetchable. **Re-check this after any re-pin** — a pin that only exists locally cannot be exported by anyone else. | done | repo write | n/a — pushing an existing local commit |
 | 1 | Create OS users `run002-sup`, `run002-wrk` and group `run002`. Set ownership and modes per §3.3 and §9.4. | human | root | `userdel run002-sup run002-wrk; groupdel run002`; restore ownership to `serina` |
 | 2 | Create the throwaway probe repository. | human | GitHub account | delete the repository |
@@ -971,7 +971,7 @@ Four things make this enforceable rather than aspirational:
 ### 9.5 THE TRUSTED APPARATUS REVISION
 
 > **TRUSTED APPARATUS REVISION:
-> `47f35f50fd9ebaebf6eadbd2902d53123ef1ed44`**
+> `ab1ceee8b2d8ac88663c51a36ccf99b240f4c061`**
 > on `wip/c05-1-persistence`. Full 40 hex, never a branch name.
 
 **This supersedes §41.7's `4ae1488`, which is 16 commits stale.** It also
@@ -985,16 +985,16 @@ then re-checked independently by the integration owner at the final pin:
 
 ```
 $ git rev-parse HEAD
-47f35f50fd9ebaebf6eadbd2902d53123ef1ed44
+ab1ceee8b2d8ac88663c51a36ccf99b240f4c061
 $ git rev-parse main origin/main
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
 $ git merge-base main HEAD
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
 $ git rev-list --count HEAD..main     ->  0      # main is a strict ancestor
-$ git rev-list --count main..HEAD     -> 86      # 86 commits of apparatus
+$ git rev-list --count main..HEAD     -> 90      # 90 commits of apparatus
 $ git diff --shortstat main..HEAD
-  183 files changed, 64707 insertions(+), 494 deletions(-)
+  187 files changed, 66313 insertions(+), 494 deletions(-)
 $ git ls-tree -r --name-only main -- apparatus control | wc -l  -> 50
 $ git ls-tree -r --name-only HEAD -- apparatus control | wc -l  -> 94
 ```
@@ -1047,6 +1047,14 @@ of them demanded by the check rather than noticed by a person**, which is
 the argument for the check. The drift set itself was widened in the same
 session to include `bin/` and `.github/`, so the figure it compares is now
 larger than it was for either earlier pin.
+
+**RE-PINNED AGAIN 2026-10-02 (the ninth), to
+`ab1ceee8b2d8ac88663c51a36ccf99b240f4c061`.** The dispatch writability
+arrangement moved two files inside the drift set: `bin/supervisor.sh`
+gained `umask 0002`, and `control/worker_git.py` records which of its two
+documented shapes the deployment chose. `F2` went red naming
+`bin/supervisor.sh`. The paragraph below describes the re-pin before this
+one and is kept as the record of it.
 
 **RE-PINNED ONCE MORE 2026-10-02, to
 `47f35f50fd9ebaebf6eadbd2902d53123ef1ed44`.** One commit moved code inside
