@@ -4767,7 +4767,13 @@ class Supervisor:
                                         "condition": decision.condition})
             return
 
-        result = gh.merge(repo, number)
+        # §4's SHA-binding table, last row: the merge call carries the head
+        # the gate judged. `head` is `pr["headRefOid"]` - GitHub's own
+        # observation under this transaction's lock, the same value the
+        # ledger attestation and the CI-path check were taken against, and
+        # never `record["reviewed_head"]`, which a worker can write.
+        result = gh.merge(repo, number, expected_head=head,
+                          head_branch=pr.get("headRefName"))
         if not result.ok:
             self.log("MERGE_FAILED", task_id=task["id"], pr_id=number, outcome="FAILED",
                      activity_class="ORCHESTRATION",

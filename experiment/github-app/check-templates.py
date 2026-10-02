@@ -174,16 +174,30 @@ CALL_SITES = [
     # numbers moved — and re-citing is exactly what this check exists to
     # force: a permission may not drift away from the call it was derived
     # from without someone looking at the call again.
-    ("control/gh.py", 440, "statusCheckRollup", "supervisor: checks read + statuses read"),
-    ("control/gh.py", 445, "pr", "worker/supervisor: pull_requests read"),
+    # RE-CITED AGAIN 2026-10-02, second time. The expected-head fix (§5)
+    # replaced `gh pr merge` with the REST `PUT .../merge` the document
+    # specifies, added the `EXPECTED_HEAD_MISSING` constant near the head of
+    # the file, and added a second call - the ref deletion that `gh pr
+    # merge --delete-branch` used to perform. Everything below the constant
+    # moved by a fixed offset; the CALLS are otherwise unchanged. The merge
+    # needle is now the endpoint rather than the bare word "merge", because
+    # the bare word matched almost every line in the file and so proved
+    # nothing about which call the permission came from.
+    ("control/gh.py", 446, "statusCheckRollup", "supervisor: checks read + statuses read"),
     ("control/gh.py", 451, "pr", "worker/supervisor: pull_requests read"),
-    ("control/gh.py", 555, "update-branch", "supervisor: pull_requests write (F2)"),
-    ("control/gh.py", 565, "ready", "supervisor: pull_requests write (F2)"),
-    ("control/gh.py", 570, "merge", "supervisor: pull_requests + contents write (F2)"),
-    ("control/gh.py", 576, "create", "worker: pull_requests write"),
-    ("control/gh.py", 581, "comment", "supervisor: issues write (UNVERIFIED)"),
-    ("control/gh.py", 586, "protection", "supervisor: administration read (F3)"),
-    ("control/gh.py", 594, "run", "supervisor: actions read (F4)"),
+    ("control/gh.py", 457, "pr", "worker/supervisor: pull_requests read"),
+    ("control/gh.py", 561, "update-branch", "supervisor: pull_requests write (F2)"),
+    ("control/gh.py", 571, "ready", "supervisor: pull_requests write (F2)"),
+    ("control/gh.py", 604, "pulls/{number}/merge",
+     "supervisor: pull_requests + contents write (F2)"),
+    ("control/gh.py", 605, "sha={expected_head}",
+     "the merge is bound to the head the gate judged — §4's table, §5"),
+    ("control/gh.py", 609, "git/refs/heads/",
+     "supervisor: contents write — the ref deletion `--delete-branch` used to do"),
+    ("control/gh.py", 615, "create", "worker: pull_requests write"),
+    ("control/gh.py", 620, "comment", "supervisor: issues write (UNVERIFIED)"),
+    ("control/gh.py", 625, "protection", "supervisor: administration read (F3)"),
+    ("control/gh.py", 633, "run", "supervisor: actions read (F4)"),
     ("prompts/builder.md", 60, "gh pr create", "worker: pull_requests write"),
     ("prompts/reviewer.md", 15, "gh pr diff", "worker: pull_requests read"),
     ("prompts/reviewer.md", 16, "gh pr view", "worker: pull_requests read"),

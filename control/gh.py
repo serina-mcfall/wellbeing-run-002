@@ -118,6 +118,12 @@ GH_ENV_ALLOWED: frozenset[str] = frozenset({
 # tell a credential problem from an execution one.
 AUTH_UNAVAILABLE = 125
 
+# Exit code for "this never ran, because no expected head was supplied".
+# A merge whose expected head is unknown is refused HERE rather than sent to
+# GitHub with a missing or literal-`None` `sha`, which would be refused
+# remotely for a reason an operator would have to decode from a 422.
+EXPECTED_HEAD_MISSING = 123
+
 # Finite reasons. Prose is for humans; these are what the ledger records.
 ROLE_UNKNOWN = "ROLE_UNKNOWN"
 ROLE_TOKEN_ABSENT = "ROLE_TOKEN_ABSENT"
@@ -566,9 +572,42 @@ def mark_ready(repo: str, number: int, *, role: str | None = None) -> Result:
 
 
 def merge(repo: str, number: int, method: str = "squash",
-          *, role: str | None = None) -> Result:
-    return run(["gh", "pr", "merge", str(number), "--repo", repo, f"--{method}",
-                "--delete-branch"], role=role)
+          *, expected_head: str | None, head_branch: str | None = None,
+          role: str | None = None) -> Result:
+    """Merge a pull request, but ONLY if its head is still `expected_head`.
+
+    THE EXPECTED HEAD IS NOT OPTIONAL — approval package §4's SHA-binding
+    table and §5. Every other link in the chain (evidence, review, gate
+    verdict, posted status) is bound to one commit; without `sha` the merge
+    itself was the one link bound to a pull request NUMBER instead, so a
+    push landing between the gate's verdict and this call merged a head
+    nothing had judged. That window was closed only by the NEXT tick
+    noticing `HEAD_SHA_CHANGED`, which is after the merge, not before it.
+
+    REST rather than a `gh pr merge` flag, for the reason §5 records: a
+    local hook on this host refuses all `gh pr` invocations including
+    `--help`, so the flag could not be verified, and `PUT
+    /repos/{owner}/{repo}/pulls/{n}/merge` with `sha` is documented.
+    GitHub answers 409 when the head has moved, so the refusal is GitHub's,
+    not ours.
+
+    `--delete-branch` has no REST equivalent on that endpoint, so the ref
+    is deleted by a second, BEST-EFFORT call: the merge has already
+    happened and is irreversible, and a surviving branch is untidy rather
+    than unsafe. Its result is deliberately not consulted.
+    """
+    if not expected_head:
+        # NO FALLBACK TO AN UNBOUND MERGE. Refusing is the point.
+        return Result(False, "", "no expected head: refusing to merge",
+                      EXPECTED_HEAD_MISSING)
+    result = run(["gh", "api", "--method", "PUT",
+                  f"repos/{repo}/pulls/{number}/merge",
+                  "-f", f"sha={expected_head}",
+                  "-f", f"merge_method={method}"], role=role)
+    if result.ok and head_branch:
+        run(["gh", "api", "--method", "DELETE",
+             f"repos/{repo}/git/refs/heads/{head_branch}"], role=role)
+    return result
 
 
 def create_pr(repo: str, head: str, base: str, title: str, body: str,
