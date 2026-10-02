@@ -302,61 +302,41 @@ that is documented.
 | `.runtime/` — ledger, state, evidence, locks | read+write | **no** | `.runtime/` `0700`, owner `run002-sup` |
 | Its own worktree | read+write | read+write | `0700`, owner `run002-wrk` |
 | Another worker's worktree | — | **reachable** | nothing — **UNRESOLVED**, recorded. No operator acceptance exists |
-| `<main>/.git/**` — objects, refs, config, hooks, the gate export's gitdir | read+write | **NO WRITE AT ALL** | **REVISED 2026-10-02 — a worker now has its OWN CLONE and needs no write anywhere under `<main>/.git`.** §6's original row becomes implementable exactly as first written |
-| `<repo>__worker-clones/<worker>/` — the worker's own clone | read | read+write | `0750`, owner `run002-wrk`. Where the worker commits |
-| another worker's clone | read | **reachable under a single `run002-wrk`** | **UNRESOLVED.** Two workers sharing one uid reach each other's files whatever the layout. What changed is WHAT is reachable: a peer's scratch clone, which nothing the Supervisor trusts reads — no longer the Supervisor's authoritative refs or shared object store. Full separation needs per-worker uids; **with** them this layout enforces it and a linked worktree still could not |
+| `<main>/.git/objects/`, `.git/refs/heads/run-002/`, its own worktree gitdir | read+write | **read+write** | **what SHIPS.** A worker cannot commit without all three — measured |
+| `<main>/.git/hooks/`, `.git/config` | read+write | **no** | `0750`, owner `run002-sup`. A hook is code the Supervisor's git runs. Verified a commit succeeds with `hooks/` read-only |
+| `<main>/.git/worktrees/gate-<SHA>/` — the export's gitdir | read+write | **no** | `0700`, owner `run002-sup`. `export_revision` reads its `HEAD` to prove the export is at the pin |
+| another worker's branch ref | — | **reachable** | **UNRESOLVED, and not a launch blocker.** POSIX cannot scope writes per ref. A moved local ref cannot produce an unreviewed merge: `evaluate_merge` denies `HEAD_SHA_CHANGED`/`HEAD_SHA_UNVERIFIABLE` against the head GitHub reports. Under the single `run002-wrk` identity peers reach each other's files regardless |
 | `.github/workflows/` | read+write | **read, not write** in the main checkout | **ADDED 2026-10-02 — AND NOT CLOSED BY THE UID SPLIT.** See the box below |
 | `bin/` | read+write | read, not write | listed in this table but missing from the pin's drift set; now added to `F2` |
 
-> ### WHY SEPARATE CLONES, AND THE TWO THINGS MEASUREMENT CHANGED — 2026-10-02
+> ### WHAT SHIPS FOR RUN 002, AND WHAT IS BUILT BUT DEFERRED — 2026-10-02
 >
-> The corrected linked-worktree row published earlier in this document was
-> implementable but could not deliver one of the three properties asked
-> for. **Under a linked worktree, protecting worker B's ref requires
-> taking away worker A's commit** — every worker branch lives in one
-> `<main>/.git/refs/heads/run-002/` and every commit must write one shared
-> object store. That is not a tuning problem; it is the layout.
+> **SHIPPING: linked worktrees with the narrowed ownership above.** This is
+> what `control/supervisor.py` actually does today (six `acquire_worktree`
+> call sites) and what the suite exercises.
 >
-> **Under a clone a worker needs no write anywhere under `<main>/.git`**,
-> which makes this section's ORIGINAL git row — `.git/` read, not write —
-> true as first written rather than something to correct.
+> **BUILT, TESTED, NOT WIRED, DEFERRED TO RUN 003: a separate clone per
+> worker** (`control/worker_git.py`, 41 tests). It is strictly better —
+> under a clone a worker needs no write anywhere under `<main>/.git` — but
+> wiring it touches ten Supervisor call sites plus a new fetch in the
+> Builder→Fixer handoff, immediately before deployment, **for a property
+> that cannot be achieved anyway under the single `run002-wrk` identity
+> this section specifies** (V14e cannot pass). Run 002 is a bounded
+> experiment; this is the kind of hardening Run 003 is for.
 >
-> **The price, measured on a clone of this repository:** 18MB and 0.11s per
-> worker; ~165MB at the configured concurrency of nine, against a working
-> tree already at 314MB. Cost is not an argument against it.
+> **Two measurements from that work are kept, because they would have
+> caused a real incident either way:**
 >
-> **Two things measurement changed, both of which would have caused a real
-> incident:**
->
-> 1. **`--no-hardlinks` is forced.** A default local `git clone` shares the
->    object file's INODE with the source. Verified: `chmod 600` on the
->    clone's object changed the **source's** mode to `600`. A deployment
->    that chowned such a clone to `run002-wrk` would re-own the
->    Supervisor's object store. `--shared` is refused for a different
->    reason — it leaves the worker's history depending on a store the
->    Supervisor may `gc`.
+> 1. **A default local `git clone` shares the object file's INODE.**
+>    Verified: `chmod 600` on a clone's object changed the **source's** mode
+>    to `600`. Any future clone-based deployment must use `--no-hardlinks`.
 > 2. **Approved action 6c has a defect on this host.** `~/.gitconfig`
 >    carries `url.git@github.com:.insteadOf = https://github.com/`.
 >    Verified: after `git remote set-url origin https://…`,
 >    `git config remote.origin.url` reads **HTTPS** while
->    `git remote get-url origin` and `--push` both resolve to **SSH**. The
->    URL git actually uses is SSH — the key action 5 exists to take away.
->    `worker_git.prepare_clone` reads the effective URL back out of git and
->    refuses `CLONE_ORIGIN_REWRITTEN`, so this is a refused dispatch rather
->    than a worker quietly pushing as `serina`. **V14f is how you find out
->    before that happens.**
->
-> **How the Supervisor obtains worker commits** once the shared store is
-> gone: one fetch over a local filesystem path — no network, no credential
-> — into `refs/run-002/workers/<worker>/<branch>`, deliberately not
-> `refs/heads/` and deliberately not forced, so a rewritten worker branch
-> fails the fetch instead of silently moving a ref the Supervisor trusts.
->
-> **Still a permission simulation.** All of the above was verified under
-> ONE uid with `chmod`. **V14a–f replace V14** and are the deployed-identity
-> confirmation; V14e is explicitly marked as one that CANNOT PASS under the
-> single `run002-wrk` identity §6 specifies, and must be recorded not
-> applicable rather than passed.
+>    `git remote get-url` and `--push` both resolve to **SSH** — the key
+>    action 5 exists to take away. **V14f is how you find out before a
+>    worker pushes as `serina`.**
 
 > ### §6's GIT ROW WAS UNIMPLEMENTABLE AS A LINKED WORKTREE — ADDED 2026-10-02
 >
@@ -879,26 +859,18 @@ can run at all and that the git ownership permits a worker to commit.
 
 ### STAGE 1 — host isolation and the throwaway repository
 
-**This is the stage to approve now.** Nothing in it touches
-`serina-mcfall/wellbeing-run-002`, changes any protection, publishes any
-status, or spends anything.
+**READY FOR APPROVAL. Its prerequisites are complete.**
 
 | | |
 |---|---|
-| **Actions** | §9 rows **0, 1, 2, 3a, 4, 5, 6, 6b, 6c, 7, 7b, 7c, 8, 9, 10, 10b** |
-| **Affected resources** | a NEW throwaway GitHub repository; two NEW OS users `run002-sup` and `run002-wrk` and group `run002`; three NEW GitHub Apps installed **on the throwaway only**; three private keys at `0400`; ownership and modes of `.runtime/`, the checkout, and `.git/` per §6's corrected table; a read-only export at `/opt/run-002/gate-<pin>` |
-| **NOT touched** | `main`, its branch protection, the Run 002 repository's settings, any product PR, any provider that charges |
-| **Verification** | **V1–V14 on the throwaway**, ending at the 10b STOP gate. V10 reproduces the F5 deadlock deliberately. **V13** runs the gate from a real read-only export — the step that would have caught the `WORKSPACE_MISMATCH` and `ajv` traps. **V14** confirms the corrected git ownership under the REAL identities, which no local test can do |
-| **Rollback** | delete the throwaway repository; uninstall and delete the three Apps; revoke the keys **before** issuing any replacement; `userdel` the two users; restore `.runtime/` and checkout ownership to `serina`; `rm -rf` the export. **No product data exists at any point in this stage** |
-| **Prerequisites** | the eight secrets are NOT required for Stage 1. Nothing here reads them |
-
-**What Stage 1 buys you.** It converts every "unverified" row in §8 into a
-measured answer, on a repository that can be deleted — including whether
-GitHub honours `app_id` pinning (V3c), whether the worker App can be
-refused a status write (V3), whether the publisher can be refused a merge
-(V8), and whether the export can run the gate at all (V13).
-
----
+| **Actions** | §9 rows **0, 1, 2, 3a, 4, 5, 6, 6b, 6c, 7, 7b, 7c, 10, 10b** |
+| **What it changes** | creates a NEW throwaway GitHub repository; creates OS users `run002-sup` and `run002-wrk` and group `run002`; creates three GitHub Apps installed **on the throwaway only**; writes three private keys at `0400`; changes ownership/modes of `.runtime/`, the checkout and `.git/` per §6; creates a read-only export at `/opt/run-002/gate-<pin>`; flips `worker_entry`'s env pass-through to the built allow-list; changes `gh.py` to pass a per-role token |
+| **What it does NOT touch** | `main`; its branch protection; the Run 002 repository's settings; any product PR; any provider that charges. **No secrets needed — those are Stage 3** |
+| **Cost** | **nothing.** No paid call, no provider, no billable operation |
+| **Verification** | **V1–V14f on the throwaway**, ending at the 10b STOP gate. The four that matter most: **V3/V3b/V8** prove the permission split in both directions (the worker is refused a status, the gate can post one, the publisher is refused a merge); **V10** reproduces the F5 deadlock deliberately; **V13** runs the gate from the real read-only export — the step that would have caught both `WORKSPACE_MISMATCH` and the missing `ajv`; **V14a–f** confirm the git ownership under the real identities, including **V14d, which must SUCCEED** (objects and refs stay writable or no worker can commit) and **V14e, which CANNOT PASS and must be recorded not-applicable** |
+| **How to stop it** | it is a sequence of operator actions with a STOP gate at 10b. Stop at any step; nothing downstream is automatic |
+| **Rollback, in order** | revoke the three App private keys **before** issuing any replacement (a fresh key does not invalidate the old one); uninstall and delete the three Apps; delete the throwaway repository; `rm -rf /opt/run-002/gate-<pin>`; restore `.runtime/`, the checkout and `.git/` to `serina` ownership; `userdel run002-wrk run002-sup` and `groupdel run002`; revert the two code changes (actions 6 and 6b) with `git revert`. **No product data exists at any point, and nothing in Run 001 is touched** |
+| **What it buys** | it closes **C-22**, the only remaining structural launch blocker, and converts every unverified row in §8 into a measured answer on a repository that can be deleted |
 
 ### STAGE 2 — the Run 002 repository and its branch protection
 

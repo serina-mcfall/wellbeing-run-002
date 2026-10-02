@@ -9,8 +9,8 @@ document, **they win**. This checklist orders and enumerates; it decides nothing
 T+00 remains **NOT_STARTED** (`experiment/TIMELINE.md`). Nothing in this
 document authorises launch, and no partial completion of it does either.
 
-**Session state as of 2026-10-02: `C05-3a-SESSION-HANDOVER.md` §47**, which
-supersedes §46, §45, §44, §43 and §42. §41 and §16 are stale. Branch
+**Session state as of 2026-10-02: `C05-3a-SESSION-HANDOVER.md` §48**, which
+supersedes §47, §46, §45, §44, §43 and §42. §41 and §16 are stale. Branch
 `wip/c05-1-persistence`, HEAD **`8be6a97`** plus documentation commits.
 Verification: **2,688 Python tests, 259 apparatus tests**, both exit 0.
 **Trusted pin re-pinned to `8be6a97867cb21c62830af9f8b02a34a7af0fcb5`** —
@@ -74,26 +74,18 @@ corrected git ownership under the real OS identities. **C-22 cannot close
 before Stage 1**, and every "PASS" in this document is a statement about a
 control plane whose inputs remain forgeable until it does.
 
-**What changed this session, in one line each.**
+**ACCEPTANCE SCENARIO — PASSING.** The connected lifecycle runs end to end
+against the production composition: draft → ready → independent review at
+the actual head → checks → eligible merge → confirm → dependents unblocked,
+with **no human step**, **≥2 review cycles at two different heads**, and
+**cycle-1 evidence refused at the new head**. 18/18 in
+`apparatus/fixture-preflight/production-lifecycle.test.js`; 76/76 across the
+Python connected-lifecycle suites. Audit C-04a is explicit that a real
+product PR is **not** required for this.
 
-| | |
-|---|---|
-| **C-04c** | the merge path now requires the append-only ledger to attest all four evidence legs at the head GitHub reports, checked BEFORE the gate so an unattested merge never reaches it |
-| **C-22** | opened: the threat model C-04b relied on was measured and found false |
-| **C-20b / F7** | the independent-review publisher exists, with 23 tests and simulated responses only, and is DISABLED - no default transport, nothing imports it, enabled only by an exact environment variable |
-| **F5** | resolved in `live-gate.js`, with the fail-open alternative demonstrated rather than asserted |
-| **C-21 residue** | preserved and documented, not cleaned: `experiment/evidence/RUNTIME-RESIDUE-2026-10-02.txt`. Re-confirmed unchanged 2026-10-02 at §46: `started_at` None, nine tasks QUEUED, no PRs, no workers, one ledger line, one `orphan_annunciations` entry (attempt 586, OBSERVED) |
-
-**What changed in §46, in one line each.**
-
-| | |
-|---|---|
-| **C-20a(C)** | the decision document was read against the code; two omissions that would have broken the deployment, one protection field already being dropped, and four claims stronger than their code. Twelve actions became eighteen |
-| **The invoker trap** | `git-head.js:163` and `reviewer-identity.js:252` both derive their root from `__dirname`, so from the read-only export each is a permanent deny on every PR. The rule is now recorded: config from the export, facts from the live checkout |
-| **The sixth provenance condition** | matched. It closed a real hole - the merge path never required a `REVIEW_DISPATCHED` and never read `agent_id`, so one appended line attributed to nobody satisfied the whole code-review leg |
-| **Action 8/9** | the gate invoker and the publication path exist, are a connected path verified against SIMULATED services only, and still have no transport. `control/` and `bin/` remain publisher-free |
-| **Action 6** | the worker environment allow-list is written and tested, deliberately NOT wired; a test pins the unwired status |
-| **C-22** | **unchanged and still open.** Nothing in this session touched it |
+**Scope is frozen.** Items found during preparation that are not launch
+blockers are recorded once in `experiment/RUN-003-BACKLOG.md` with their
+practical impact, and are not being fixed before this run.
 
 **Test-count note.** This document previously carried 2,171/218 here and
 1,852/197 in the `control_plane_self_tests` row below, as if both were

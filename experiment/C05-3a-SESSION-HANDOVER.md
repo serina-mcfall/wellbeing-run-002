@@ -8541,3 +8541,66 @@ commit status. There is still **no transport**.
   Two of their reports contained a claim that did not survive checking, and
   one "dangling V11 reference" turned out to be defined in another section —
   so nothing was "fixed" there.
+
+## 48. SESSION HANDOVER — scope frozen, Stage 1 ready (2026-10-02)
+
+**Supersedes §47.** HEAD at handover: see below. Pin `8be6a97`.
+
+### 48.1 State
+
+| | |
+|---|---|
+| Branch | `wip/c05-1-persistence` |
+| Verification | **2,688 Python · 259 apparatus** · `check-templates.py` 0 failing · secret scan clean · `git diff --check` clean |
+| T+00 | **NOT_STARTED** — `started_at: None`, nine QUEUED, no PRs, no workers, one ledger line |
+| Run 001 | Untouched. Residue preserved (one `orphan_annunciations` entry) |
+
+### 48.2 The acceptance scenario passes
+
+Draft → ready → independent review at the actual head → checks → eligible
+merge → confirm → dependents unblocked, **no human step**, **≥2 cycles at
+two heads**, **cycle-1 evidence refused at the new head**. 18/18 in
+`production-lifecycle.test.js`, 76/76 in the Python connected suites.
+
+### 48.3 What was decided, and why
+
+**Scope frozen.** Run 002 is a bounded experiment. An issue is a launch
+blocker only if it prevents a core lifecycle operation, risks uncontrolled
+spend / exposed credentials / unauthorised actions / unreviewed merges, or
+violates an explicit governing requirement. Everything else went to
+`experiment/RUN-003-BACKLOG.md` with its practical impact.
+
+**The separate-clone worker isolation is BUILT, TESTED AND DEFERRED.**
+`control/worker_git.py` (41 tests) is not wired; the Supervisor still uses
+linked worktrees. It is strictly better, but wiring it touches ten
+Supervisor call sites plus a Builder→Fixer fetch immediately before
+deployment, **for a property unachievable anyway under the single
+`run002-wrk` identity §6 specifies** (V14e cannot pass). A worker moving a
+peer's local ref cannot produce an unreviewed merge: `evaluate_merge`
+denies `HEAD_SHA_CHANGED` against the head GitHub reports.
+
+§6 and V14a–f were reconciled to the arrangement that actually **ships**.
+Two measurements from the clone work are kept because they would have
+caused a real incident either way: a default local clone **shares the
+object inode** (`chmod` on the clone changed the source), and **action 6c
+is defective on this host** — `url.insteadOf` silently resolves an HTTPS
+origin back to SSH.
+
+### 48.4 Found and fixed this session
+
+- **C-23a wired**: the approved CI-protection amendment is in force in
+  `attempt_merge`, before `evaluate_merge`.
+- **The suite could reach GitHub.** Three tests shelled out to
+  `gh api repos/<production repo>/.../check-runs` — a live API call from
+  `unittest`. The edge is now injectable and stubbed; **the suite is green
+  with the real `gh` made to raise**, which had never been true before.
+
+### 48.5 What remains
+
+**Stage 1 is ready for approval** (`C-20a-APPROVAL-PACKAGE.md` §13): host
+isolation + throwaway repository. Costs nothing, touches no protection,
+needs none of the eight secrets, and **closes C-22** — the only remaining
+structural blocker. Stages 2 and 3 are gated on its V-steps.
+
+Backlog items 3 (per-role `gh` call sites) and 4 (token renewal caller) are
+**required before Stage 3**, not before Stage 1.
