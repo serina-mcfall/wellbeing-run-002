@@ -133,15 +133,24 @@ git -C <WS> for-each-ref --format='%(objectname) %(refname)' refs/heads \
 { git -C <WS> config core.sharedRepository \
     || echo 'ABSENT core.sharedRepository'; } \
   > $R/sharedrepo-BEFORE.txt
+
+# 6. The remote URLs A6 is about to change, BOTH forms, because
+#    ~/.gitconfig's insteadOf makes the stored value and the resolved push
+#    URL disagree. The undo restores the stored one. ADDED 2026-10-02.
+{ git -C <WS> config remote.origin.url
+  git -C <WS> remote get-url --push origin
+} > $R/origin-url-BEFORE.txt
 ```
 
-→ **Verify:** all six files exist and are non-empty;
+→ **Verify:** all **seven** files exist and are non-empty;
 `wc -l $R/ownership-BEFORE.txt` is within a few of `find <WS> | wc -l`.
 → **Expected today, measured 2026-10-02:** `worktree-root-BEFORE.txt`
 says **ABSENT** (the sibling does not exist) and its second line shows the
-parent as `755 serina serina`; `sharedrepo-BEFORE.txt` says **ABSENT**.
-If either differs, A5 is modifying something it did not create — stop and
-reconcile before proceeding.
+parent as `755 serina serina`; `sharedrepo-BEFORE.txt` says **ABSENT**;
+`origin-url-BEFORE.txt`'s two lines **disagree** — the stored value and the
+resolved push URL differ because of `~/.gitconfig`'s `insteadOf`. If the
+first two differ from this, A5 is modifying something it did not create —
+stop and reconcile before proceeding.
 → **If `identities-BEFORE.txt` does NOT say ABSENT for all three:** the
 account or group is **not this stage's to create or delete**. Do not
 create it, and strike it from the rollback — `userdel` on a pre-existing
@@ -366,20 +375,64 @@ and not every path under `<WS>` was `serina:serina` to begin with.
 → **Verify the undo:** re-run A0's `find` and diff it against
 `ownership-BEFORE.txt`; expect no output.
 
-### A6. Decide `origin` SSH → HTTPS *(action 6c, DECISION)*
+### A6. `origin` SSH → HTTPS *(action 6c)* — **RESOLVED 2026-10-02**
 
-If **C** is yes, for the worker's worktrees only:
+**This was the last unchosen permission mechanism inside Stage 1, and it is
+now answered: YES, HTTPS.** §12 already recommended it and recorded that
+declining has **no implementation** — after A5 the worker can read neither
+`serina`'s SSH key nor her `gh` config, so "the status quo" was never an
+available answer. It is recorded here as decided so the procedure is
+executable end to end; **the operator may overrule it in the Stage 1
+approval**, in which case A6 reverts to a STOP.
+
+**TWO CORRECTIONS TO HOW IT WAS WRITTEN. As written it would have failed.**
+
+1. **It ran as `run002-wrk`, which A5 has just denied write on
+   `.git/config`.** A remote URL lives in the repository config, mode
+   `0640` owner `run002-sup` from A5 onward, so the worker cannot set it.
+   **It must be `run002-sup`.**
+2. **"For the worker's worktrees only" is not achievable with
+   `remote set-url`.** Linked worktrees **share the main `.git/config`**;
+   there is no per-worktree remote without `extensions.worktreeConfig`,
+   which this arrangement does not enable. And the caveat is moot: after
+   A5 there is **one** checkout and it belongs to `run002-sup`. Serina's
+   personal git work does not happen in it.
+
+**AND IT IS VERY NEARLY A NO-OP TODAY. Measured 2026-10-02 on `<WS>`:**
 
 ```
-sudo -u run002-wrk git -C <worktree> remote set-url origin https://github.com/<PROD>.git
+$ git config remote.origin.url     -> https://github.com/serina-mcfall/wellbeing-run-002.git
+$ git remote get-url --push origin -> git@github.com:serina-mcfall/wellbeing-run-002.git
+```
+
+**The stored value is ALREADY HTTPS.** What turns it back into SSH is
+`~/.gitconfig`'s `url.git@github.com:.insteadOf = https://github.com/` —
+**serina's personal config, applied at resolution time**. So the `set-url`
+below changes nothing on this host, and **the thing that actually makes a
+worker push over HTTPS is A2's new identity**, whose fresh home carries no
+such rewrite. Run the command anyway for idempotence and for a host where
+the stored value is not already HTTPS; do **not** expect it to be what
+fixes V14f, and do not re-run it if V14f shows SSH — that would be a
+`.gitconfig` in the worker's home or a system-wide `/etc/gitconfig`, and
+neither is fixed here.
+
+```
+sudo -u run002-sup git -C <WS> remote set-url origin https://github.com/<PROD>.git
+sudo -u run002-sup git -C <WS> remote get-url --push origin
 ```
 
 → **Verify:** V6 (§3) now fails as an SSH push and succeeds as an HTTPS
-push with the worker's token.
-→ **If C is no:** STOP and record the alternative answer to how a worker
-pushes. After A5 the worker can read neither `serina`'s SSH key nor her
-`gh` config, so "the status quo" is not an available answer.
-→ **Undo:** `remote set-url` back.
+push with the worker's token. Then **read the push URL back as the
+worker**, which is V14f: `~/.gitconfig`'s
+`url.git@github.com:.insteadOf = https://github.com/` silently rewrites
+HTTPS to SSH, and that rewrite is **serina's personal config**. A fresh
+`run002-wrk` home has no `.gitconfig`, so the rewrite should be absent
+under that identity — **verify it, do not assume it**, because it is
+exactly the key action 5 exists to take away.
+→ **If the worker's `get-url --push` still resolves to SSH:** something
+copied a `.gitconfig` into its home, or a system-wide `/etc/gitconfig`
+carries the rewrite. **STOP** — the worker would push as `serina`.
+→ **Undo:** `remote set-url` back to the value A0 captured.
 
 ### A7. Switch the call sites to per-role authentication *(action 6b, DEPLOY — code)*
 
