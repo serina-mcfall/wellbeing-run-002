@@ -897,6 +897,7 @@ class NothingReachesPublicationCase(unittest.TestCase):
     # wiring of it - the transport it drives is injected and simulated.
     ALLOWED = {"control/publisher.py",
                "tests/test_c20b_status_transport.py",
+               "tests/test_c20c_publish_eligibility_is_not_merge_eligibility.py",
                "experiment/github-app/publication_path.py",
                "tests/test_c20a_publisher_disabled.py",
                "tests/test_c20a_publication_path.py"}
@@ -993,7 +994,11 @@ class NothingReachesPublicationCase(unittest.TestCase):
         wired = re.compile(r"\bpublication_path\b")
         callers = []
         for rel, path in self.python_files():
+            # check-templates.py NAMES publication_path.py because it pins
+            # that file in the deployment drift set (F2). A checker that
+            # proves a module is covered necessarily mentions it.
             if rel in ("experiment/github-app/publication_path.py",
+                       "experiment/github-app/check-templates.py",
                        "tests/test_c20a_publication_path.py"):
                 continue
             try:

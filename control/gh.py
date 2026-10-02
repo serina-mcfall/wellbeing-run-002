@@ -106,11 +106,61 @@ def checks_state(pr: dict, required: tuple[str, ...]) -> tuple[bool, str]:
             return False, f"pending: {', '.join(sorted(pending))}"
         return True, "all reported checks passed"
 
+    # A REQUIRED check is held to a stricter rule than a reported one, and
+    # the three ways it used to be satisfiable without running are each
+    # reproduced in tests/test_c23_required_check_integrity.py.
+    #
+    #   SKIPPED   a workflow that skips the `ci` job produced a conclusion
+    #             this accepted as green. A required check that did not run
+    #             is not a passing one - it is an absent one.
+    #   NEUTRAL   same.
+    #   a STATUS  `by_name` keys on `name` OR `context`, so a commit STATUS
+    #             whose context is "ci" satisfied a requirement the workflow
+    #             never met. A status is not a check run and is not produced
+    #             by CI at all.
+    #
+    # `apparatus/adapters/ci-result.js` has always required `success`
+    # exactly, on the check-run surface only. This brings the Python merge
+    # path - the SOLE merge authority - to the rule the JavaScript gate
+    # already applies, rather than inventing a new one.
+    #
+    # WHAT THIS DOES NOT CLOSE: a workflow MODIFIED in the pull request's
+    # own branch that still produces a check run named `ci` concluding
+    # success. Matching is by name, and nothing here reads the workflow
+    # definition. That gap is recorded in the approval package §6 and needs
+    # either workflow-content integrity or GitHub-side app pinning.
+    # THE CHECK-RUN TEST IS STRUCTURAL, NOT `__typename`-BASED, AND THAT IS
+    # DELIBERATE. `gh pr view --json statusCheckRollup` may well emit
+    # `__typename`, but THIS REPOSITORY CANNOT PROVE IT - no real `gh` call
+    # has ever been made here. Requiring a field whose presence is unverified
+    # is how a gate denies every pull request on launch day, which is the
+    # exact shape of two defects already found in this arrangement.
+    #
+    # So the kind is read from the SHAPE, using only fields the line above
+    # already reads: a CheckRun carries `conclusion`; a StatusContext carries
+    # `state` and has no `conclusion` at all. `__typename` is honoured when
+    # it IS present and disagrees, which costs nothing and catches the case
+    # where a future payload grows a `conclusion` on a status.
+    by_shape = {}
+    for check in rollup:
+        name = check.get("name") or check.get("context") or ""
+        kind = check.get("__typename")
+        is_run = bool(check.get("conclusion")) and kind != "StatusContext"
+        # An in-progress CheckRun has no conclusion yet; it is still a run,
+        # and it is refused below by the SUCCESS test rather than here, so
+        # the diagnostic says "not green" instead of "not a check run".
+        if kind == "CheckRun" or check.get("status"):
+            is_run = kind != "StatusContext"
+        by_shape[name] = is_run
+
     missing = [name for name in required if name not in by_name]
     if missing:
         return False, f"required check(s) not reported: {', '.join(missing)}"
-    bad = [name for name in required
-           if by_name[name][1] not in ("SUCCESS", "NEUTRAL", "SKIPPED")]
+    not_a_run = [name for name in required if not by_shape.get(name)]
+    if not_a_run:
+        return False, ("required check(s) not satisfied by a CHECK RUN: "
+                       f"{', '.join(sorted(not_a_run))}")
+    bad = [name for name in required if by_name[name][1] != "SUCCESS"]
     if bad:
         return False, f"required check(s) not green: {', '.join(bad)}"
     return True, "required checks green"

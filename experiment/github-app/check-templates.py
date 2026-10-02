@@ -19,17 +19,17 @@ What it proves:
   D. Every GitHub call site the proposal attributes a permission to still
      exists in the code at the cited location — so the permission set cannot
      silently drift away from what the code calls (findings F1-F4).
-  E. F7's REMAINING half (no code constructs a commit-status API call) and
-     §4.3a (required_checks is still exactly ["ci"]) still hold.
+  E. No ORDINARY EXECUTION PATH constructs a commit-status API call.
+  E2. The transport that DOES construct one cannot send: no default client,
+     no socket import, no importer, and a required injected switch.
 
-     F7's OTHER half is now CLOSED and this check no longer speaks to it.
-     F7 was "the permission at the centre of the proposal exists to serve
-     code nobody has written"; control/publisher.py is that code, and it
-     exists. What this check still proves is narrower and still worth
-     proving: publisher.py reaches GitHub only through an injected
-     `poster`, so no module in this repository builds the `statuses/` REST
-     path. The day one does, the transport is real and the "it cannot call
-     out by accident" argument needs re-making rather than assuming.
+     F7 is closed. It was "the permission at the centre of the proposal
+     exists to serve code nobody has written"; control/publisher.py and
+     experiment/github-app/status_transport.py are that code. E's claim was
+     narrowed rather than relaxed - it used to say no code ANYWHERE builds
+     the path, which the transport makes false, and the grep excludes
+     experiment/, so leaving it would have kept a GREEN check whose claim
+     was false. E2 asserts what now keeps the transport inert.
 """
 
 import json
@@ -171,13 +171,13 @@ CALL_SITES = [
     ("control/gh.py", 66, "statusCheckRollup", "supervisor: checks read + statuses read"),
     ("control/gh.py", 71, "pr", "worker/supervisor: pull_requests read"),
     ("control/gh.py", 77, "pr", "worker/supervisor: pull_requests read"),
-    ("control/gh.py", 121, "update-branch", "supervisor: pull_requests write (F2)"),
-    ("control/gh.py", 131, "ready", "supervisor: pull_requests write (F2)"),
-    ("control/gh.py", 135, "merge", "supervisor: pull_requests + contents write (F2)"),
-    ("control/gh.py", 140, "create", "worker: pull_requests write"),
-    ("control/gh.py", 145, "comment", "supervisor: issues write (UNVERIFIED)"),
-    ("control/gh.py", 150, "protection", "supervisor: administration read (F3)"),
-    ("control/gh.py", 156, "run", "supervisor: actions read (F4)"),
+    ("control/gh.py", 171, "update-branch", "supervisor: pull_requests write (F2)"),
+    ("control/gh.py", 181, "ready", "supervisor: pull_requests write (F2)"),
+    ("control/gh.py", 185, "merge", "supervisor: pull_requests + contents write (F2)"),
+    ("control/gh.py", 190, "create", "worker: pull_requests write"),
+    ("control/gh.py", 195, "comment", "supervisor: issues write (UNVERIFIED)"),
+    ("control/gh.py", 200, "protection", "supervisor: administration read (F3)"),
+    ("control/gh.py", 206, "run", "supervisor: actions read (F4)"),
     ("prompts/builder.md", 60, "gh pr create", "worker: pull_requests write"),
     ("prompts/reviewer.md", 15, "gh pr diff", "worker: pull_requests read"),
     ("prompts/reviewer.md", 16, "gh pr view", "worker: pull_requests read"),
@@ -339,13 +339,29 @@ if pin:
         # ci-result.js treats as authoritative, and it is matched by NAME
         # alone - so the definition of "CI passed" is part of what the pin
         # must hold still.
+        # `experiment/github-app/*.py` and `apparatus/package*.json` are in
+        # the drift set because DEPLOYMENT EXECUTES THEM.
+        #
+        # Living under `experiment/` made them look like documentation, and
+        # they are not: `status_transport.py` builds the commit-status
+        # request, `publication_path.py` joins the gate to the publisher,
+        # and `package.json`/`package-lock.json` decide what `npm ci`
+        # installs into the read-only export at action 7b. A pin that does
+        # not cover them would let the code the operator approved differ
+        # from the code the export runs - which is the entire point of
+        # pinning a trusted revision.
         drift = git("diff", "--name-only", sha, "HEAD",
                     "--", "apparatus", "control", "protocol", "prompts",
-                    "config", "bin", ".github").stdout.split()
+                    "config", "bin", ".github",
+                    "experiment/github-app/status_transport.py",
+                    "experiment/github-app/publication_path.py",
+                    "apparatus/package.json",
+                    "apparatus/package-lock.json").stdout.split()
         check(not drift,
               "F2. nothing the gate executes has changed since the pin",
               f"pin={sha[:7]}..head={head[:7]} clean across apparatus/, "
-              "control/, protocol/, prompts/, config/, bin/, .github/"
+              "control/, protocol/, prompts/, config/, bin/, .github/, "
+              "experiment/github-app/{status_transport,publication_path}.py, apparatus/package*.json"
               if not drift else
               f"{len(drift)} file(s) changed since the pin, including "
               f"{drift[0]} — RE-PIN before approving")

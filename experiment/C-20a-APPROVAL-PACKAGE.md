@@ -228,41 +228,43 @@ shows the rejected one would publish.
 The flag is a **reported field**. It is never an input to `verified`, and
 `decision` is computed before it. A merge still requires `ELIGIBLE`.
 
-> ### THE LIMIT OF THAT FLAG — verified 2026-10-02, and it bounds what you are approving
+> ### WHAT THE FLAG ESTABLISHES, AND WHAT IT DOES NOT — REWRITTEN 2026-10-02
 >
-> **It cannot distinguish its own missing context from any other unmet
-> protection rule.** GitHub collapses every unsatisfied protection
-> requirement into one `mergeStateStatus: BLOCKED`, and
-> `live-gate.js:516-523` raises exactly **one** reason code for it. The CI
-> leg is checked independently, so a red `ci` is caught — but a *second*
-> required context, `required_conversation_resolution`, or a restored
-> approving-review requirement would be invisible, and the flag would go
-> true with that rule still unmet.
+> **It establishes eligibility to PUBLISH this gate's own
+> independent-review result for this head. Nothing else.** It is not a
+> claim that every branch-protection condition is satisfied, and it must
+> not be read as one: GitHub collapses every unsatisfied protection rule
+> into one `mergeStateStatus: BLOCKED`, and `live-gate.js:516-523` raises
+> exactly one reason code for it, so the flag cannot tell its own missing
+> context from a second required check, an unresolved conversation, or a
+> restored approving-review requirement.
 >
-> **What that cannot do: cause a merge.** Verified twice over.
-> `verified` requires `reasons.length === 0` (`live-gate.js:544`), so the
-> flag can never raise `decision` to `ELIGIBLE`; and the Python merge gate
-> — `routing.evaluate_merge`, the sole merge authority — never reads the
-> flag at all. Grep confirms its only reader in the repository is
-> `control/publisher.py`. GitHub also still holds the pull request on the
-> unmet rule.
+> **THE SAFETY ARGUMENT NO LONGER RESTS ON "EXACTLY TWO CONTEXTS."** The
+> earlier wording argued the flag was safe because §3's AFTER protection
+> leaves only `ci` and this one, so there was no third rule to hide. That
+> is a shape **nothing enforces** — anyone adding a required check would
+> have silently invalidated it. It has been replaced by an argument that
+> holds for any number of requirements:
 >
-> **What it can do: publish a true-sounding status that is not the whole
-> truth.** The gate would assert `run-002/independent-review: success`
-> while some other protection rule is unsatisfied. The consequence is a
-> misleading public assertion, not a wrongful merge.
+> 1. **Publishing is a side effect on a status context. It merges
+>    nothing.**
+> 2. **Merging requires `routing.evaluate_merge` to allow**, and that
+>    function denies on `mergeStateStatus == BLOCKED` *without ever reading
+>    the flag* — it cannot read it. The flag is not among its parameters
+>    and the string does not occur in `control/routing.py` at all.
 >
-> **Why it is nevertheless safe as proposed, and the condition that keeps
-> it so.** The AFTER protection in §3 leaves exactly two required contexts
-> (`ci` and this one) and zero required approving reviews, so today there
-> is no third rule for the flag to hide. **That is a load-bearing
-> invariant and it is not self-enforcing.** If anyone later adds a required
-> context, turns on conversation resolution, or restores the review count,
-> this flag silently becomes over-permissive in what it publishes. **That
-> falsification step now exists as V12**: on the throwaway, add a second
-> required context and confirm the flag goes true **while the merge stays
-> blocked**. Both halves must be observed — the second is the one that
-> proves a true flag never produces a merge.
+> **Both halves are now TESTED, not asserted** —
+> `tests/test_c20c_publish_eligibility_is_not_merge_eligibility.py`
+> publishes the status for a blocked pull request and then asks the merge
+> authority, which refuses; adds five unrelated satisfied contexts and an
+> unmet extra required check, and it still refuses; and asserts
+> structurally that the merge gate cannot reference the flag. Mutation:
+> making `routing.py` mention the flag turns that last test red.
+>
+> **V12 remains worth running** — on the throwaway, add a second required
+> context and confirm the flag goes true while the merge stays blocked —
+> because it observes the behaviour against real GitHub rather than against
+> this repository's model of it.
 
 **SHA binding, end to end:**
 
@@ -331,10 +333,34 @@ that is documented.
 >
 > ### THE CI CHECK IS DEFINED BY THE BRANCH IT JUDGES — ADDED 2026-10-02
 >
-> **VERIFIED:** `apparatus/adapters/ci-result.js:155-157` matches a required
-> check by **name only** — `run.name === required`. No App id, no workflow
-> path, no actor. The governed list is `["ci"]`, so any check run named
-> `ci` that concluded success satisfies the gate's CI leg.
+> **THE GOVERNING REQUIREMENT** is `config/experiment.json`'s
+> `github.required_checks = ["ci"]`, which `routing.evaluate_merge` — the
+> sole merge authority — asks `gh.checks_state` about and merges on the
+> answer. Protocol v2 §"PR contract" states only "CI validates the schema".
+>
+> **THREE WAYS A PRODUCT PR COULD SATISFY IT WITHOUT CI PASSING, ALL
+> REPRODUCED 2026-10-02, TWO NOW CLOSED:**
+>
+> | | Was | Now |
+> |---|---|---|
+> | **Skip** — the `ci` job concludes `SKIPPED` | satisfied the gate | **refused** |
+> | the `ci` job concludes `NEUTRAL` | satisfied the gate | **refused** |
+> | **Replace** — a commit STATUS whose context is `ci` | satisfied the gate, because `checks_state` keyed on `name` OR `context` | **refused — a status is not a check run** |
+> | **Modify** — the PR's branch redefines the workflow, still emits a green run named `ci` | satisfied the gate | **STILL SATISFIES IT. OPEN** |
+>
+> The remedy was the smallest one available and invented no new rule:
+> `apparatus/adapters/ci-result.js` has always required `success` exactly
+> on the check-run surface, so the Python path was brought to the rule the
+> JavaScript gate already applied. Detection of "is this a check run" is
+> **structural** — a check run carries `conclusion`, a status carries
+> `state` — deliberately NOT `__typename`, because this repository cannot
+> prove `gh` emits that field and a gate requiring an unverified field
+> denies every pull request on launch day. 11 tests, 3 mutations.
+>
+> **MODIFY REMAINS OPEN AND IS NOT CLOSEABLE LOCALLY.** Matching is by
+> NAME: nothing in the merge path reads the workflow definition.
+> `ci-result.js:155-157` is `run.name === required` — no App id, no
+> workflow path, no actor.
 >
 > **VERIFIED:** `.github/workflows/ci.yml` triggers on `pull_request`, and
 > the worker holds `Contents: write` and authors files freely in its own
@@ -347,11 +373,29 @@ that is documented.
 >
 > **The UID split does not close this**, which is why it is called out
 > separately: it is a GitHub-side trust question, not a filesystem one.
-> `.github/` is now inside the pin's drift set (`F2`), so the trusted
+> `.github/` is inside the pin's drift set (`F2`), so the trusted
 > revision's CI definition cannot move without the pin going red — but that
 > governs *this* checkout, not what a pull request branch carries.
+>
+> **THE TWO REMEDIES, AND BOTH NEED YOUR DECISION:**
+>
+> 1. **GitHub-side, and probably already half-done.**
+>    `branch-protection-AFTER.json` pins the required `ci` context to
+>    `app_id 15368` (GitHub Actions), so GitHub's own merge-blocking should
+>    only count a `ci` run from that app. **Whether GitHub honours `app_id`
+>    pinning this way is in §8's unverified list**, and V3c exists to test
+>    it. If it holds, GitHub already refuses the forged-producer case and
+>    only the modified-workflow case remains.
+> 2. **Workflow-content integrity.** Compare `.github/workflows/` at the
+>    pull request head against the pinned revision and deny on any
+>    difference. This is a governance decision as much as a technical one:
+>    it means **no product task may ever change CI**, which is almost
+>    certainly right for a 24-hour run but is a rule, not a bug fix. It also
+>    needs a git read inside the merge path, which C-04b deliberately kept
+>    out of the merge transaction.
+>
 > **Recorded as an open, accepted risk for the operator to rule on, not as
-> something this arrangement solves.**
+> something this arrangement currently solves.**
 
 > **One change the GitHub side cannot substitute for:**
 > `control/worker_entry.py:180` is `env = dict(os.environ)` with no scrub
@@ -605,35 +649,15 @@ before 8–10 deadlocks every product PR permanently.
 
 ---
 
-## 12. Open questions and recommendations
+## 12. Recommendations on the two open questions
 
-> ### TWO POLICY CHOICES THE TRANSPORT CANNOT MAKE — ADDED 2026-10-02
->
-> Everything else about the request is settled by GitHub's documentation.
-> These two are not specified by the documentation, by this package, or by
-> the proposal, and I have implemented a default rather than guess at your
-> intent. Both are one-line changes.
->
-> **1. What a human sees in the checks list.** `description` and
-> `target_url` are optional and **both are currently omitted**, so the pull
-> request shows the bare context name `run-002/independent-review` with no
-> explanation and no link. The alternative is a short description (e.g.
-> "evidence verified at `<sha>`") and possibly a `target_url`. There is
-> nowhere obvious for a URL to point — no artefact is published anywhere —
-> so a description alone may be the sensible middle. **Recommendation: add
-> a description, omit `target_url`.** It costs nothing and it is the only
-> thing a human reading a blocked pull request will see.
->
-> **2. Whether `pending` is ever posted.** GitHub's enum has four states;
-> this system emits only `success` and `failure`, and never posts anything
-> while it is still deciding. So between a push and a verdict the required
-> context is simply **absent**, which GitHub reports as `BLOCKED` — the
-> same thing it reports for the F5 deadlock. Posting `pending` on entry
-> would make "the gate is working on it" distinguishable from "the gate
-> never ran". **Recommendation: leave it as-is for launch.** It adds a
-> second write per evaluation and a second failure mode, and the
-> distinction it buys is diagnostic rather than protective. Worth revisiting
-> if the gate ever appears to stall.
+**On the status body.** `description` and `target_url` are optional in
+GitHub's schema and are **omitted**; the context name carries the result.
+**No decision is required** — a description can be added later without
+touching protection, identities or the gate. `pending` is **never
+published**: the gate posts only `success` or `failure`, at a verdict. That
+default is retained, and nothing in Protocol v2 or this arrangement
+requires otherwise.
 
 | Question | Recommendation | Why |
 |---|---|---|
@@ -641,6 +665,4 @@ before 8–10 deadlocks every product PR permanently.
 | Move `origin` from SSH to HTTPS? | **Yes, for the worker's worktrees only** — leave your own checkout on SSH | Today the strongest write credential in the system is a personal SSH key sitting entirely outside the scheme. That is a larger hole than the one the App closes. **AND, as of 2026-10-02, it is no longer optional:** after action 5 re-owns the checkout, a worker cannot read `serina`'s SSH key or `gh` config, so declining this requires some other answer to how a worker pushes a branch. Promoted to action 6c |
 
 The first remains yours to settle. The second is now a required action with
-a recommended answer, not a free choice. **The two transport policy choices
-in the box above are also yours** — both already have a default
-implemented, and both are one-line changes if you want the other.
+a recommended answer, not a free choice.
