@@ -606,7 +606,7 @@ created on GitHub, and so the F5 deadlock is resolved before it can bite.
 
 | # | Step | Who | Authorisation | Rollback |
 |---|---|---|---|---|
-| 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `3fcc1339a0d79eb583b3d74bec2d655b6452793d`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
+| 0 | **Operator decides.** §9 is now one concrete arrangement; the two questions that remain are §9.9's, each with a recommendation: the three-principal model, and `origin` SSH → HTTPS for workers. The trusted revision is **no longer** an open question — §9.5 pins it to `b2df44fb82a4b83fd5a3a4277cd6a69863e0019f`; the operator confirms it or re-pins to the then-current HEAD. | human | — | n/a; nothing done |
 | **0b** | ~~**Push `wip/c05-1-persistence`** so the pinned revision exists on `origin`.~~ **DONE 2026-10-02** — the branch is pushed, and each re-pin is pushed with it; `44e1eb5` is reachable from `origin/wip/c05-1-persistence` and the pin is independently fetchable. **Re-check this after any re-pin** — a pin that only exists locally cannot be exported by anyone else. | done | repo write | n/a — pushing an existing local commit |
 | 1 | Create OS users `run002-sup`, `run002-wrk` and group `run002`. Set ownership and modes per §3.3 and §9.4. | human | root | `userdel run002-sup run002-wrk; groupdel run002`; restore ownership to `serina` |
 | 2 | Create the throwaway probe repository. | human | GitHub account | delete the repository |
@@ -966,7 +966,7 @@ Four things make this enforceable rather than aspirational:
 ### 9.5 THE TRUSTED APPARATUS REVISION
 
 > **TRUSTED APPARATUS REVISION:
-> `3fcc1339a0d79eb583b3d74bec2d655b6452793d`**
+> `b2df44fb82a4b83fd5a3a4277cd6a69863e0019f`**
 > on `wip/c05-1-persistence`. Full 40 hex, never a branch name.
 
 **This supersedes §41.7's `4ae1488`, which is 16 commits stale.** It also
@@ -980,7 +980,7 @@ then re-checked independently by the integration owner at the final pin:
 
 ```
 $ git rev-parse HEAD
-3fcc1339a0d79eb583b3d74bec2d655b6452793d
+b2df44fb82a4b83fd5a3a4277cd6a69863e0019f
 $ git rev-parse main origin/main
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
 4eeaa7ce76aa82a0168236cf4e4ae08d9edc2477
@@ -1031,7 +1031,7 @@ It named `b66944a`; two further commits landed — `f2129c5` (C-04b, which
 changes `control/routing.py`, code the gate's decisions depend on) and
 `6c53540` (a test-isolation fix), so it became `6c53540`.
 
-**RE-PINNED AGAIN 2026-10-02, to `3fcc1339a0d79eb583b3d74bec2d655b6452793d`.**
+**RE-PINNED AGAIN 2026-10-02, to `b2df44fb82a4b83fd5a3a4277cd6a69863e0019f`.**
 Three further commits moved code inside the drift set: the C-22 worker
 environment allow-list (`control/worker_entry.py`), the gate invoker
 (`control/gate_invoker.py`), and the sixth provenance condition
