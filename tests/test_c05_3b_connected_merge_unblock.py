@@ -164,6 +164,14 @@ class ConnectedMergeUnblockCase(MergeBoundaryCase):
             self.enterContext(mock.patch.object(
                 module, "WORKER_LOG_DIR", root / "workers"))
 
+        # The GitHub edge in `evidence.collect`. Without this stub the
+        # reviewer-dispatch path SHELLS OUT to
+        # `gh api repos/<the production repo>/commits/<sha>/check-runs`,
+        # which on an authenticated host is a live API call made by
+        # `unittest`. Measured by making a real `gh` invocation raise and
+        # running the suite.
+        self.enterContext(mock.patch.object(supervisor_mod, "evidence"))
+
     # ------------------------------------------------------------ fixtures
 
     def seed_graph(self, *, drop_leg: str | None = None):

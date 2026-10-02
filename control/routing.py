@@ -16,8 +16,8 @@ import re
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-from . import (accessibility_contract, accessibility_registry, clock, gh,
-               security_contract, severity)
+from . import (accessibility_contract, accessibility_registry,
+               ci_protected_paths, clock, gh, security_contract, severity)
 
 SEVERITIES = ("P0", "P1", "P2", "P3")
 BLOCKING_SEVERITIES = frozenset({"P0", "P1"})
@@ -446,6 +446,29 @@ MERGEABLE_STATES: frozenset[str] = frozenset({"CLEAN", "UNSTABLE", "HAS_HOOKS"})
 # that left open, which was reproduced rather than inferred.
 MERGE_EVIDENCE_INCOMPLETE = "EVIDENCE_INCOMPLETE"
 
+# C-23a. The approved trusted-CI rule: "Ordinary product PRs cannot change
+# trusted CI or its validation machinery; those changes require a separately
+# reviewed apparatus amendment."
+#
+# TWO CODES, NOT ONE, because they need two different human actions.
+#
+#   CI_PATHS_UNVERIFIABLE   we could not establish WHAT this pull request
+#                           changes, for this head. Nothing is known about
+#                           the protected set either way. The remedy is to
+#                           make the change list observable again.
+#   CI_TRUST_PATHS_MODIFIED we established it, and it reaches into a
+#                           protected prefix with no apparatus amendment
+#                           covering this head and these paths. The remedy
+#                           is an amendment, or a narrower pull request.
+#
+# A pull request carrying an amendment that is absent, stale, scoped to
+# other paths, unresolved, or attested by only one of the two sources is
+# CI_TRUST_PATHS_MODIFIED as well: an amendment that does not hold is not a
+# different fact from no amendment, and the prose on the MERGE_BLOCKED event
+# says which of the two it was.
+MERGE_CI_PATHS_UNVERIFIABLE = "CI_PATHS_UNVERIFIABLE"
+MERGE_CI_PATHS_PROTECTED = "CI_TRUST_PATHS_MODIFIED"
+
 # =====================================================================
 # C-04c: THE SECOND SOURCE. The append-only ledger, cross-checked against
 # the mutable record at merge time.
@@ -742,6 +765,380 @@ def ledger_attests_merge(inspection, head_sha: str) -> tuple[bool, str]:
     # worker-identity complaint about a review that is missing anyway would
     # name the wrong fault.
     return _review_worker_attests(events, head_sha)
+
+
+# =====================================================================
+# C-23a: TRUSTED-CI PROTECTED PATHS, WIRED INTO THE MERGE PATH.
+#
+# The rule the operator approved, verbatim: "Ordinary product PRs cannot
+# change trusted CI or its validation machinery; those changes require a
+# separately reviewed apparatus amendment."
+#
+# WHERE THIS LIVES AND WHY. The same split C-04c established for the
+# ledger: a PURE predicate here, the I/O at the call site in
+# `supervisor.attempt_merge`, and the refusal taken BEFORE `evaluate_merge`
+# rather than inside it. `evaluate_merge` is pure over its arguments by
+# design - that is what lets the C-04b differential reason about it - and
+# the changed-file list is a network read. Putting the read inside the gate
+# would hide I/O in a predicate and make every gate test reach for a stub.
+# =====================================================================
+
+# GitHub truncates the `files` array of a compare response. 300 is the
+# documented cap, and a truncated list is INDISTINGUISHABLE from a complete
+# one by inspection - there is no "truncated" flag to read. So the cap
+# itself is the signal: a response at or above it is treated as incomplete
+# and the merge is refused. A genuine 300-file product pull request is
+# refused and needs a human. That is the intended direction of the error:
+# this gate exists to stop an unseen `.github/workflows/ci.yml` edit, and a
+# list that may be hiding one proves nothing about it.
+CHANGED_PATHS_CAP = 300
+
+# The ref shapes a compare URL may be built from. Deliberately narrow: this
+# string is interpolated into a URL path, and a base ref carrying
+# whitespace, a leading dash or `..` would make `{base}...{head}` parse as
+# something other than the comparison intended.
+#
+# THE `..` EXCLUSION IS NOT DECORATION. Without the lookahead this pattern
+# accepted `a..b`, because `.` is a legal ref character, and the URL became
+# `compare/a..b...<sha>` - a string GitHub parses by splitting on `...`,
+# yielding a comparison nobody asked for. Caught by the test that drives
+# this list; git itself forbids `..` in a ref name, so nothing legitimate
+# is lost.
+_BASE_REF_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,250}$")
+
+
+@dataclass(frozen=True)
+class ChangedPaths:
+    """Every repository-relative path a pull request touches AT ONE HEAD.
+
+    Shaped after `ledger.Inspection` on purpose - `complete` carries the
+    same meaning and the same obligation. `complete=False` means "this does
+    not tell you what changed", never "nothing changed".
+
+    `head_sha` is the head the list was COMPUTED FOR, carried on the value
+    itself. A list is evidence about one commit and about no other, and the
+    only way a caller can check that is if the value says which.
+    """
+    head_sha: str | None
+    paths: tuple[str, ...]
+    complete: bool
+    error: str | None = None
+
+
+# Finite, non-echoing reasons for an unusable list. An HTTP body or an OS
+# error string is never persisted; these are.
+CHANGED_PATHS_FETCH_FAILED = "CHANGED_PATHS_FETCH_FAILED"
+CHANGED_PATHS_UNPARSEABLE = "CHANGED_PATHS_UNPARSEABLE"
+CHANGED_PATHS_TRUNCATED = "CHANGED_PATHS_TRUNCATED"
+CHANGED_PATHS_EMPTY = "CHANGED_PATHS_EMPTY"
+CHANGED_PATHS_RENAME_UNRESOLVED = "CHANGED_PATHS_RENAME_UNRESOLVED"
+CHANGED_PATHS_HEAD_UNUSABLE = "CHANGED_PATHS_HEAD_UNUSABLE"
+
+# A compare entry whose `status` says a path moved. GitHub spells the old
+# path in `previous_filename` for both.
+_MOVED_STATUSES = frozenset({"renamed", "copied"})
+
+
+def changed_paths_for_head(repo: str, base_ref, head_sha,
+                           runner=None) -> ChangedPaths:
+    """The files a pull request changes, asked for BY HEAD SHA.
+
+    WHY THE COMPARE ENDPOINT AND NOT `gh pr diff --name-only`.
+    `touches_ui` above uses `gh pr diff --name-only`, and reusing it here
+    would have been wrong twice.
+
+      * IT CANNOT BE SHOWN TO REPORT THE OLD SIDE OF A RENAME. A
+        `--name-only` listing is one path per changed file, and for a
+        rename the one path is the destination - the origin appears, if at
+        all, only in the `diff --git a/X b/Y` header the flag is
+        summarising away. THIS IS NOT VERIFIED HERE: no real `gh` call has
+        ever been made in this repository, so what that flag emits for a
+        rename is a belief, not a measurement. That is exactly why it is
+        not relied on. A file renamed OUT of `control/` deletes something
+        the suite imports, which is as dangerous as editing it, and a
+        source that MIGHT not mention the origin cannot clear it. The
+        compare endpoint reports `status: renamed` with
+        `previous_filename`, and `_changed_paths_from_compare` refuses the
+        whole list when an entry says it moved and will not say from where
+        - so this is safe whichever belief about `gh` turns out to be true.
+      * IT NAMES NO HEAD. `gh pr diff` answers for whatever the head is at
+        the moment of the call. This URL names the SHA, so the answer is
+        about that commit by construction rather than by a race.
+
+    `touches_ui` is left alone: it chooses between a stricter and a less
+    strict review, and it already fails towards the stricter one.
+
+    THE WIRE FORMAT IS NOT VERIFIED AND IS NOT ASSUMED. No real `gh` call
+    has ever been made in this repository, which is why `gh.checks_state`
+    reads a check run's KIND from its shape rather than from `__typename`.
+    The same discipline applies here: every field read below is required to
+    be the shape it is used as, and anything else makes the list INCOMPLETE
+    rather than shorter. A gate that silently drops the entries it could not
+    parse is a gate that clears a pull request on the strength of the files
+    that happened to be well-formed.
+    """
+    run = runner if runner is not None else gh.run
+    if not isinstance(head_sha, str) or not _CLAIM_SHA_RE.match(head_sha):
+        return ChangedPaths(None, (), False, CHANGED_PATHS_HEAD_UNUSABLE)
+    if not isinstance(base_ref, str) or not _BASE_REF_RE.match(base_ref):
+        return ChangedPaths(head_sha, (), False, CHANGED_PATHS_FETCH_FAILED)
+
+    result = run(["gh", "api", "-X", "GET",
+                  f"repos/{repo}/compare/{base_ref}...{head_sha}",
+                  "-F", "per_page=100"])
+    if not getattr(result, "ok", False):
+        return ChangedPaths(head_sha, (), False, CHANGED_PATHS_FETCH_FAILED)
+    # `gh.run` scrubs stdout through `redact.scrub` before it gets here. If a
+    # scrub ever rewrote bytes inside the JSON the parse fails and this
+    # returns incomplete - which is the correct direction, and is recorded
+    # so the next reader does not mistake it for an impossible branch.
+    payload = result.json() if hasattr(result, "json") else None
+    return _changed_paths_from_compare(head_sha, payload)
+
+
+def _changed_paths_from_compare(head_sha: str, payload) -> ChangedPaths:
+    """Parse one compare response. Pure; the split exists so every refusal
+    below is reachable from a test without a stubbed subprocess."""
+    if not isinstance(payload, dict):
+        return ChangedPaths(head_sha, (), False, CHANGED_PATHS_UNPARSEABLE)
+    files = payload.get("files")
+    # AN ABSENT `files` IS NOT AN UNCHANGED TREE. GitHub omits the array
+    # when the comparison is too large to enumerate, which is precisely the
+    # case where something could be hiding in it.
+    if not isinstance(files, list):
+        return ChangedPaths(head_sha, (), False, CHANGED_PATHS_UNPARSEABLE)
+    if len(files) >= CHANGED_PATHS_CAP:
+        return ChangedPaths(head_sha, (), False, CHANGED_PATHS_TRUNCATED)
+    if not files:
+        # EMPTY IS UNKNOWN, NOT CLEAN. A merge candidate that changes
+        # nothing is not something this factory produces, and nothing in the
+        # payload distinguishes "zero files" from "the array was dropped".
+        # Clearing it would let "we learned nothing" read as "nothing
+        # protected was touched", which is the one reading this gate exists
+        # to refuse.
+        return ChangedPaths(head_sha, (), False, CHANGED_PATHS_EMPTY)
+
+    paths: list[str] = []
+    for entry in files:
+        if not isinstance(entry, dict):
+            return ChangedPaths(head_sha, (), False, CHANGED_PATHS_UNPARSEABLE)
+        filename = entry.get("filename")
+        if not isinstance(filename, str) or not filename.strip():
+            return ChangedPaths(head_sha, (), False, CHANGED_PATHS_UNPARSEABLE)
+        paths.append(filename)
+        # A RENAME IS A DELETION FROM WHERE IT LEFT AND AN ADDITION WHERE IT
+        # ARRIVED, and both sides are judged. `control/x.py -> src/x.py`
+        # removes a file the suite imports; `src/x.py -> control/x.py` adds
+        # one it will import next run. Reporting only `filename` would clear
+        # the first.
+        previous = entry.get("previous_filename")
+        status = entry.get("status")
+        if isinstance(previous, str) and previous.strip():
+            paths.append(previous)
+        elif isinstance(status, str) and status.lower() in _MOVED_STATUSES:
+            # It says it moved and will not say from where. A path we know
+            # exists and cannot read is the definition of an incomplete
+            # inspection.
+            return ChangedPaths(head_sha, (), False,
+                                CHANGED_PATHS_RENAME_UNRESOLVED)
+    return ChangedPaths(head_sha, tuple(paths), True, None)
+
+
+# The apparatus amendment, expressed entirely in evidence this system
+# ALREADY produces for "a human decided something":
+#
+#   * a `HUMAN_APPARATUS_AUTHORISATION` intervention - one of Protocol v2's
+#     six intervention types, and the one that names this exact act - in
+#     `doc["interventions"]`, driven to RESOLVED through
+#     `cli.py human-resolve`, which stamps `resolved_by` and `resolved_at`;
+#   * the `HUMAN_INTERVENTION_RESOLVED` event that same command appends to
+#     the append-only ledger, carrying `human_intervention=True`.
+#
+# NO NEW FIELD IS INTRODUCED. The whole declaration rides in the
+# intervention's existing `condition_code`, which `intervention.py` already
+# validates and already uses as its dedup key.
+#
+# NO_ACTION is the required resolution, and it is the honest one:
+# `cli._apply_resolution_effects` returns immediately for NO_ACTION, and
+# `UNKNOWN_CONDITION_OUTCOMES` permits exactly NO_ACTION for a condition
+# code `CONDITION_OUTCOMES` does not enumerate. So an operator can record an
+# amendment today with no change to the resolution table - and the
+# resolution executes nothing. It is a decision, not an effect.
+CI_AMENDMENT_INTERVENTION_TYPE = "HUMAN_APPARATUS_AUTHORISATION"
+CI_AMENDMENT_RESOLUTION = "NO_ACTION"
+CI_AMENDMENT_RESOLVED_EVENT = "HUMAN_INTERVENTION_RESOLVED"
+CI_AMENDMENT_PREFIX = "ci_apparatus_amendment"
+
+
+def ci_amendment_condition_code(head_sha: str, offending_paths) -> str:
+    """The one string that IS the amendment declaration.
+
+    `ci_apparatus_amendment_<head sha>_<digest of the paths it covers>`.
+    Lower-case, so it satisfies `intervention.CONDITION_CODE_RE` without
+    that module needing to know this exists.
+
+    BOTH HALVES EARN THEIR PLACE.
+
+      * The HEAD makes the authorisation expire on the next push. An
+        operator who approved a one-line workflow edit has not approved
+        whatever the branch grows afterwards.
+      * The DIGEST OF THE PATHS makes it narrow. Authorising
+        `.github/workflows/ci.yml` does not authorise `control/routing.py`
+        smuggled into the same pull request: a different offending set is a
+        different code, and the old one no longer matches.
+
+    The digest is over the SORTED, DEDUPLICATED offending set, so the order
+    GitHub happens to list files in cannot change the code.
+    """
+    joined = "\n".join(sorted(set(offending_paths)))
+    digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+    return f"{CI_AMENDMENT_PREFIX}_{head_sha.lower()}_{digest}"
+
+
+def authorised_ci_amendments(interventions, inspection, task_id) -> frozenset:
+    """Amendment condition codes BOTH durable sources attest for this task.
+
+    PURE over its arguments; the caller does the reading, exactly as
+    `ledger_attests_merge` requires of its own inspection.
+
+    TWO SOURCES, AND THIS IS THE SAME ARGUMENT C-04c MADE. The intervention
+    record lives in `.runtime/state.json`, which every worker can write
+    because they all share this UID. On its own it is a field a product
+    worker could set for itself. Requiring the append-only ledger to carry
+    the SAME `(intervention_id, condition_code)` pair means a forger has to
+    write consistently in two places instead of one.
+
+    IT IS STILL NOT NON-SELF-ASSERTING, AND SAYING OTHERWISE WOULD BE THE
+    WORST THING THIS DOCSTRING COULD DO. The ledger has no hash chain and is
+    writable by the same UID that runs the workers - that is C-22, and C-22
+    is open. A worker that appends a well-formed `HUMAN_INTERVENTION_RESOLVED`
+    event AND writes the matching RESOLVED record authorises itself. This
+    raises the cost and the visibility of that forgery; it does not prevent
+    it. Preventing it needs an authority outside this UID - a signed
+    operator artefact, or a GitHub-side review this process cannot produce -
+    and neither exists here.
+
+    Everything unreadable returns the EMPTY set, which refuses the merge. An
+    amendment that cannot be read is not an amendment.
+    """
+    if not isinstance(interventions, dict):
+        return frozenset()
+    if not isinstance(task_id, str) or not task_id:
+        return frozenset()
+    if inspection is None or not getattr(inspection, "complete", False):
+        # A truncated ledger could be hiding the event that contradicts
+        # this one. Same rule as `ledger_attests_merge`.
+        return frozenset()
+    events = getattr(inspection, "events", None)
+    if not isinstance(events, (list, tuple)):
+        return frozenset()
+
+    attested: set[tuple[str, str]] = set()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("event_type") != CI_AMENDMENT_RESOLVED_EVENT:
+            continue
+        # The resolution path sets this literally True. `is not True` rather
+        # than falsiness, so a string "true" from a hand-edited line does
+        # not satisfy a flag that is supposed to mean a human was present.
+        if event.get("human_intervention") is not True:
+            continue
+        meta = event.get("metadata_redacted")
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("intervention_type") != CI_AMENDMENT_INTERVENTION_TYPE:
+            continue
+        if meta.get("resolution") != CI_AMENDMENT_RESOLUTION:
+            continue
+        event_id = meta.get("intervention_id")
+        code = meta.get("condition_code")
+        if (isinstance(event_id, str) and event_id
+                and isinstance(code, str) and code):
+            attested.add((event_id, code))
+    if not attested:
+        return frozenset()
+
+    authorised: set[str] = set()
+    for key, record in interventions.items():
+        if not isinstance(record, dict):
+            continue
+        if record.get("type") != CI_AMENDMENT_INTERVENTION_TYPE:
+            continue
+        if record.get("status") != "RESOLVED":
+            continue
+        if record.get("resolution") != CI_AMENDMENT_RESOLUTION:
+            continue
+        # An amendment nobody signed is not an amendment. `resolve()`
+        # requires a non-blank `by`, so a record without one did not come
+        # through the lifecycle at all.
+        resolved_by = record.get("resolved_by")
+        if not isinstance(resolved_by, str) or not resolved_by.strip():
+            continue
+        # Scoped to ONE task. An amendment granted for another task's pull
+        # request does not travel.
+        if record.get("task_id") != task_id:
+            continue
+        record_id = record.get("id")
+        code = record.get("condition_code")
+        if not isinstance(record_id, str) or not record_id:
+            continue
+        if not isinstance(code, str) or not code:
+            continue
+        # The mapping key and the record must agree about which
+        # intervention this is, or the pair matched below proves nothing
+        # about the record that was actually read.
+        if key != record_id:
+            continue
+        if (record_id, code) not in attested:
+            continue
+        authorised.add(code)
+    return frozenset(authorised)
+
+
+def ci_paths_clear_for_merge(changed, head_sha,
+                             authorised_amendments=()) -> tuple[bool, str]:
+    """(True, "") or (False, one finite condition). PURE; reads nothing.
+
+    FAIL CLOSED, AND THE ORDER MATTERS. Every way of not knowing what this
+    pull request changes is answered before any way of knowing it, so a
+    missing list can never reach the "nothing protected was touched"
+    branch.
+    """
+    if not isinstance(head_sha, str) or not _CLAIM_SHA_RE.match(head_sha):
+        return False, MERGE_CI_PATHS_UNVERIFIABLE
+    if changed is None:
+        return False, MERGE_CI_PATHS_UNVERIFIABLE
+    if not getattr(changed, "complete", False):
+        return False, MERGE_CI_PATHS_UNVERIFIABLE
+    # THE LIST IS EVIDENCE ABOUT ONE COMMIT. A list computed for the head
+    # that was current when the tick began does not describe the head this
+    # merge is about, and a force-push between the two is the whole reason
+    # `MERGE_HEAD_CHANGED` exists further down.
+    if getattr(changed, "head_sha", None) != head_sha:
+        return False, MERGE_CI_PATHS_UNVERIFIABLE
+    paths = getattr(changed, "paths", None)
+    if not isinstance(paths, (list, tuple)):
+        return False, MERGE_CI_PATHS_UNVERIFIABLE
+    if not paths:
+        # `complete=True` with no paths cannot be produced by
+        # `_changed_paths_from_compare`, which refuses an empty array. A
+        # hand-built or future value could, and "complete and empty" must
+        # not become the one way to clear this gate without naming a file.
+        return False, MERGE_CI_PATHS_UNVERIFIABLE
+
+    touched, offending = ci_protected_paths.touches_protected(paths)
+    if not touched:
+        return True, ""
+
+    # A container this cannot read authorises nothing, rather than raising
+    # out of a predicate whose contract is to return a finite reason.
+    if not isinstance(authorised_amendments, (list, tuple, set, frozenset)):
+        return False, MERGE_CI_PATHS_PROTECTED
+    required = ci_amendment_condition_code(head_sha, offending)
+    if required in authorised_amendments:
+        return True, ""
+    return False, MERGE_CI_PATHS_PROTECTED
 
 
 @dataclass(frozen=True)

@@ -168,16 +168,22 @@ for forbidden in ("statuses", "checks", "administration", "actions"):
 # (file, 1-based line, substring that must be on it, who needs it)
 CALL_SITES = [
     ("apparatus/adapters/ci-result.js", 69, "check-runs", "gate: checks read (F1)"),
-    ("control/gh.py", 66, "statusCheckRollup", "supervisor: checks read + statuses read"),
-    ("control/gh.py", 71, "pr", "worker/supervisor: pull_requests read"),
-    ("control/gh.py", 77, "pr", "worker/supervisor: pull_requests read"),
-    ("control/gh.py", 171, "update-branch", "supervisor: pull_requests write (F2)"),
-    ("control/gh.py", 181, "ready", "supervisor: pull_requests write (F2)"),
-    ("control/gh.py", 185, "merge", "supervisor: pull_requests + contents write (F2)"),
-    ("control/gh.py", 190, "create", "worker: pull_requests write"),
-    ("control/gh.py", 195, "comment", "supervisor: issues write (UNVERIFIED)"),
-    ("control/gh.py", 200, "protection", "supervisor: administration read (F3)"),
-    ("control/gh.py", 206, "run", "supervisor: actions read (F4)"),
+    # RE-CITED 2026-10-02. Action 6b added per-role authentication and token
+    # renewal to the head of `control/gh.py`, which moved every call site
+    # below it by a fixed offset. The CALLS are unchanged — only their line
+    # numbers moved — and re-citing is exactly what this check exists to
+    # force: a permission may not drift away from the call it was derived
+    # from without someone looking at the call again.
+    ("control/gh.py", 440, "statusCheckRollup", "supervisor: checks read + statuses read"),
+    ("control/gh.py", 445, "pr", "worker/supervisor: pull_requests read"),
+    ("control/gh.py", 451, "pr", "worker/supervisor: pull_requests read"),
+    ("control/gh.py", 555, "update-branch", "supervisor: pull_requests write (F2)"),
+    ("control/gh.py", 565, "ready", "supervisor: pull_requests write (F2)"),
+    ("control/gh.py", 570, "merge", "supervisor: pull_requests + contents write (F2)"),
+    ("control/gh.py", 576, "create", "worker: pull_requests write"),
+    ("control/gh.py", 581, "comment", "supervisor: issues write (UNVERIFIED)"),
+    ("control/gh.py", 586, "protection", "supervisor: administration read (F3)"),
+    ("control/gh.py", 594, "run", "supervisor: actions read (F4)"),
     ("prompts/builder.md", 60, "gh pr create", "worker: pull_requests write"),
     ("prompts/reviewer.md", 15, "gh pr diff", "worker: pull_requests read"),
     ("prompts/reviewer.md", 16, "gh pr view", "worker: pull_requests read"),

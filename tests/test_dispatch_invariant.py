@@ -73,7 +73,8 @@ class InvariantCase(unittest.TestCase):
         with mock.patch.object(supervisor_mod, "ledger_mod"), \
                 mock.patch.object(supervisor_mod, "notify"), \
                 mock.patch.object(supervisor_mod, "telemetry"), \
-                mock.patch.object(supervisor_mod, "jev"):
+                mock.patch.object(supervisor_mod, "jev"), \
+                mock.patch.object(supervisor_mod, "evidence"):
             self.sup = supervisor_mod.Supervisor(self.cfg)
         self.events: list[str] = []
         self.sup.log = mock.Mock(side_effect=lambda e, **k: self.events.append(e))
@@ -113,7 +114,8 @@ class TestSecondReviewCycle(InvariantCase):
     def test_cycle_two_uses_its_own_branch_based_on_the_current_head(self):
         doc = doc_after_fix()
         doc["prs"][str(PR)]["pending_findings"] = None
-        with mock.patch.object(supervisor_mod.gh, "pr_diff_sha",
+        with mock.patch.object(supervisor_mod, "evidence"), \
+                mock.patch.object(supervisor_mod.gh, "pr_diff_sha",
                                return_value=HEAD_AFTER_FIX), \
                 mock.patch.object(supervisor_mod.routing, "material_diff_hash",
                                   return_value="hash-after-fix"), \
@@ -157,7 +159,8 @@ class TestObsoleteWorktreeState(InvariantCase):
             doc = doc_after_fix()
             doc["prs"][str(PR)]["review_cycles"] = cycle - 1
             doc["prs"][str(PR)]["pending_findings"] = None
-            with mock.patch.object(supervisor_mod.gh, "pr_diff_sha",
+            with mock.patch.object(supervisor_mod, "evidence"), \
+                    mock.patch.object(supervisor_mod.gh, "pr_diff_sha",
                                    return_value=HEAD_AFTER_FIX), \
                     mock.patch.object(supervisor_mod.routing, "material_diff_hash",
                                       return_value="h"), \

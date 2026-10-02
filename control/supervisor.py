@@ -26,6 +26,7 @@ from . import (
     accessibility_registry,
     accessibility_services,
     budget,
+    ci_protected_paths,
     clock,
     config,
     debt,
@@ -4667,6 +4668,77 @@ class Supervisor:
                                    "attest every evidence leg at this head",
                          "condition": why,
                          "head": pr.get("headRefOid")})
+            return
+
+        # C-23a. THE APPROVED TRUSTED-CI RULE, enforced here.
+        #
+        # "Ordinary product PRs cannot change trusted CI or its validation
+        # machinery; those changes require a separately reviewed apparatus
+        # amendment."
+        #
+        # AT THE CALL SITE, NOT INSIDE `evaluate_merge`, AND FOR THE SAME
+        # REASON C-04c's ledger check is here: the gate is pure over its
+        # arguments, and both the changed-file list and the amendment
+        # evidence are reads. AFTER the ledger check, because that one is a
+        # local file and this one is a network round trip - a pull request
+        # whose evidence chain does not hold should not cost a GitHub call.
+        #
+        # The head is `pr["headRefOid"]` - GitHub's observation, taken under
+        # this transaction's lock - never `record["reviewed_head"]`, which a
+        # worker can write. The same choice, for the same reason, as above.
+        head = pr.get("headRefOid")
+        changed = routing.changed_paths_for_head(repo, pr.get("baseRefName"), head)
+        amendments = routing.authorised_ci_amendments(
+            doc.get("interventions"),
+            self.ledger.inspect(
+                task_id=task["id"],
+                event_types=(routing.CI_AMENDMENT_RESOLVED_EVENT,)),
+            task["id"])
+        paths_clear, paths_condition = routing.ci_paths_clear_for_merge(
+            changed, head, amendments)
+        if not paths_clear:
+            offending = ()
+            if paths_condition == routing.MERGE_CI_PATHS_PROTECTED:
+                _, offending = ci_protected_paths.touches_protected(changed.paths)
+                # The remedy needs an intervention record to exist before a
+                # human can resolve one - nothing else in this process mints
+                # them. `request_intervention` dedups on
+                # (scope, task_id, condition_code), so a pull request that
+                # sits here across many ticks raises exactly one, and a push
+                # that changes the offending set raises a new one because the
+                # code carries the head and the paths.
+                self.request_intervention(
+                    doc,
+                    type_=routing.CI_AMENDMENT_INTERVENTION_TYPE,
+                    condition_code=routing.ci_amendment_condition_code(
+                        head, offending),
+                    reason=(f"{len(offending)} protected path(s) changed at "
+                            f"head {head[:12]} without an apparatus amendment"),
+                    task_id=task["id"], pr_id=number,
+                    title=f"{task['id']}: apparatus amendment required",
+                    body=(ci_protected_paths.amendment_required_reason(
+                              changed.paths)
+                          + f"\n\nPR #{number}, head {head}."),
+                )
+            # NOT an approval invalidation. Which files a pull request
+            # touches says nothing about whether its review was sound, and
+            # burning a review cycle would punish the task for a governance
+            # condition a human has to clear either way.
+            self.log("MERGE_BLOCKED", task_id=task["id"], pr_id=number,
+                     outcome="BLOCKED", activity_class="ORCHESTRATION",
+                     metadata_redacted={
+                         "reason": ("this pull request changes paths the "
+                                    "trusted CI workflow executes, with no "
+                                    "apparatus amendment covering this head"
+                                    if paths_condition
+                                    == routing.MERGE_CI_PATHS_PROTECTED else
+                                    "the set of files this pull request "
+                                    "changes could not be established for "
+                                    "this head"),
+                         "condition": paths_condition,
+                         "detail": changed.error,
+                         "offending_paths": list(offending),
+                         "head": head})
             return
 
         current_hash = routing.material_diff_hash(repo, number)

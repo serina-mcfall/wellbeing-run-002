@@ -365,6 +365,100 @@ def decision_is_usable(decision) -> bool:
     return trusted is None or _is_sha(trusted)
 
 
+# ------------------------------------- where the export is, on a real host
+#
+# Approval actions 7, 7b and 7c create the export. THIS reads where it was
+# put and which commit it must be, under the names
+# `experiment/github-app/env-var-names.md` §2 already gives them:
+# `RUN002_TRUSTED_GATE_PATH` and `RUN002_TRUSTED_GATE_SHA`. Names only; no
+# credential is read, and nothing here is a credential.
+#
+# IT RESOLVES, IT DOES NOT DEFAULT. Every value is required. If a name is
+# unset the answer is a refusal carrying that name, not a guess at "the
+# usual place" — which is the property `invoke_gate` is built around and
+# this must not quietly undo one layer up.
+EXPORT_PATH_ENV = "RUN002_TRUSTED_GATE_PATH"
+EXPORT_SHA_ENV = "RUN002_TRUSTED_GATE_SHA"
+
+DEPLOY_OK = "DEPLOYMENT_OK"
+DEPLOY_EXPORT_UNSET = "DEPLOYMENT_EXPORT_PATH_UNSET"
+DEPLOY_PIN_UNSET = "DEPLOYMENT_PIN_UNSET"
+DEPLOY_ISOLATION_UNREADABLE = "DEPLOYMENT_ISOLATION_UNREADABLE"
+DEPLOY_WORKSPACE_MISMATCH = "DEPLOYMENT_WORKSPACE_MISMATCH"
+
+DEPLOY_OUTCOMES = (DEPLOY_OK, DEPLOY_EXPORT_UNSET, DEPLOY_PIN_UNSET,
+                   DEPLOY_ISOLATION_UNREADABLE, DEPLOY_WORKSPACE_MISMATCH)
+
+ISOLATION_REL = ("config", "isolation.json")
+
+
+@dataclass(frozen=True)
+class Deployment:
+    """The three places one gate invocation needs, resolved from the host.
+
+    Exactly the three required arguments of `invoke_gate`, and nothing
+    else. It holds no credential and no switch: what may be published is
+    not this object's business.
+    """
+
+    export_root: str
+    expected_revision: str
+    live_repo_root: str
+
+
+def deployment_from_env(environ=None, repo_root=None) -> tuple:
+    """(Deployment, DEPLOYMENT_OK) or (None, reason). NEVER RAISES.
+
+    `live_repo_root` is NOT read from the environment. It is the checkout
+    this module is running inside — the only thing a control-plane process
+    can honestly claim is "the live checkout" — and it is then PROVED
+    against `config/isolation.json`'s `workspace`.
+
+    WHY THAT COMPARISON IS MADE HERE AND NOWHERE ELSE. The wrapper
+    `git-head.js::resolveRun002TrustedHeadSha` makes the same comparison
+    against ITS OWN `__dirname`, which is why THE INVOKER TRAP above
+    forbids the gate program from using it: from the export the two can
+    never be equal and every pull request denies forever. The gate program
+    therefore calls the low-level `resolveTrustedHeadSha(identity, {
+    repoRoot })` instead — correct, but it drops the invariant the wrapper
+    was carrying.
+
+    So the invariant is re-made at the one location where it is both true
+    and checkable: against the LIVE checkout, before the gate is started.
+    A control plane running from a tree `isolation.json` does not name is
+    reading a worktree register and a runtime directory that belong to a
+    different workspace, and the gate would resolve its facts out of the
+    wrong one without saying so.
+    """
+    env = os.environ if environ is None else environ
+
+    export_root = (env.get(EXPORT_PATH_ENV) or "").strip()
+    if not export_root or not Path(export_root).is_absolute():
+        return None, DEPLOY_EXPORT_UNSET
+
+    expected_revision = (env.get(EXPORT_SHA_ENV) or "").strip()
+    if not _is_sha(expected_revision):
+        return None, DEPLOY_PIN_UNSET
+
+    root = Path(config.REPO_ROOT if repo_root is None else repo_root)
+    try:
+        live = root.resolve()
+        isolation = json.loads(
+            live.joinpath(*ISOLATION_REL).read_text(encoding="utf-8"))
+        declared = isolation["workspace"]
+        declared_path = Path(declared).resolve()
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError,
+            ValueError, KeyError, AttributeError):
+        return None, DEPLOY_ISOLATION_UNREADABLE
+
+    if declared_path != live:
+        return None, DEPLOY_WORKSPACE_MISMATCH
+
+    return Deployment(export_root=str(Path(export_root).resolve()),
+                      expected_revision=expected_revision,
+                      live_repo_root=str(live)), DEPLOY_OK
+
+
 def invoke_gate(request, *, export_root, expected_revision, live_repo_root,
                 runner=None, timeout: int = TIMEOUT) -> GateRun:
     """Run the gate in `export_root` and return its decision. NEVER RAISES.

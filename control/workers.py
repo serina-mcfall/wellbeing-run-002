@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import config, gh, hostcheck, proc, redact
+from . import config, gh, hostcheck, proc, redact, worker_git
 
 HEARTBEAT_STALE_SECONDS = 90
 
@@ -226,6 +226,113 @@ def acquire_worktree(name: str, branch: str, base: str, session: str, prompt_pat
         return path, ""
     return None, (f"no worktree for branch {branch} from base {base} "
                   f"(create ok={created.ok}): {created.stderr[:200]}")
+
+
+# --------------------------------------------------------------- C-22
+#
+# THE CLONE PATH. `acquire_worktree` above gives a worker a LINKED
+# WORKTREE, whose `.git` is a file pointing into `<main>/.git`. Every
+# commit it makes therefore writes the Supervisor's repository - objects
+# to the shared store, the branch ref into `refs/heads/run-002/` - and
+# `tests/test_c22_worker_git_writes.py` measured that this cannot be
+# withdrawn without stopping the worker from committing at all.
+#
+# These four functions are the replacement: the worker gets its own
+# clone, outside the checkout, and needs no write anywhere under
+# `<main>/.git`. See `control/worker_git.py` for why, and for what the
+# arrangement does NOT buy under a single shared `run002-wrk` uid.
+#
+# THE BRANCH-IN-ONE-WORKTREE INVARIANT DOES NOT SURVIVE, AND DOES NOT
+# NEED TO. `acquire_worktree` exists largely to enforce it - git allows a
+# branch in exactly one worktree, so a Fixer had to reuse the Builder's.
+# Separate clones are separate repositories, so two of them may hold the
+# same branch name. A Fixer instead starts from the Builder's tip, which
+# the Supervisor has already fetched, via `start_ref`.
+
+
+def worker_checkout_path(name: str, repo_root: Path | None = None) -> Path | None:
+    """This worker's clone, if it exists. The clone analogue of
+    `worktree_path`, and unlike it does not shell out to workmux: the path
+    is derived, so a worker whose tmux window died is still locatable."""
+    path = worker_git.clone_path(name, repo_root)
+    return path if path.exists() else None
+
+
+def ensure_window(name: str, session: str, cwd: Path) -> gh.Result:
+    """One tmux window whose working directory is this worker's clone.
+
+    `workmux add` cannot be used here: it creates a git worktree, which is
+    the thing being replaced. The window is created directly, and
+    `pane_for_worktree` still finds it because that match is on the pane's
+    own path rather than on the window name.
+    """
+    if pane_for_worktree(cwd) is not None:
+        return gh.Result(True, "window already open", "", 0)
+    return tmux(["new-window", "-d", "-t", session, "-c", str(cwd), "-n", name])
+
+
+def create_worker_clone(name: str, branch: str, *, start_ref: str,
+                        origin_url: str, session: str,
+                        repo_root: Path | None = None,
+                        runner=None) -> tuple[Path | None, str]:
+    """Obtain a worker's own clone for one role dispatch, or say why not.
+
+    Same contract as `acquire_worktree`: every caller gets a path or a
+    reason, never neither. `origin_url` and `start_ref` are required and
+    undefaulted for the reasons `worker_git.prepare_clone` documents - the
+    first because a local clone's default `origin` is the Supervisor's own
+    repository, the second because Builder and Fixer start from different
+    commits and a mode flag would hide which.
+
+    A clone that already exists is REUSED rather than rebuilt. A Fixer
+    re-dispatched onto the same branch must find its own earlier commits,
+    and `prepare_clone` refuses an existing destination precisely so that
+    decision is made here instead of by a silent overwrite.
+
+    The tmux window is best-effort: `start_job` already falls back to a
+    detached process when no pane matches, so a window that could not be
+    created costs the operator a view, not a worker.
+    """
+    root = Path(repo_root) if repo_root is not None else config.REPO_ROOT
+    existing = worker_checkout_path(name, repo_root)
+    if existing is not None:
+        ensure_window(name, session, existing)
+        return existing, ""
+
+    result = worker_git.prepare_clone(
+        root, worker_git.clone_path(name, repo_root), branch=branch,
+        start_ref=start_ref, origin_url=origin_url, repo_root=repo_root,
+        runner=runner)
+    if not result.ok or result.path is None:
+        return None, (f"no clone for branch {branch} from {start_ref}: "
+                      f"{result.outcome}")
+    ensure_window(name, session, result.path)
+    return result.path, ""
+
+
+def remove_worker_clone(name: str, repo_root: Path | None = None) -> tuple[bool, str]:
+    """Delete one worker's clone and close its window.
+
+    THE PATH IS RE-DERIVED AND RE-CHECKED BEFORE ANYTHING IS DELETED.
+    This is the one function here that removes a tree recursively, and a
+    worker name is a string that reaches it from a job record; a name of
+    `..` or an absolute path must not be able to steer the deletion out of
+    the clone root. Refused by containment, not by trusting the caller.
+    """
+    root = worker_git.worker_clone_root(repo_root).resolve()
+    try:
+        path = worker_git.clone_path(name, repo_root).resolve()
+    except (OSError, ValueError):
+        return False, "unresolvable clone path"
+    if path.parent != root or path == root:
+        return False, f"{path} is not directly inside {root}"
+    if not path.exists():
+        return True, ""
+    target = pane_for_worktree(path)
+    if target:
+        tmux(["kill-window", "-t", target])
+    shutil.rmtree(path, ignore_errors=True)
+    return (not path.exists()), ("" if not path.exists() else "clone remains")
 
 
 def managed_worktree_root(repo_root: Path | None = None) -> Path:

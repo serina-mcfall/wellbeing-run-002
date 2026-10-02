@@ -129,6 +129,13 @@ PYTHON_CONDITIONS = frozenset({
     # The sixth provenance condition, matched after C-04c recorded it as the
     # one that could not be. See SHARED and routing._review_worker_attests.
     "LEDGER_ATTESTATION_WORKER_MISMATCH",
+    # C-23a. Enforced in supervisor.attempt_merge immediately BEFORE
+    # evaluate_merge, for the same reason the LEDGER_* codes are: the gate
+    # is pure over its arguments, and both the changed-file list and the
+    # amendment evidence are reads. Listed here because this inventory is
+    # about what the Python merge PATH can refuse.
+    "CI_PATHS_UNVERIFIABLE",
+    "CI_TRUST_PATHS_MODIFIED",
 })
 
 JS_CONDITIONS = frozenset({
@@ -276,6 +283,28 @@ PYTHON_ONLY = {
         "A value GitHub has not used yet. live-gate.js reaches the same "
         "denial through requiring CLEAN exactly.",
     "MERGE_OK": "The allow verdict, not a denial.",
+    # C-23a. Both unported, and the reason is the same one: live-gate.js
+    # judges a SUBMITTED EVIDENCE PACKAGE. It is handed the package's own
+    # claims; it never enumerates the files a pull request changes, and it
+    # has no access to doc["interventions"] - the durable control-plane
+    # state where a resolved apparatus authorisation lives. A package-level
+    # checker has nothing to read either fact from.
+    #
+    # This is a REAL asymmetry, not a decision that the JavaScript gate
+    # does not need the rule. A merge driven by live-gate.js alone would
+    # not enforce the protected-path rule at all. It is tolerable only
+    # because evaluate_merge's call site is THE SOLE MERGE AUTHORITY -
+    # live-gate.js authorises, the Supervisor executes - so no merge
+    # reaches GitHub without passing through the Python path above.
+    "CI_PATHS_UNVERIFIABLE":
+        "Whether the changed-file list could be established for this head. "
+        "Reached through a GitHub compare call the Supervisor makes; a "
+        "submitted package carries no such list and no way to obtain one.",
+    "CI_TRUST_PATHS_MODIFIED":
+        "Whether the pull request reaches into a trusted-CI path without a "
+        "resolved HUMAN_APPARATUS_AUTHORISATION covering this head and "
+        "these paths. Both halves - the file list and the intervention "
+        "record - live outside the evidence package.",
 }
 
 # Policy ONLY the JavaScript gate has, with why it is NOT ported.

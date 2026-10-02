@@ -1,9 +1,19 @@
-"""The trusted-CI protected path set. A PROPOSED Run 002 amendment.
+"""The trusted-CI protected path set. APPROVED and IN FORCE (C-23a).
 
-NOT APPROVED, NOT WIRED, AND NOTHING CALLS THIS. It is the smallest rule
-that would close the one CI gap C-23 could not close locally, written so
-the operator can approve or reject a concrete thing rather than a sketch.
-`tests/test_c23_ci_protected_paths.py` pins the unwired status.
+The operator's rule, verbatim:
+
+    "Ordinary product PRs cannot change trusted CI or its validation
+     machinery; those changes require a separately reviewed apparatus
+     amendment."
+
+This module is the vocabulary - which paths are protected, and why each
+one is. The WIRING is `routing.ci_paths_clear_for_merge`, called from
+`supervisor.attempt_merge` immediately before `evaluate_merge`; the
+amendment escape hatch is `routing.authorised_ci_amendments`.
+`tests/test_c23_ci_protected_paths.py` pins that it IS wired (it used to
+pin the opposite, while the rule was still a proposal) and
+`tests/test_c23_merge_path_protection.py` proves the merge path reaches
+it.
 
 THE GAP IT ADDRESSES, AND WHY APP PINNING IS NOT AN ANSWER TO IT.
 C-23 closed two of three ways a product pull request could satisfy the
@@ -35,6 +45,14 @@ reviewed separately from the product task that wants it - the same shape
 as the governed decisions already recorded in the contradiction audit. The
 rule is "a product task may not change the thing that judges it in the
 same breath", not "this may never change".
+
+That amendment is a RESOLVED `HUMAN_APPARATUS_AUTHORISATION` intervention
+bound to one head and one set of paths, corroborated by the append-only
+ledger. It is NOT non-self-asserting: both records are written by the UID
+that runs the workers and neither is hash-chained, so a sufficiently
+determined worker can author its own authorisation. That is C-22, C-22 is
+open, and `routing.authorised_ci_amendments` states the limit where the
+next reader will meet it.
 """
 
 from __future__ import annotations

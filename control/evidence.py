@@ -56,17 +56,27 @@ def same_commit(a: str | None, b: str | None) -> bool:
     return len(shorter) >= 7 and longer.startswith(shorter)
 
 
-def collect(repo: str, head_sha: str, ledger) -> list[EvidenceItem]:
-    """Gather independent evidence for exactly this commit."""
+def collect(repo: str, head_sha: str, ledger, runner=None) -> list[EvidenceItem]:
+    """Gather independent evidence for exactly this commit.
+
+    `runner` is the GitHub edge, injectable. It defaults to `gh.run` so
+    every existing caller is unchanged, and exists because without it this
+    function SHELLS OUT TO `gh` FROM A UNIT TEST. Measured 2026-10-02 by
+    making a real `gh` invocation raise and running the suite: three tests
+    reached `gh api repos/<the production repo>/commits/<sha>/check-runs`.
+    On a host with `gh` authenticated that is a live GitHub API call made
+    by `unittest`, against the real Run 002 repository.
+    """
     items: list[EvidenceItem] = []
-    items.extend(_ci_for_sha(repo, head_sha))
+    items.extend(_ci_for_sha(repo, head_sha, runner))
     items.extend(_human_verification(head_sha, ledger))
     return items
 
 
-def _ci_for_sha(repo: str, head_sha: str) -> list[EvidenceItem]:
+def _ci_for_sha(repo: str, head_sha: str, runner=None) -> list[EvidenceItem]:
     """Check runs reported by GitHub for this exact commit, not for the PR."""
-    result = gh.run(["gh", "api", f"repos/{repo}/commits/{head_sha}/check-runs",
+    invoke = gh.run if runner is None else runner
+    result = invoke(["gh", "api", f"repos/{repo}/commits/{head_sha}/check-runs",
                      "--jq", ".check_runs[] | \"\\(.name)|\\(.status)|\\(.conclusion)|"
                              "\\(.head_sha)\""])
     if not result.ok:

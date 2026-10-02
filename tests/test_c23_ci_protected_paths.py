@@ -6,8 +6,11 @@ something no prefix covers. That is the same discipline the accessibility
 requirement registry uses: derivation checked, not asserted, so drift
 fails the build instead of being discovered later.
 
-PENDING APPROVAL AND NOT WIRED. `NotYetWiredCase` pins that. The rule is a
-proposal for the operator, not a change to the merge gate.
+APPROVED AND WIRED (C-23a). `ItIsWiredCase` pins that - it used to be
+`NotYetWiredCase` and pinned the opposite, while the rule was still a
+proposal. What the merge path does with the rule is proved in
+`tests/test_c23_merge_path_protection.py`; this file stays about the
+vocabulary and its derivation.
 """
 
 from __future__ import annotations
@@ -117,21 +120,48 @@ class WhatItPermitsCase(unittest.TestCase):
             ["apparatus-notes/x.md", "controller/y.py", "testsuite/z.py"])[0])
 
 
-class NotYetWiredCase(unittest.TestCase):
-    """The honest status: proposed, not in force."""
+class ItIsWiredCase(unittest.TestCase):
+    """The honest status, UPDATED: approved by the operator and in force.
 
-    def test_no_merge_path_consults_this_rule(self):
-        callers = []
+    This class used to be `NotYetWiredCase` and asserted the exact
+    opposite - that NO control module consulted the rule - because the rule
+    was a proposal and wiring it was a governance change nobody had made.
+    The operator has now approved it:
+
+        "Ordinary product PRs cannot change trusted CI or its validation
+         machinery; those changes require a separately reviewed apparatus
+         amendment."
+
+    So the pin is inverted rather than deleted. A rule that silently stops
+    being wired is exactly as dangerous as one that is wired before it is
+    approved, and this is the test that would notice either.
+    """
+
+    def test_the_merge_path_consults_this_rule(self):
+        callers = set()
         for path in sorted((ROOT / "control").rglob("*.py")):
             if path.name == "ci_protected_paths.py":
                 continue
-            text = path.read_text(encoding="utf-8")
-            if "ci_protected_paths" in text:
-                callers.append(path.name)
-        self.assertEqual(callers, [],
-                         f"{callers} consults the protected-path rule - it "
-                         "is a PROPOSAL pending approval, and wiring it is "
-                         "a governance change, not an implementation one")
+            if "ci_protected_paths" in path.read_text(encoding="utf-8"):
+                callers.add(path.name)
+        self.assertIn("routing.py", callers,
+                      "the merge gate module no longer consults the "
+                      "protected-path rule")
+        self.assertIn("supervisor.py", callers,
+                      "supervisor.attempt_merge - the sole merge authority's "
+                      "call site - no longer consults the protected-path rule")
+
+    def test_the_refusal_is_reached_from_attempt_merge_before_the_gate(self):
+        """Ordering, read from the source. The protected-path refusal must
+        sit BEFORE `evaluate_merge`, or a pull request could be merged by a
+        gate that never saw the file list."""
+        text = (ROOT / "control" / "supervisor.py").read_text(encoding="utf-8")
+        body = text[text.index("def attempt_merge("):]
+        body = body[:body.index("def complete_task(")]
+        self.assertIn("ci_paths_clear_for_merge", body)
+        self.assertLess(body.index("ci_paths_clear_for_merge"),
+                        body.index("routing.evaluate_merge("),
+                        "the protected-path check runs after the merge gate")
 
 
 if __name__ == "__main__":

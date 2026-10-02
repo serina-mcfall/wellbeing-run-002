@@ -62,6 +62,9 @@ def _open_pr(number: int, branch: str) -> dict:
         "state": "OPEN",
         "isDraft": False,
         "headRefName": branch,
+        # In gh.PR_FIELDS, so a real observation always carries it.
+        # C-23a's changed-path fetch compares `{baseRefName}...{headRefOid}`.
+        "baseRefName": "main",
         # evaluate_merge compares this against record["reviewed_head"], which
         # every record fixture below sets to the same value.
         "headRefOid": REVIEWED_HEAD,
@@ -171,10 +174,19 @@ class MergeBoundaryCase(unittest.TestCase):
     def pr_numbers(self, task_ids):
         return [100 + i for i, _ in enumerate(task_ids)]
 
+    # C-23a: the ordinary product change set. `complete=True`, bound to the
+    # head the fixture merges, and touching no protected prefix - the shape
+    # a real compare call returns for a pull request that only edits the
+    # product. Overridable through run_tick(changed_paths=...) so a test can
+    # drive the protected and the unreadable cases.
+    PRODUCT_CHANGED_PATHS = routing.ChangedPaths(
+        REVIEWED_HEAD, ("src/app/page.tsx", "package.json"), True, None)
+
     def run_tick(self, task_ids=("TASK-001",), *, merge_ok=True,
                  fail_in=None, pr_view=mock.sentinel.default,
                  merge_side_effect=None, between_transactions=None,
-                 open_prs=mock.sentinel.default):
+                 open_prs=mock.sentinel.default,
+                 changed_paths=mock.sentinel.default):
         """Drive one real tick. `fail_in` names a Supervisor method patched to
         raise InjectedFailure. `between_transactions` runs after T1's block
         closes, to mutate durable state before T2 revalidates."""
@@ -203,6 +215,14 @@ class MergeBoundaryCase(unittest.TestCase):
             mock.patch.object(supervisor_mod.gh, "pr_view", self.pr_view),
             mock.patch.object(supervisor_mod.routing, "material_diff_hash",
                               return_value=DIFF_HASH),
+            # C-23a's outbound GitHub edge, stubbed like every other one.
+            # The VALUE is stubbed; `routing.ci_paths_clear_for_merge` and
+            # the whole refusal branch in attempt_merge run for real.
+            mock.patch.object(
+                supervisor_mod.routing, "changed_paths_for_head",
+                return_value=(self.PRODUCT_CHANGED_PATHS
+                              if changed_paths is mock.sentinel.default
+                              else changed_paths)),
             mock.patch.object(supervisor_mod.routing, "evaluate_merge", self.evaluate),
             mock.patch.object(supervisor_mod.workers, "close_worker"),
             mock.patch.object(supervisor_mod.workers, "read_status", return_value=None),
@@ -775,6 +795,8 @@ class TestMergeOriginContract(InvariantDetectionCase):
                                   return_value=_open_pr(100, "task/task-001")), \
                 mock.patch.object(supervisor_mod.routing, "material_diff_hash",
                                   return_value=DIFF_HASH), \
+                mock.patch.object(supervisor_mod.routing, "changed_paths_for_head",
+                                  return_value=self.PRODUCT_CHANGED_PATHS), \
                 mock.patch.object(supervisor_mod.workers, "close_worker"):
             self.sup.execute_merges([("TASK-001", 100)])
 

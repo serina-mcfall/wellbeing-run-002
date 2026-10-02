@@ -423,12 +423,26 @@ class SupervisorCase(unittest.TestCase):
         # same reason. The check itself is proved in
         # tests/test_c04c_merge_attestation.py, including that removing it lets
         # a forged record merge.
+        #
+        # C-23a adds the trusted-CI protected-path refusal in front of the
+        # gate for the same reason again, and it reads the changed-file list
+        # from GitHub. BOTH halves are stubbed here: the fetch, because an
+        # unstubbed one would shell out to `gh` during a unit test, and the
+        # predicate, because this file does not test the merge gate. The
+        # check itself - including that it refuses an apparatus change and
+        # an unreadable list - is proved in
+        # tests/test_c23_merge_path_protection.py.
         with mock.patch.object(supervisor_mod.providers, "may", return_value=True), \
                 mock.patch.object(supervisor_mod.routing, "material_diff_hash",
                                   return_value="h"), \
                 mock.patch.object(supervisor_mod.routing, "evaluate_merge",
                                   return_value=routing.MergeDecision(allowed, "reason")), \
                 mock.patch.object(supervisor_mod.routing, "ledger_attests_merge",
+                                  return_value=(True, "")), \
+                mock.patch.object(supervisor_mod.routing, "changed_paths_for_head",
+                                  return_value=routing.ChangedPaths(
+                                      None, (), False, None)), \
+                mock.patch.object(supervisor_mod.routing, "ci_paths_clear_for_merge",
                                   return_value=(True, "")), \
                 mock.patch.object(supervisor_mod.gh, "merge",
                                   return_value=types.SimpleNamespace(

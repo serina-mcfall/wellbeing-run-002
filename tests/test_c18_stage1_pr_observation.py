@@ -196,6 +196,14 @@ class ObservationHarness(unittest.TestCase):
                               return_value=mock.Mock(ok=True, stderr="", stdout="")),
             mock.patch.object(supervisor_mod.routing, "material_diff_hash",
                               return_value=DIFF_HASH),
+            # C-23a's changed-file fetch: another outbound GitHub edge in
+            # attempt_merge, stubbed here like the rest. Unstubbed it would
+            # shell out to `gh` from a unit test. The list is complete,
+            # bound to the head these fixtures carry, and touches nothing
+            # protected, so the real predicate clears it.
+            mock.patch.object(supervisor_mod.routing, "changed_paths_for_head",
+                              return_value=routing.ChangedPaths(
+                                  HEAD_SHA, ("src/app/page.tsx",), True, None)),
             mock.patch.object(supervisor_mod.workers, "close_worker"),
             mock.patch.object(supervisor_mod.workers, "read_status", return_value=None),
             mock.patch.object(supervisor_mod.config, "HEARTBEAT_PATH",
